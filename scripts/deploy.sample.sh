@@ -6,7 +6,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 BRANCH="${DEPLOY_BRANCH:-main}"
-LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/vibepilot/sample-deploy.log}"
+LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/mini_deploy/sample-deploy.log}"
 HEALTH_URL="${HEALTH_URL:-}"
 
 mkdir -p "$(dirname "$LOG_FILE")"

@@ -712,7 +712,7 @@ function applyTemplateDefaults(force = false) {
     script.value = `/srv/${key}/deploy/deploy.sh`;
   }
   if (force || !log.value || log.value.includes('example-deploy')) {
-    log.value = `/var/log/vibepilot/${key}-deploy.log`;
+    log.value = `/var/log/mini_deploy/${key}-deploy.log`;
   }
   if ((force || !health.value) && template !== 'custom') {
     health.value = health.value || `https://${key}.example.com/health`;

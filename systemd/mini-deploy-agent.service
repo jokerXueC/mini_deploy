@@ -1,14 +1,14 @@
 [Unit]
-Description=VibePilot lightweight deploy agent
+Description=mini_deploy lightweight deploy agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/vibepilot-deploy
-EnvironmentFile=/etc/vibepilot-deploy-agent.env
-ExecStart=/usr/bin/python3 /opt/vibepilot-deploy/agent.py
+WorkingDirectory=/opt/mini_deploy
+EnvironmentFile=/etc/mini-deploy-agent.env
+ExecStart=/usr/bin/python3 /opt/mini_deploy/agent.py
 Restart=always
 RestartSec=3
 

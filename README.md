@@ -1,8 +1,8 @@
-# VibePilot Deploy
+# mini_deploy
 
 Lightweight self-hosted deploy panel for small servers.
 
-VibePilot Deploy receives Git webhooks, runs your project deploy script, and shows deploy history, logs, server status, and Docker status in a simple web panel.
+mini_deploy receives Git webhooks, runs your project deploy script, and shows deploy history, logs, server status, and Docker status in a simple web panel.
 
 中文快速上手：[docs/QUICKSTART.zh-CN.md](docs/QUICKSTART.zh-CN.md)
 
@@ -18,7 +18,7 @@ VibePilot Deploy receives Git webhooks, runs your project deploy script, and sho
 
 ## What It Does Not Do
 
-VibePilot does not automatically understand every application.
+mini_deploy does not automatically understand every application.
 
 For each business project, you still need to confirm:
 
@@ -41,8 +41,8 @@ The panel can generate a starter `deploy.sh`, but you should review it before en
 ## Install
 
 ```bash
-git clone https://gitee.com/XC1960/mini_deploy.git /root/vibepilot-deploy
-cd /root/vibepilot-deploy
+git clone https://gitee.com/XC1960/mini_deploy.git /root/mini_deploy
+cd /root/mini_deploy
 bash install.sh
 ```
 
@@ -95,13 +95,13 @@ restart service
 health check
 ```
 
-If your service is managed by systemd, the service file is still part of your business project setup. VibePilot can provide examples and checks, but it cannot guarantee a correct service file for every possible application.
+If your service is managed by systemd, the service file is still part of your business project setup. mini_deploy can provide examples and checks, but it cannot guarantee a correct service file for every possible application.
 
 ## Common Commands
 
 ```bash
-systemctl status vibepilot-deploy-agent
-journalctl -u vibepilot-deploy-agent -f
+systemctl status mini-deploy-agent
+journalctl -u mini-deploy-agent -f
 curl http://127.0.0.1:9010/health
 ```
 

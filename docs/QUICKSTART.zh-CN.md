@@ -1,4 +1,4 @@
-# VibePilot Deploy 快速上手
+# mini_deploy 快速上手
 
 这是一套轻量部署面板。它负责接收 WebHook、执行你的部署脚本、展示日志和部署状态。
 
@@ -25,8 +25,8 @@ dnf install -y git
 ## 安装面板
 
 ```bash
-git clone https://gitee.com/XC1960/mini_deploy.git /root/vibepilot-deploy
-cd /root/vibepilot-deploy
+git clone https://gitee.com/XC1960/mini_deploy.git /root/mini_deploy
+cd /root/mini_deploy
 bash install.sh
 ```
 
@@ -61,13 +61,13 @@ http://你的域名/deploy/ui
 设置后建议重启一次：
 
 ```bash
-systemctl restart vibepilot-deploy-agent
+systemctl restart mini-deploy-agent
 ```
 
 检查状态：
 
 ```bash
-systemctl status vibepilot-deploy-agent
+systemctl status mini-deploy-agent
 curl http://127.0.0.1:9010/health
 ```
 
@@ -116,7 +116,7 @@ systemctl restart fastapi-demo
 curl -fsS http://127.0.0.1:8001/health
 ```
 
-但是 `fastapi-demo.service` 这种服务文件仍然属于你的业务项目配置。VibePilot 可以给模板和检查，但不能保证自动生成适合所有项目的 service。
+但是 `fastapi-demo.service` 这种服务文件仍然属于你的业务项目配置。mini_deploy 可以给模板和检查，但不能保证自动生成适合所有项目的 service。
 
 ## 配置 WebHook
 
@@ -127,15 +127,15 @@ curl -fsS http://127.0.0.1:8001/health
 
 把它们填到 Gitee / GitHub / GitLab 的 WebHook 设置里，触发事件选择 Push。
 
-之后你每次 push 到配置分支，VibePilot 就会执行该项目的 `deploy.sh`。
+之后你每次 push 到配置分支，mini_deploy 就会执行该项目的 `deploy.sh`。
 
 ## 常用排查
 
 Agent 日志：
 
 ```bash
-journalctl -u vibepilot-deploy-agent -f
-tail -n 100 /var/log/vibepilot/vibepilot-deploy-agent.log
+journalctl -u mini-deploy-agent -f
+tail -n 100 /var/log/mini_deploy/mini-deploy-agent.log
 ```
 
 项目部署日志在面板里可以直接看，也可以看你配置的日志文件。

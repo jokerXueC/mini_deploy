@@ -1,4 +1,4 @@
-# VibePilot Deploy 部署流程参考
+# mini_deploy 部署流程参考
 
 这是一份参考文档，不是必须从头读完的手册。
 
@@ -12,11 +12,11 @@
 - 一个可以打开的部署面板：`https://你的域名/deploy/ui`。
 - 一个后端项目目录，例如 `/srv/python-api`、`/srv/go-api`、`/srv/java-api`。
 - 一个部署脚本，例如 `/srv/python-api/deploy/deploy.sh`。
-- 一个 WebHook：你每次 `git push` 后，代码平台通知 VibePilot，VibePilot 自动执行部署脚本。
+- 一个 WebHook：你每次 `git push` 后，代码平台通知 mini_deploy，mini_deploy 自动执行部署脚本。
 
 需要先说清楚边界：
 
-VibePilot 不会自动理解你的业务代码。它可以生成 `deploy.sh` 初版和检查项，但项目实际怎么启动、怎么重启、哪个健康检查算成功，仍然需要你按自己的项目确认。
+mini_deploy 不会自动理解你的业务代码。它可以生成 `deploy.sh` 初版和检查项，但项目实际怎么启动、怎么重启、哪个健康检查算成功，仍然需要你按自己的项目确认。
 
 ## 0. 先看懂整套东西在做什么
 
@@ -25,7 +25,7 @@ flowchart TD
     A[你在本地写代码] --> B[git push 到 Gitee/GitHub/GitLab]
     B --> C[代码平台触发 WebHook]
     C --> D[Nginx 收到 /deploy/webhook]
-    D --> E[VibePilot Deploy Agent 校验 Token 和分支]
+    D --> E[mini_deploy Agent 校验 Token 和分支]
     E --> F{校验通过?}
     F -- 否 --> G[拒绝请求并写日志]
     F -- 是 --> H[把部署任务放进队列]
@@ -39,7 +39,7 @@ flowchart TD
 
 一句话理解：
 
-`VibePilot Deploy` 本身不关心你的项目是 Python、Go 还是 Java。它只负责接收 WebHook，然后执行你指定的 `deploy.sh`。真正怎么构建、怎么重启服务，都写在每个项目自己的 `deploy.sh` 里。
+`mini_deploy` 本身不关心你的项目是 Python、Go 还是 Java。它只负责接收 WebHook，然后执行你指定的 `deploy.sh`。真正怎么构建、怎么重启服务，都写在每个项目自己的 `deploy.sh` 里。
 
 ## 1. 你要准备什么
 
@@ -93,7 +93,7 @@ dnf install -y git
 ```mermaid
 flowchart TD
     A[登录 Linux 服务器] --> B[准备域名并解析到服务器]
-    B --> C[clone vibepilot-deploy]
+    B --> C[clone mini_deploy]
     C --> D[执行 bash install.sh]
     D --> E[输入域名]
     E --> F[脚本自动安装文件/启动 Agent/生成 Nginx 配置]
@@ -112,14 +112,14 @@ flowchart TD
     Q --> R[push 代码测试自动部署]
 ```
 
-## 3. 安装 VibePilot Deploy
+## 3. 安装 mini_deploy
 
 下面命令在服务器上执行。
 
 ```bash
 cd /root
-git clone https://gitee.com/XC1960/mini_deploy.git vibepilot-deploy
-cd /root/vibepilot-deploy
+git clone https://gitee.com/XC1960/mini_deploy.git mini_deploy
+cd /root/mini_deploy
 bash install.sh
 ```
 
@@ -150,13 +150,13 @@ deploy.example.com
 
 然后脚本会自动做这些事：
 
-- 复制程序到 `/opt/vibepilot-deploy`。
-- 创建 `/etc/vibepilot-deploy-agent.env`。
-- 创建 `/opt/vibepilot-deploy/projects.json`。
+- 复制程序到 `/opt/mini_deploy`。
+- 创建 `/etc/mini-deploy-agent.env`。
+- 创建 `/opt/mini_deploy/projects.json`。
 - 安装 systemd 服务。
-- 启动 `vibepilot-deploy-agent`。
+- 启动 `mini-deploy-agent`。
 - 如果服务器没装 Nginx，会问你是否自动安装。
-- 自动写入 `/etc/nginx/conf.d/vibepilot-deploy.conf`。
+- 自动写入 `/etc/nginx/conf.d/mini-deploy.conf`。
 - 自动执行 `nginx -t`。
 - 自动重载 Nginx。
 - 输出最终访问地址。
@@ -196,7 +196,7 @@ http://127.0.0.1:9010/ui
 ### 4.1 Agent 是否启动
 
 ```bash
-systemctl status vibepilot-deploy-agent
+systemctl status mini-deploy-agent
 curl http://127.0.0.1:9010/health
 ```
 
@@ -209,8 +209,8 @@ curl http://127.0.0.1:9010/health
 如果失败，先看日志：
 
 ```bash
-journalctl -u vibepilot-deploy-agent -n 100 --no-pager
-tail -n 100 /var/log/vibepilot/vibepilot-deploy-agent.log
+journalctl -u mini-deploy-agent -n 100 --no-pager
+tail -n 100 /var/log/mini_deploy/mini-deploy-agent.log
 ```
 
 ### 4.2 Nginx 是否自动生成
@@ -218,7 +218,7 @@ tail -n 100 /var/log/vibepilot/vibepilot-deploy-agent.log
 如果你安装时填了域名，脚本会生成：
 
 ```text
-/etc/nginx/conf.d/vibepilot-deploy.conf
+/etc/nginx/conf.d/mini-deploy.conf
 ```
 
 你只需要检查：
@@ -239,13 +239,13 @@ http://deploy.example.com/deploy/ui
 第一次打开会让你设置管理员密码。设置后密码会加密写入：
 
 ```text
-/etc/vibepilot-deploy-agent.env
+/etc/mini-deploy-agent.env
 ```
 
 设置完以后建议重启一次 Agent：
 
 ```bash
-systemctl restart vibepilot-deploy-agent
+systemctl restart mini-deploy-agent
 ```
 
 如果你想启用 HTTPS，推荐使用 certbot：
@@ -273,7 +273,7 @@ certbot --nginx -d deploy.example.com
 | 服务器目录 | 代码放到服务器哪里 | `/srv/python-api` |
 | 部署脚本 | Agent 要执行哪个脚本 | `/srv/python-api/deploy/deploy.sh` |
 | 健康检查 | 部署后检查接口是否可访问 | `http://127.0.0.1:8001/health` |
-| 日志文件 | 部署脚本输出日志位置 | `/var/log/vibepilot/python-api-deploy.log` |
+| 日志文件 | 部署脚本输出日志位置 | `/var/log/mini_deploy/python-api-deploy.log` |
 | WebHook Token | 代码平台调用 WebHook 时的密码 | 面板自动生成 |
 | 启用项目 | 是否接收 WebHook | 脚本确认无误后再勾 |
 | 允许手动部署 | 是否允许在面板点按钮部署 | 建议勾选 |
@@ -331,7 +331,7 @@ flowchart TD
 
 这一块是小白最容易懵的地方。简单说：
 
-VibePilot 负责执行 `deploy.sh`，但你的后端服务怎么启动，取决于项目本身。你需要确认 4 件事：
+mini_deploy 负责执行 `deploy.sh`，但你的后端服务怎么启动，取决于项目本身。你需要确认 4 件事：
 
 1. 构建命令是什么。
 2. 服务怎么启动和重启。
@@ -437,7 +437,7 @@ sequenceDiagram
     participant Dev as 你
     participant Git as 代码平台
     participant Nginx as Nginx
-    participant Agent as VibePilot Agent
+    participant Agent as mini_deploy Agent
     participant Script as deploy.sh
     participant App as 后端服务
 
@@ -557,7 +557,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/srv/python-api}"
 BRANCH="${DEPLOY_BRANCH:-main}"
-LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/vibepilot/python-api-deploy.log}"
+LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/mini_deploy/python-api-deploy.log}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8001/health}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -608,7 +608,7 @@ chmod +x /srv/python-api/deploy/deploy.sh
 | 服务器目录 | `/srv/python-api` |
 | 部署脚本 | `/srv/python-api/deploy/deploy.sh` |
 | 健康检查 | `http://127.0.0.1:8001/health` |
-| 日志文件 | `/var/log/vibepilot/python-api-deploy.log` |
+| 日志文件 | `/var/log/mini_deploy/python-api-deploy.log` |
 
 ### 8.6 Python 手动测试
 
@@ -716,7 +716,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/srv/go-api}"
 BRANCH="${DEPLOY_BRANCH:-main}"
-LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/vibepilot/go-api-deploy.log}"
+LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/mini_deploy/go-api-deploy.log}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8002/health}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -766,7 +766,7 @@ chmod +x /srv/go-api/deploy/deploy.sh
 | 服务器目录 | `/srv/go-api` |
 | 部署脚本 | `/srv/go-api/deploy/deploy.sh` |
 | 健康检查 | `http://127.0.0.1:8002/health` |
-| 日志文件 | `/var/log/vibepilot/go-api-deploy.log` |
+| 日志文件 | `/var/log/mini_deploy/go-api-deploy.log` |
 
 ### 9.6 Go 手动测试
 
@@ -877,7 +877,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/srv/java-api}"
 BRANCH="${DEPLOY_BRANCH:-main}"
-LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/vibepilot/java-api-deploy.log}"
+LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/mini_deploy/java-api-deploy.log}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8003/actuator/health}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -933,7 +933,7 @@ chmod +x /srv/java-api/deploy/deploy.sh
 | 服务器目录 | `/srv/java-api` |
 | 部署脚本 | `/srv/java-api/deploy/deploy.sh` |
 | 健康检查 | `http://127.0.0.1:8003/actuator/health` |
-| 日志文件 | `/var/log/vibepilot/java-api-deploy.log` |
+| 日志文件 | `/var/log/mini_deploy/java-api-deploy.log` |
 
 ### 10.6 Java 手动测试
 
@@ -1034,7 +1034,7 @@ flowchart TD
     A[部署失败] --> B{面板有日志吗?}
     B -- 没有 --> C[看 Agent 日志]
     B -- 有 --> D[看 deploy 日志最后 50 行]
-    C --> C1[journalctl -u vibepilot-deploy-agent -n 100 --no-pager]
+    C --> C1[journalctl -u mini-deploy-agent -n 100 --no-pager]
     D --> E{失败发生在哪里?}
     E -- git pull --> F[检查仓库地址/SSH Key/分支]
     E -- 构建 --> G[检查 Python/Go/Java 依赖]
@@ -1046,13 +1046,13 @@ flowchart TD
 ### 13.1 Agent 没启动
 
 ```bash
-systemctl status vibepilot-deploy-agent
-journalctl -u vibepilot-deploy-agent -n 100 --no-pager
+systemctl status mini-deploy-agent
+journalctl -u mini-deploy-agent -n 100 --no-pager
 ```
 
 常见原因：
 
-- `/etc/vibepilot-deploy-agent.env` 写错。
+- `/etc/mini-deploy-agent.env` 写错。
 - `projects.json` 里启用的项目脚本不存在。
 - 部署脚本没有执行权限。
 
@@ -1062,7 +1062,7 @@ journalctl -u vibepilot-deploy-agent -n 100 --no-pager
 chmod +x /srv/python-api/deploy/deploy.sh
 chmod +x /srv/go-api/deploy/deploy.sh
 chmod +x /srv/java-api/deploy/deploy.sh
-systemctl restart vibepilot-deploy-agent
+systemctl restart mini-deploy-agent
 ```
 
 ### 13.2 WebHook 没触发
@@ -1079,7 +1079,7 @@ tail -n 100 /var/log/nginx/error.log
 检查 Agent：
 
 ```bash
-tail -n 100 /var/log/vibepilot/vibepilot-deploy-agent.log
+tail -n 100 /var/log/mini_deploy/mini-deploy-agent.log
 ```
 
 重点看：
@@ -1179,4 +1179,4 @@ flowchart LR
 
 最重要的一句话：
 
-> VibePilot Deploy 负责“收到通知并执行脚本”，你要保证“脚本能在服务器上正确拉代码、构建、重启、健康检查”。
+> mini_deploy 负责“收到通知并执行脚本”，你要保证“脚本能在服务器上正确拉代码、构建、重启、健康检查”。

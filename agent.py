@@ -32,7 +32,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 
-APP_HOME = Path(os.getenv("VIBEPILOT_HOME", "/opt/vibepilot-deploy"))
+APP_HOME = Path(os.getenv("MINI_DEPLOY_HOME", os.getenv("VIBEPILOT_HOME", "/opt/mini_deploy")))
 HOST = os.getenv("DEPLOY_AGENT_HOST", "127.0.0.1")
 PORT = int(os.getenv("DEPLOY_AGENT_PORT", "9010"))
 WEBHOOK_SECRET = os.getenv("DEPLOY_WEBHOOK_SECRET", "")
@@ -43,10 +43,10 @@ HEALTH_URL = os.getenv("HEALTH_URL", "")
 DEPLOY_PROJECTS_FILE_TEXT = os.getenv("DEPLOY_PROJECTS_FILE", "").strip()
 DEPLOY_PROJECTS_FILE = Path(DEPLOY_PROJECTS_FILE_TEXT) if DEPLOY_PROJECTS_FILE_TEXT else None
 PROJECTS_CONFIG_FILE = DEPLOY_PROJECTS_FILE or APP_HOME / "projects.json"
-AGENT_ENV_FILE = Path(os.getenv("DEPLOY_AGENT_ENV_FILE", "/etc/vibepilot-deploy-agent.env"))
-LOG_FILE = Path(os.getenv("DEPLOY_AGENT_LOG", "/var/log/vibepilot-deploy-agent.log"))
-DEPLOY_LOG_FILE = Path(os.getenv("DEPLOY_LOG_FILE", "/var/log/vibepilot-deploy.log"))
-STATE_FILE = Path(os.getenv("DEPLOY_AGENT_STATE_FILE", "/var/lib/vibepilot-deploy-agent/state.json"))
+AGENT_ENV_FILE = Path(os.getenv("DEPLOY_AGENT_ENV_FILE", "/etc/mini-deploy-agent.env"))
+LOG_FILE = Path(os.getenv("DEPLOY_AGENT_LOG", "/var/log/mini_deploy/mini-deploy-agent.log"))
+DEPLOY_LOG_FILE = Path(os.getenv("DEPLOY_LOG_FILE", "/var/log/mini_deploy/mini_deploy.log"))
+STATE_FILE = Path(os.getenv("DEPLOY_AGENT_STATE_FILE", "/var/lib/mini-deploy-agent/state.json"))
 AUDIT_LOG_FILE = Path(os.getenv("DEPLOY_AUDIT_LOG_FILE", str(STATE_FILE.with_name("audit.jsonl"))))
 MAX_BODY_BYTES = int(os.getenv("DEPLOY_AGENT_MAX_BODY_BYTES", str(1024 * 1024)))
 PROJECT_CONFIG_BACKUP_LIMIT = int(os.getenv("DEPLOY_PROJECT_CONFIG_BACKUP_LIMIT", "20"))
@@ -61,7 +61,7 @@ UI_PASSWORD_HASH = os.getenv("DEPLOY_UI_PASSWORD_HASH", "")
 UI_SESSION_SECRET = os.getenv("DEPLOY_UI_SESSION_SECRET", "").strip() or WEBHOOK_SECRET
 UI_SESSION_TTL_SECONDS = int(os.getenv("DEPLOY_UI_SESSION_TTL_SECONDS", str(8 * 60 * 60)))
 COOKIE_SECURE_MODE = os.getenv("DEPLOY_COOKIE_SECURE", "auto").strip().lower()
-COOKIE_NAME = "vibepilot_deploy_session"
+COOKIE_NAME = "mini_deploy_session"
 PASSWORD_HASH_ITERATIONS = 260_000
 MAX_HISTORY = 60
 
@@ -125,7 +125,7 @@ def _int_config(value: Any, default: int) -> int:
 def _default_project() -> DeployProject:
     return DeployProject(
         key="default",
-        name=os.getenv("DEPLOY_PROJECT_NAME", "VibePilot"),
+        name=os.getenv("DEPLOY_PROJECT_NAME", "mini_deploy"),
         template=os.getenv("DEPLOY_PROJECT_TEMPLATE", "custom"),
         repo=os.getenv("DEPLOY_REPO", ""),
         branch=DEPLOY_BRANCH,
@@ -1663,7 +1663,7 @@ def _render_ui() -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "VibePilotDeployAgent/1.1"
+    server_version = "mini_deploy_agent/1.1"
 
     def _write_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

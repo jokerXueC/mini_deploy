@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 TARGET_SHA="${DEPLOY_AFTER:-}"
-LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/vibepilot/sample-rollback.log}"
+LOG_FILE="${DEPLOY_LOG_FILE:-/var/log/mini_deploy/sample-rollback.log}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 

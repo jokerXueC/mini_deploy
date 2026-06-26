@@ -1,6 +1,6 @@
 # Deploy Script Templates
 
-VibePilot runs shell scripts. These templates are starting points, not guaranteed final scripts.
+mini_deploy runs shell scripts. These templates are starting points, not guaranteed final scripts.
 
 Before enabling WebHook deployment, make sure your script can run successfully on the server.
 

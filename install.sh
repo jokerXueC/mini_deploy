@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_HOME="${APP_HOME:-/opt/vibepilot-deploy}"
-ENV_FILE="${ENV_FILE:-/etc/vibepilot-deploy-agent.env}"
-SERVICE_FILE="/etc/systemd/system/vibepilot-deploy-agent.service"
-NGINX_CONF_FILE="${NGINX_CONF_FILE:-/etc/nginx/conf.d/vibepilot-deploy.conf}"
+APP_HOME="${APP_HOME:-/opt/mini_deploy}"
+ENV_FILE="${ENV_FILE:-/etc/mini-deploy-agent.env}"
+SERVICE_NAME="${SERVICE_NAME:-mini-deploy-agent}"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+NGINX_CONF_FILE="${NGINX_CONF_FILE:-/etc/nginx/conf.d/mini-deploy.conf}"
 DEPLOY_DOMAIN="${DEPLOY_DOMAIN:-}"
 SETUP_NGINX="${SETUP_NGINX:-auto}"
 SETUP_HTTPS="${SETUP_HTTPS:-ask}"
@@ -252,7 +253,7 @@ if [[ -n "$DEPLOY_DOMAIN" && ! "$DEPLOY_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
   exit 1
 fi
 
-mkdir -p "$APP_HOME" /var/log/vibepilot /var/lib/vibepilot-deploy-agent
+mkdir -p "$APP_HOME" /var/log/mini_deploy /var/lib/mini-deploy-agent
 if [[ "$(cd "$APP_HOME" && pwd)" == "$SOURCE_DIR" ]]; then
   SAME_SOURCE_AND_TARGET="true"
 fi
@@ -317,10 +318,10 @@ if [[ ! -f "$APP_HOME/projects.json" ]]; then
   fi
 fi
 
-install -m 644 "$APP_HOME/systemd/vibepilot-deploy-agent.service" "$SERVICE_FILE"
+install -m 644 "$APP_HOME/systemd/mini-deploy-agent.service" "$SERVICE_FILE"
 systemctl daemon-reload
-systemctl enable vibepilot-deploy-agent
-systemctl restart vibepilot-deploy-agent
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
 
 if [[ "$SETUP_NGINX" != "0" && "$SETUP_NGINX" != "false" ]]; then
   setup_nginx "$DEPLOY_DOMAIN"
@@ -348,7 +349,7 @@ fi
 if is_en; then
   cat <<EOF
 
-VibePilot Deploy installed.
+mini_deploy installed.
 
 Agent health: $HEALTH_RESULT
 
@@ -359,8 +360,8 @@ Local fallback URL:
    http://127.0.0.1:9010/ui
 
 Useful commands:
-   systemctl status vibepilot-deploy-agent
-   journalctl -u vibepilot-deploy-agent -f
+   systemctl status $SERVICE_NAME
+   journalctl -u $SERVICE_NAME -f
 
 Optional: edit environment config:
    nano $ENV_FILE
@@ -375,7 +376,7 @@ EOF
 else
   cat <<EOF
 
-VibePilot Deploy 安装完成。
+mini_deploy 安装完成。
 
 Agent 状态：$HEALTH_RESULT
 
@@ -386,8 +387,8 @@ Agent 状态：$HEALTH_RESULT
    http://127.0.0.1:9010/ui
 
 常用命令：
-   systemctl status vibepilot-deploy-agent
-   journalctl -u vibepilot-deploy-agent -f
+   systemctl status $SERVICE_NAME
+   journalctl -u $SERVICE_NAME -f
 
 可选：修改环境配置：
    nano $ENV_FILE
