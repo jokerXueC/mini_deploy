@@ -1,0 +1,19 @@
+[Unit]
+Description=VibePilot lightweight deploy agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vibepilot-deploy
+EnvironmentFile=/etc/vibepilot-deploy-agent.env
+ExecStart=/usr/bin/python3 /opt/vibepilot-deploy/agent.py
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

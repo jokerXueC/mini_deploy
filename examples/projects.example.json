@@ -1,0 +1,52 @@
+{
+  "projects": [
+    {
+      "key": "node-api",
+      "name": "Node API",
+      "template": "node",
+      "repo": "git@gitee.com:your-org/node-api.git",
+      "branch": "main",
+      "workdir": "/srv/node-api",
+      "script": "/srv/node-api/deploy/deploy.sh",
+      "rollback_script": "/srv/node-api/deploy/rollback.sh",
+      "health_url": "https://api.example.com/health",
+      "deploy_log_file": "/var/log/vibepilot/node-api-deploy.log",
+      "enabled": false,
+      "manual_deploy_enabled": true,
+      "timeout_seconds": 900,
+      "webhook_secret": "replace-with-node-api-webhook-token"
+    },
+    {
+      "key": "spring-api",
+      "name": "Spring Boot API",
+      "template": "java",
+      "repo": "git@github.com:your-org/spring-api.git",
+      "branch": "main",
+      "workdir": "/srv/spring-api",
+      "script": "/srv/spring-api/deploy/deploy.sh",
+      "rollback_script": "",
+      "health_url": "https://spring.example.com/actuator/health",
+      "deploy_log_file": "/var/log/vibepilot/spring-api-deploy.log",
+      "enabled": false,
+      "manual_deploy_enabled": true,
+      "timeout_seconds": 1200,
+      "webhook_secret": "replace-with-spring-api-webhook-token"
+    },
+    {
+      "key": "go-service",
+      "name": "Go Service",
+      "template": "go",
+      "repo": "git@gitlab.com:your-org/go-service.git",
+      "branch": "main",
+      "workdir": "/srv/go-service",
+      "script": "/srv/go-service/deploy/deploy.sh",
+      "rollback_script": "",
+      "health_url": "https://go.example.com/health",
+      "deploy_log_file": "/var/log/vibepilot/go-service-deploy.log",
+      "enabled": false,
+      "manual_deploy_enabled": true,
+      "timeout_seconds": 600,
+      "webhook_secret": "replace-with-go-service-webhook-token"
+    }
+  ]
+}

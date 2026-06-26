@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VibePilot Deploy Status</title>
+  <link rel="stylesheet" href="ui/style.css">
+</head>
+<body>
+  <main class="page">
+    <a class="back-pill" href="ui">部署面板</a>
+    <header class="hero">
+      <div>
+        <div class="eyebrow">VibePilot CI/CD</div>
+        <h1 id="panelTitle">部署健康面板</h1>
+        <p id="panelSubtitle">监控 Gitee WebHook、部署队列、最近发布和线上健康检查。</p>
+      </div>
+      <div class="hero-actions">
+        <div class="hero-action-row status-row">
+          <span id="liveIndicator" class="live-indicator live-ok"><span></span>Agent 在线</span>
+        </div>
+        <div class="hero-action-row project-picker-row">
+          <div id="projectSwitcher" class="project-switcher">
+            <button id="projectSelectButton" class="project-select-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <span id="projectSelectLabel">全部</span>
+              <span class="select-caret" aria-hidden="true"></span>
+            </button>
+            <div id="projectSelectMenu" class="project-select-menu" role="listbox" hidden></div>
+          </div>
+        </div>
+        <div class="hero-action-row button-row">
+          <button id="redeployBtn" class="danger-button" type="button">重新部署</button>
+          <button id="rollbackBtn" class="ghost-button" type="button">回滚</button>
+          <button id="cancelDeployBtn" class="ghost-button" type="button">取消</button>
+          <button id="refreshBtn" class="ghost-button" type="button">刷新</button>
+          <a class="ghost-button" href="logout">退出</a>
+        </div>
+        <div id="projectActionHint" class="action-hint">选择具体项目后可手动部署</div>
+        <div class="hero-action-row time-row">
+          <span id="updatedAt" class="muted">-</span>
+        </div>
+      </div>
+    </header>
+
+    <nav class="view-tabs" aria-label="面板视图">
+      <button id="deployViewTab" class="view-tab active" type="button" data-view="deploy">部署</button>
+      <button id="serverViewTab" class="view-tab" type="button" data-view="server">服务器状态</button>
+    </nav>
+
+    <div id="deployView" class="dashboard-view active">
+    <section class="summary-grid status-grid">
+      <article class="status-stat-card">
+        <div class="status-card-main">
+          <div class="stat-title">Agent</div>
+          <div class="stat-identity">
+            <div class="stat-icon">AG</div>
+            <div class="stat-meta">
+              <span class="stat-pill">Deploy Agent</span>
+              <span id="agentStatus" class="badge neutral">加载中</span>
+            </div>
+          </div>
+          <div class="stat-metrics compact-metrics">
+            <div class="metric-box">
+              <div class="metric-label">Host</div>
+              <div id="agentHost" class="metric-value compact-value">-</div>
+            </div>
+            <div class="metric-box">
+              <div class="metric-label">Branch</div>
+              <div id="targetBranchMini" class="metric-value compact-value">-</div>
+            </div>
+          </div>
+        </div>
+        <div class="status-mini-history">
+          <div class="history-track" id="agentHistory"></div>
+        </div>
+      </article>
+      <article class="status-stat-card">
+        <div class="status-card-main">
+          <div class="stat-title">部署状态</div>
+          <div class="stat-identity">
+            <div class="stat-icon">CI</div>
+            <div class="stat-meta">
+              <span class="stat-pill">Pipeline</span>
+              <span id="deployStatus" class="badge neutral">-</span>
+            </div>
+          </div>
+          <div id="deploySub" class="status-sub">-</div>
+        </div>
+        <div class="status-mini-history">
+          <div class="history-track" id="deployHistory"></div>
+        </div>
+      </article>
+      <article class="status-stat-card">
+        <div class="status-card-main">
+          <div class="stat-title">队列</div>
+          <div class="stat-identity">
+            <div class="stat-icon">QU</div>
+            <div class="stat-meta">
+              <span class="stat-pill">Serial Queue</span>
+              <span id="queueSize" class="badge neutral">-</span>
+            </div>
+          </div>
+          <div class="status-sub">串行执行，避免并发部署</div>
+        </div>
+        <div class="status-mini-history">
+          <div class="history-track" id="queueHistory"></div>
+        </div>
+      </article>
+      <article class="status-stat-card">
+        <div class="status-card-main">
+          <div class="stat-title">当前提交</div>
+          <div class="stat-identity">
+            <div class="stat-icon">GT</div>
+            <div class="stat-meta">
+              <span id="headSha" class="stat-pill mono">-</span>
+              <span id="branchName" class="badge neutral">-</span>
+            </div>
+          </div>
+          <div class="status-sub">仓库当前 HEAD</div>
+        </div>
+        <div class="status-mini-history">
+          <div class="history-track" id="gitHistory"></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="panel project-panel">
+      <div class="panel-head">
+        <div>
+          <h2>项目接入状态</h2>
+          <p id="projectModeHint">加载项目配置中...</p>
+        </div>
+        <div class="project-config-actions">
+          <span id="projectModeBadge" class="badge neutral">-</span>
+          <button id="initProjectsBtn" class="ghost-button compact-action" type="button" title="创建项目配置文件，之后可直接在网页添加和管理仓库">初始化配置</button>
+          <button id="editProjectBtn" class="ghost-button compact-action" type="button">编辑当前</button>
+          <button id="addProjectBtn" class="danger-button compact-action" type="button">添加仓库</button>
+        </div>
+      </div>
+      <div id="projectOverview" class="project-list skeleton-block"></div>
+    </section>
+
+    <section class="panel-grid">
+      <article class="panel wide">
+        <div class="panel-head">
+          <div>
+            <h2>最近部署</h2>
+            <p>按时间从新到旧，横向滑动查看</p>
+          </div>
+          <span id="lastBadge" class="badge">-</span>
+        </div>
+        <div id="deployStats" class="deploy-stats skeleton-block"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>运行详情</h2>
+            <p>当前任务与配置</p>
+          </div>
+        </div>
+        <dl class="detail-list">
+          <div><dt>目标分支</dt><dd id="targetBranch">-</dd></div>
+          <div><dt>项目目录</dt><dd id="projectDir">-</dd></div>
+          <div><dt>部署脚本</dt><dd id="deployScript">-</dd></div>
+          <div><dt>最近 WebHook</dt><dd id="lastWebhook">-</dd></div>
+        </dl>
+      </article>
+    </section>
+
+    <section class="panel logs-panel">
+      <div class="panel-head">
+        <div>
+          <h2>部署日志</h2>
+          <p id="logHint">部署脚本原始输出</p>
+        </div>
+        <div class="log-actions">
+          <button id="deployLogBtn" class="log-tab active" type="button">部署日志</button>
+          <button id="agentLogBtn" class="log-tab" type="button">Agent 日志</button>
+          <label class="log-control">预览
+            <select id="logLineSelect">
+              <option value="100">100 行</option>
+              <option value="200" selected>200 行</option>
+              <option value="500">500 行</option>
+              <option value="1000">1000 行</option>
+              <option value="2000">2000 行</option>
+              <option value="5000">5000 行</option>
+            </select>
+          </label>
+          <label class="log-control">下载
+            <select id="logDownloadSelect">
+              <option value="current">当前行数</option>
+              <option value="500">500 行</option>
+              <option value="1000">1000 行</option>
+              <option value="5000">5000 行</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+          <button id="downloadLogBtn" class="log-tab log-download" type="button">下载日志</button>
+          <span id="logCount" class="badge neutral">0 行</span>
+        </div>
+      </div>
+      <pre id="logs" class="logs" aria-live="polite">加载中...</pre>
+    </section>
+
+    </div>
+
+    <div id="serverView" class="dashboard-view">
+      <section class="summary-grid status-grid server-status-grid">
+        <article class="status-stat-card resource-card">
+          <div class="status-card-main">
+            <div class="stat-title">CPU</div>
+            <div class="resource-value" id="cpuValue">-</div>
+            <div class="resource-sub" id="cpuSub">Load -</div>
+          </div>
+          <div class="status-mini-history">
+            <div id="cpuBar" class="resource-track"></div>
+          </div>
+        </article>
+        <article class="status-stat-card resource-card">
+          <div class="status-card-main">
+            <div class="stat-title">内存</div>
+            <div class="resource-value" id="memoryValue">-</div>
+            <div class="resource-sub" id="memorySub">-</div>
+          </div>
+          <div class="status-mini-history">
+            <div id="memoryBar" class="resource-track"></div>
+          </div>
+        </article>
+        <article class="status-stat-card resource-card">
+          <div class="status-card-main">
+            <div class="stat-title">磁盘</div>
+            <div class="resource-value" id="diskValue">-</div>
+            <div class="resource-sub" id="diskSub">/</div>
+          </div>
+          <div class="status-mini-history">
+            <div id="diskBar" class="resource-track"></div>
+          </div>
+        </article>
+        <article class="status-stat-card resource-card">
+          <div class="status-card-main">
+            <div class="stat-title">网络</div>
+            <div class="resource-value" id="networkValue">-</div>
+            <div class="resource-sub" id="networkSub">RX - / TX -</div>
+          </div>
+          <div class="status-mini-history">
+            <div id="networkBar" class="resource-track"></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel containers-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Docker 容器</h2>
+            <p id="dockerHint">容器运行状态与资源占用</p>
+          </div>
+          <div class="server-panel-actions">
+            <span id="dockerBadge" class="badge neutral">-</span>
+            <div class="server-refresh-controls" aria-label="服务器状态刷新频率">
+              <button class="server-refresh-option" type="button" data-server-refresh="1">1s</button>
+              <button class="server-refresh-option" type="button" data-server-refresh="5">5s</button>
+              <button class="server-refresh-option" type="button" data-server-refresh="10">10s</button>
+              <button class="server-refresh-option active" type="button" data-server-refresh="30">30s</button>
+            </div>
+          </div>
+        </div>
+        <div id="containerList" class="container-list skeleton-block"></div>
+      </section>
+    </div>
+
+    <div id="containerLogsModal" class="modal-backdrop" hidden>
+      <section class="project-modal container-log-modal" role="dialog" aria-modal="true" aria-labelledby="containerLogsTitle">
+        <div class="modal-head">
+          <div>
+            <h2 id="containerLogsTitle">容器日志</h2>
+            <p id="containerLogsMeta">最近日志</p>
+          </div>
+          <button id="closeContainerLogsBtn" class="ghost-button icon-action" type="button">关闭</button>
+        </div>
+        <div class="log-actions container-log-actions">
+          <label class="log-control">预览
+            <select id="containerLogLineSelect">
+              <option value="100">100 行</option>
+              <option value="200" selected>200 行</option>
+              <option value="500">500 行</option>
+              <option value="1000">1000 行</option>
+              <option value="2000">2000 行</option>
+              <option value="5000">5000 行</option>
+            </select>
+          </label>
+          <label class="log-control">下载
+            <select id="containerLogDownloadSelect">
+              <option value="current">当前行数</option>
+              <option value="500">500 行</option>
+              <option value="1000">1000 行</option>
+              <option value="5000">5000 行</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+          <button id="downloadContainerLogBtn" class="log-tab log-download" type="button">下载日志</button>
+          <span id="containerLogCount" class="badge neutral">0 行</span>
+        </div>
+        <pre id="containerLogsContent" class="logs container-log-content"></pre>
+      </section>
+    </div>
+
+    <div id="projectModal" class="modal-backdrop" hidden>
+      <section class="project-modal" role="dialog" aria-modal="true" aria-labelledby="projectModalTitle">
+        <div class="modal-head">
+          <div>
+            <h2 id="projectModalTitle">添加仓库</h2>
+            <p id="projectModalHint">先确认服务器目录和部署脚本，再保存项目配置。</p>
+          </div>
+          <button id="closeProjectModalBtn" class="ghost-button icon-action" type="button">关闭</button>
+        </div>
+        <form id="projectForm" class="project-form">
+          <input id="projectOriginalKey" type="hidden">
+          <div class="form-grid">
+            <label>项目标识<input id="projectKeyInput" name="key" placeholder="example-node" required></label>
+            <label>显示名称<input id="projectNameInput" name="name" placeholder="Example Node"></label>
+            <label>项目类型
+              <select id="projectTemplateInput" name="template">
+                <option value="docker">Docker Compose</option>
+                <option value="node">Node / PM2</option>
+                <option value="java">Java / systemd</option>
+                <option value="go">Go / systemd</option>
+                <option value="static">静态网站</option>
+                <option value="custom">自定义脚本</option>
+              </select>
+            </label>
+            <label class="wide-field">仓库地址<input id="projectRepoInput" name="repo" placeholder="git@gitee.com:org/repo.git"></label>
+            <label>部署分支<input id="projectBranchInput" name="branch" placeholder="master"></label>
+            <label>超时时间<input id="projectTimeoutInput" name="timeout_seconds" type="number" min="30" step="30" placeholder="900"></label>
+            <label class="wide-field">服务器目录<input id="projectWorkdirInput" name="workdir" placeholder="/root/example-node"></label>
+            <label class="wide-field">部署脚本<input id="projectScriptInput" name="script" placeholder="/root/example-node/deploy/deploy.sh"></label>
+            <label class="wide-field">回滚脚本<input id="projectRollbackInput" name="rollback_script" placeholder="可留空"></label>
+            <label class="wide-field">健康检查<input id="projectHealthInput" name="health_url" placeholder="https://example.com/health"></label>
+            <label class="wide-field">日志文件<input id="projectLogInput" name="deploy_log_file" placeholder="/var/log/example-node-deploy.log"></label>
+            <label class="wide-field">Webhook Token<input id="projectSecretInput" name="webhook_secret" placeholder="保存时自动生成"></label>
+          </div>
+          <div class="toggle-row">
+            <label><input id="projectEnabledInput" type="checkbox"> 启用项目</label>
+            <label><input id="projectManualInput" type="checkbox"> 允许手动部署/回滚</label>
+          </div>
+          <div class="webhook-box">
+            <div>
+              <div class="webhook-label">WebHook POST 地址</div>
+              <code id="projectWebhookUrl">-</code>
+            </div>
+            <button id="copyWebhookBtn" class="ghost-button compact-action" type="button">复制地址</button>
+          </div>
+          <div class="webhook-box">
+            <div>
+              <div class="webhook-label">Gitee Token</div>
+              <code id="projectWebhookToken">保存后生成</code>
+            </div>
+            <button id="copyWebhookTokenBtn" class="ghost-button compact-action" type="button">复制 Token</button>
+          </div>
+          <div class="command-box">
+            <div class="command-head">
+              <div>
+                <div class="webhook-label">接入体检</div>
+                <p>保存项目后点击体检，检查服务器目录、仓库、脚本、运行环境和健康检查。</p>
+              </div>
+              <button id="doctorProjectBtn" class="ghost-button compact-action" type="button">检查项目</button>
+            </div>
+            <div id="projectDoctorResult" class="doctor-result">保存项目后可以检查。</div>
+          </div>
+          <div class="command-box">
+            <div class="command-head">
+              <div>
+                <div class="webhook-label">服务器执行指令</div>
+                <p>复制到目标服务器执行。执行完再配置 WebHook；脚本中的 TODO 必须替换成真实构建/重启命令。</p>
+              </div>
+              <button id="copyProjectCommandsBtn" class="ghost-button compact-action" type="button">复制指令</button>
+            </div>
+            <pre id="projectSetupCommands" class="command-output">填写项目后生成。</pre>
+          </div>
+          <div class="command-box">
+            <div class="command-head">
+              <div>
+                <div class="webhook-label">Gitee WebHook 填写项</div>
+                <p>URL 填 POST 地址，密码/Token 填下面的 Token。</p>
+              </div>
+              <button id="copyWebhookGuideBtn" class="ghost-button compact-action" type="button">复制 WebHook 配置</button>
+            </div>
+            <pre id="projectWebhookGuide" class="command-output">保存后生成。</pre>
+          </div>
+          <div id="projectFormError" class="form-error" hidden></div>
+          <div class="modal-actions">
+            <button id="deleteProjectBtn" class="ghost-button compact-action danger-text" type="button">删除项目</button>
+            <button id="resetSecretBtn" class="ghost-button compact-action" type="button">重置 Token</button>
+            <span class="modal-spacer"></span>
+            <button class="ghost-button compact-action" type="button" id="cancelProjectBtn">取消</button>
+            <button class="danger-button compact-action" type="submit">保存项目</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="confirmModal" class="modal-backdrop confirm-backdrop" hidden>
+      <section class="project-modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+        <div class="confirm-icon" aria-hidden="true">!</div>
+        <div class="confirm-copy">
+          <h2 id="confirmTitle">确认操作</h2>
+          <p id="confirmMessage">此操作需要确认。</p>
+        </div>
+        <div class="modal-actions confirm-actions">
+          <button id="confirmCancelBtn" class="ghost-button compact-action" type="button">取消</button>
+          <button id="confirmOkBtn" class="danger-button compact-action" type="button">确认</button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="ui/app.js"></script>
+</body>
+</html>
