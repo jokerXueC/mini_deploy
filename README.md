@@ -2,38 +2,43 @@
 
 Lightweight self-hosted deploy panel for small servers.
 
-中文小白上手指南: [docs/QUICKSTART.zh-CN.md](docs/QUICKSTART.zh-CN.md)
+VibePilot Deploy receives Git webhooks, runs your project deploy script, and shows deploy history, logs, server status, and Docker status in a simple web panel.
 
-完整部署流程图和 Python / Go / Java 示例: [docs/BEGINNER_DEPLOY_FLOW.zh-CN.md](docs/BEGINNER_DEPLOY_FLOW.zh-CN.md)
+中文快速上手：[docs/QUICKSTART.zh-CN.md](docs/QUICKSTART.zh-CN.md)
 
-VibePilot Deploy is a tiny Python deploy agent with a built-in web dashboard. It receives Git webhooks, runs your project deploy scripts, records deploy history, shows server health, and lets you inspect Docker containers and logs.
+## What It Does
 
-It is designed for low-resource servers where GitLab CI, Jenkins, or a full CI runner is too heavy.
+- Receives Gitee / GitHub / GitLab push webhooks
+- Runs one deploy script per project
+- Supports multiple projects
+- Provides manual deploy, rollback, cancel, logs, and history
+- Shows CPU, memory, disk, network, and Docker container status
+- Uses a password-protected web UI
+- Requires no database
 
-## Features
+## What It Does Not Do
 
-- Webhook deploy for Gitee, GitHub, and GitLab style payloads
-- Multiple projects in one agent
-- Per-project branch, workdir, deploy script, health URL, log file, and secret
-- Manual deploy and rollback from the web panel
-- Deploy history with status bars
-- Server CPU, memory, disk, network status
-- Docker container status, logs, restart, stop, start, pause, and resume
-- Password-protected UI
-- No database required
+VibePilot does not automatically understand every application.
+
+For each business project, you still need to confirm:
+
+- how to build it
+- how to start or restart it
+- which port it listens on
+- which health URL means it is running correctly
+
+The panel can generate a starter `deploy.sh`, but you should review it before enabling automatic deployment.
 
 ## Requirements
 
-- Linux server
+- Linux server with root / sudo access
 - Python 3.10+
-- git, installed before running the installer because the first step is `git clone`
+- `git` installed before running the installer
 - systemd
-- Optional: Docker and Docker Compose if your projects use containers
-- Optional: Nginx or Caddy for HTTPS reverse proxy
+- Optional: Docker, if your projects use Docker
+- Optional: Nginx / Certbot, which the installer can help set up
 
 ## Install
-
-Clone this repository on your server:
 
 ```bash
 git clone https://gitee.com/XC1960/mini_deploy.git /root/vibepilot-deploy
@@ -41,19 +46,7 @@ cd /root/vibepilot-deploy
 bash install.sh
 ```
 
-The installer first asks for language. The default is Chinese; enter `en` for English. Then it asks for your dashboard domain. If provided, it can install Nginx when missing, writes `/etc/nginx/conf.d/vibepilot-deploy.conf`, optionally installs Certbot for HTTPS, starts the agent, checks health, and prints the dashboard URL.
-
-HTTP access works without HTTPS:
-
-```text
-http://deploy.example.com/deploy/ui
-```
-
-Use HTTPS for production when DNS is ready:
-
-```bash
-certbot --nginx -d deploy.example.com
-```
+The installer asks for language first. Chinese is the default; enter `en` for English.
 
 For non-interactive install:
 
@@ -67,157 +60,55 @@ For non-interactive English install:
 INSTALL_LANG=en DEPLOY_DOMAIN=deploy.example.com bash install.sh
 ```
 
-Useful checks:
-
-```bash
-systemctl status vibepilot-deploy-agent
-curl http://127.0.0.1:9010/health
-nginx -t
-```
-
-Open the UI:
+HTTP works without HTTPS:
 
 ```text
 http://deploy.example.com/deploy/ui
 ```
 
-On first open, set the admin password in the web page. The agent writes the encrypted password into `/etc/vibepilot-deploy-agent.env`; restart the service once after that:
+Use HTTPS for public access when DNS is ready.
+
+## First Project
+
+In the web panel:
+
+1. Add a project.
+2. Fill repository URL, branch, server directory, deploy script path, and health URL.
+3. Copy the generated server commands and run them once on the server.
+4. Review the generated `deploy.sh`.
+5. Click “Check Project”.
+6. Configure WebHook URL and Token in your Git platform.
+7. Enable the project.
+
+After that, every `git push` to the configured branch can trigger deployment.
+
+## Important Boundary
+
+`deploy.sh` is your project’s deployment recipe.
+
+It usually does:
+
+```text
+git pull
+install dependencies / build
+restart service
+health check
+```
+
+If your service is managed by systemd, the service file is still part of your business project setup. VibePilot can provide examples and checks, but it cannot guarantee a correct service file for every possible application.
+
+## Common Commands
 
 ```bash
-systemctl restart vibepilot-deploy-agent
+systemctl status vibepilot-deploy-agent
+journalctl -u vibepilot-deploy-agent -f
+curl http://127.0.0.1:9010/health
 ```
 
-## Beginner Flow
-
-After installation, you do not need to write CI/CD YAML.
-
-1. Open `/deploy/ui` and log in.
-2. Click `Add Repository`.
-3. Choose your project type:
-   - Docker Compose
-   - Node / PM2
-   - Java / systemd
-   - Go / systemd
-   - Static website
-   - Custom script
-4. Fill in repository URL, branch, server directory, health URL, and log file.
-5. Copy the generated server commands and run them on your server.
-6. Save the project.
-7. Click `Check Project` to see what is missing.
-8. Copy the generated WebHook URL and Token into Gitee/GitHub/GitLab.
-9. Push code and watch the deploy panel.
-
-The generated script is only a starting point. You can edit it for your actual build and restart commands.
-
-For local testing:
-
-```text
-http://127.0.0.1:9010/ui
-```
-
-## Project Config
-
-Each project points to a shell script. The agent itself is written in Python, but it can deploy Java, Go, Node, Python, Rust, PHP, static sites, Docker Compose apps, or anything else your shell script can handle.
-
-Example:
-
-```json
-{
-  "projects": [
-    {
-      "key": "node-api",
-      "name": "Node API",
-      "template": "node",
-      "repo": "git@gitee.com:your-org/node-api.git",
-      "branch": "main",
-      "workdir": "/srv/node-api",
-      "script": "/srv/node-api/deploy/deploy.sh",
-      "rollback_script": "/srv/node-api/deploy/rollback.sh",
-      "health_url": "https://api.example.com/health",
-      "deploy_log_file": "/var/log/vibepilot/node-api-deploy.log",
-      "webhook_secret": "replace-with-node-api-webhook-token",
-      "enabled": true,
-      "manual_deploy_enabled": true,
-      "timeout_seconds": 900
-    }
-  ]
-}
-```
-
-## Webhook URL
-
-For a project with key `node-api`, use:
-
-```text
-https://your-domain.example/deploy/webhook?project=node-api&token=replace-with-node-api-webhook-token
-```
-
-Use POST requests. The webhook payload should include a `ref` like:
-
-```json
-{
-  "ref": "refs/heads/main",
-  "before": "old-sha",
-  "after": "new-sha"
-}
-```
-
-Gitee, GitHub, and GitLab push events usually already include these fields.
-
-## Nginx Reverse Proxy
-
-```nginx
-location = /deploy/webhook {
-    proxy_pass http://127.0.0.1:9010/webhook;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-}
-
-location = /deploy/ui {
-    return 302 /deploy/ui/;
-}
-
-location /deploy/ui/ {
-    proxy_pass http://127.0.0.1:9010/ui/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-}
-
-location /deploy/ {
-    proxy_pass http://127.0.0.1:9010/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-}
-```
-
-## Security Notes
-
-This agent can run shell scripts and control Docker containers. Treat it as an admin tool.
+## Security
 
 - Do not expose port `9010` directly to the internet.
-- Use HTTPS reverse proxy.
+- Use HTTPS for public access.
 - Use a strong UI password.
-- Use a different webhook secret for every project.
-- Keep `projects.json` and `/etc/vibepilot-deploy-agent.env` readable only by root.
-- Review every deploy script before enabling manual deploy.
-
-## Development
-
-Run locally:
-
-```bash
-python3 agent.py hash-password
-DEPLOY_PROJECTS_FILE=examples/projects.example.json \
-DEPLOY_AGENT_STATE_FILE=state.json \
-DEPLOY_AGENT_LOG=agent.log \
-DEPLOY_LOG_FILE=deploy.log \
-DEPLOY_UI_PASSWORD_HASH='...' \
-DEPLOY_UI_SESSION_SECRET='...' \
-python3 agent.py
-```
-
-Then open:
-
-```text
-http://127.0.0.1:9010/ui
-```
+- Use a different webhook token for every project.
+- Review deploy scripts before enabling automatic deployment.

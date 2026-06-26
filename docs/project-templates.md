@@ -1,65 +1,66 @@
-# Project Deploy Script Templates
+# Deploy Script Templates
 
-VibePilot Deploy runs shell scripts. These are starting points; copy one into your project and adjust it.
+VibePilot runs shell scripts. These templates are starting points, not guaranteed final scripts.
 
-## Node / Vite / Next.js
+Before enabling WebHook deployment, make sure your script can run successfully on the server.
 
-```bash
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-cd /srv/node-api
-git fetch origin main
-git checkout main
-git pull --ff-only origin main
-pnpm install --frozen-lockfile
-pnpm build
-pm2 restart node-api
-curl -fsS https://api.example.com/health
-```
-
-## Java Spring Boot
+## Basic Shape
 
 ```bash
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-cd /srv/spring-api
+cd /srv/your-project
 git fetch origin main
 git checkout main
 git pull --ff-only origin main
-mvn clean package -DskipTests
-systemctl restart spring-api
-curl -fsS https://spring.example.com/actuator/health
+
+# build or install dependencies here
+
+# restart your service here
+
+# health check here
+curl -fsS http://127.0.0.1:8000/health
 ```
+
+## Python / FastAPI
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+systemctl restart fastapi-demo
+curl -fsS http://127.0.0.1:8001/health
+```
+
+The `fastapi-demo.service` file still needs to match your actual app entry, such as `main:app` or `app.main:app`.
 
 ## Go
 
 ```bash
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-cd /srv/go-service
-git fetch origin main
-git checkout main
-git pull --ff-only origin main
+go mod download
 go build -o app ./cmd/server
-systemctl restart go-service
-curl -fsS https://go.example.com/health
+systemctl restart go-api
+curl -fsS http://127.0.0.1:8002/health
 ```
+
+Confirm the build path matches your repository.
+
+## Java / Spring Boot
+
+```bash
+mvn clean package -DskipTests
+cp target/*.jar app.jar
+systemctl restart java-api
+curl -fsS http://127.0.0.1:8003/actuator/health
+```
+
+If your project uses Gradle or has multiple jars, adjust the build and copy commands.
 
 ## Docker Compose
 
 ```bash
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-cd /srv/my-compose-app
-git fetch origin main
-git checkout main
-git pull --ff-only origin main
 docker compose up -d --build
 docker compose ps
-curl -fsS https://app.example.com/health
+curl -fsS http://127.0.0.1:8000/health
 ```
-

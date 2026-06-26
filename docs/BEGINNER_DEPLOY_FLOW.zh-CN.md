@@ -1,6 +1,10 @@
-# VibePilot Deploy 小白全流程图
+# VibePilot Deploy 部署流程参考
 
-这份文档按“我什么都不懂，也要把后端项目自动部署起来”的角度写。
+这是一份参考文档，不是必须从头读完的手册。
+
+如果你只是想快速安装和接入第一个项目，先看：[快速上手](QUICKSTART.zh-CN.md)。
+
+这份文档主要解释完整链路，以及 Python / Go / Java 项目接入时常见的配置方式。
 
 你最终要得到的是：
 
@@ -9,6 +13,10 @@
 - 一个后端项目目录，例如 `/srv/python-api`、`/srv/go-api`、`/srv/java-api`。
 - 一个部署脚本，例如 `/srv/python-api/deploy/deploy.sh`。
 - 一个 WebHook：你每次 `git push` 后，代码平台通知 VibePilot，VibePilot 自动执行部署脚本。
+
+需要先说清楚边界：
+
+VibePilot 不会自动理解你的业务代码。它可以生成 `deploy.sh` 初版和检查项，但项目实际怎么启动、怎么重启、哪个健康检查算成功，仍然需要你按自己的项目确认。
 
 ## 0. 先看懂整套东西在做什么
 

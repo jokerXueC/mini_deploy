@@ -672,11 +672,13 @@ function deployStepsForTemplate(template, project) {
     ],
     java: [
       'if [ -x ./gradlew ]; then ./gradlew clean build -x test; else mvn clean package -DskipTests; fi',
+      `# 确认 /etc/systemd/system/${service}.service 已按你的 Java 项目配置好`,
       `systemctl restart ${shellQuote(service)}`,
       ...healthLine,
     ],
     go: [
       'go build -o app ./cmd/server',
+      `# 确认 /etc/systemd/system/${service}.service 已按你的 Go 项目配置好`,
       `systemctl restart ${shellQuote(service)}`,
       ...healthLine,
     ],
@@ -749,7 +751,7 @@ function generateSetupCommands(project) {
     `  git -C ${shellQuote(workdir)} pull --ff-only origin ${shellQuote(branch)}`,
     'fi',
     '',
-    '# 2. 准备部署脚本；下面已按项目类型生成，可按需微调',
+    '# 2. 准备部署脚本；下面只是初版模板，启用自动部署前请按你的业务项目检查',
     `mkdir -p ${shellQuote(scriptDir)}`,
     `cat > ${shellQuote(script)} <<'SH'`,
     '#!/usr/bin/env bash',
@@ -766,7 +768,10 @@ function generateSetupCommands(project) {
     `mkdir -p ${shellQuote(logDir)}`,
     `touch ${shellQuote(logFile)}`,
     '',
-    '# 3. 回到部署面板保存项目配置；再到 Gitee WebHook 填写页面给出的 URL 和 Token',
+    '# 3. 如果项目通过 systemd 运行，请确认对应 service 已存在且能手动 restart',
+    `# 示例检查：systemctl status ${shellQuote(key)}`,
+    '',
+    '# 4. 回到部署面板保存项目配置；再到 Gitee/GitHub/GitLab WebHook 填写页面给出的 URL 和 Token',
   ].join('\n');
 }
 
