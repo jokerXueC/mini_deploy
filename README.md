@@ -4,6 +4,8 @@ Lightweight self-hosted deploy panel for small servers.
 
 中文小白上手指南: [docs/QUICKSTART.zh-CN.md](docs/QUICKSTART.zh-CN.md)
 
+完整部署流程图和 Python / Go / Java 示例: [docs/BEGINNER_DEPLOY_FLOW.zh-CN.md](docs/BEGINNER_DEPLOY_FLOW.zh-CN.md)
+
 VibePilot Deploy is a tiny Python deploy agent with a built-in web dashboard. It receives Git webhooks, runs your project deploy scripts, records deploy history, shows server health, and lets you inspect Docker containers and logs.
 
 It is designed for low-resource servers where GitLab CI, Jenkins, or a full CI runner is too heavy.
@@ -24,7 +26,7 @@ It is designed for low-resource servers where GitLab CI, Jenkins, or a full CI r
 
 - Linux server
 - Python 3.10+
-- git
+- git, installed before running the installer because the first step is `git clone`
 - systemd
 - Optional: Docker and Docker Compose if your projects use containers
 - Optional: Nginx or Caddy for HTTPS reverse proxy
@@ -34,37 +36,49 @@ It is designed for low-resource servers where GitLab CI, Jenkins, or a full CI r
 Clone this repository on your server:
 
 ```bash
-git clone https://github.com/your-org/vibepilot-deploy.git /root/vibepilot-deploy
+git clone https://gitee.com/XC1960/mini_deploy.git /root/vibepilot-deploy
 cd /root/vibepilot-deploy
 bash install.sh
 ```
 
-Edit environment if you want to change the port, host, or log paths:
+The installer first asks for language. The default is Chinese; enter `en` for English. Then it asks for your dashboard domain. If provided, it can install Nginx when missing, writes `/etc/nginx/conf.d/vibepilot-deploy.conf`, optionally installs Certbot for HTTPS, starts the agent, checks health, and prints the dashboard URL.
 
-```bash
-nano /etc/vibepilot-deploy-agent.env
-```
-
-Edit project configuration:
-
-```bash
-nano /opt/vibepilot-deploy/projects.json
-```
-
-The bundled example projects are disabled by default. Replace `repo`, `workdir`, `script`, `health_url`, and `webhook_secret`, then set `enabled` to `true`.
-
-Start the agent:
-
-```bash
-systemctl restart vibepilot-deploy-agent
-systemctl status vibepilot-deploy-agent
-curl http://127.0.0.1:9010/health
-```
-
-Open the UI through your reverse proxy:
+HTTP access works without HTTPS:
 
 ```text
-https://your-domain.example/deploy/ui
+http://deploy.example.com/deploy/ui
+```
+
+Use HTTPS for production when DNS is ready:
+
+```bash
+certbot --nginx -d deploy.example.com
+```
+
+For non-interactive install:
+
+```bash
+DEPLOY_DOMAIN=deploy.example.com bash install.sh
+```
+
+For non-interactive English install:
+
+```bash
+INSTALL_LANG=en DEPLOY_DOMAIN=deploy.example.com bash install.sh
+```
+
+Useful checks:
+
+```bash
+systemctl status vibepilot-deploy-agent
+curl http://127.0.0.1:9010/health
+nginx -t
+```
+
+Open the UI:
+
+```text
+http://deploy.example.com/deploy/ui
 ```
 
 On first open, set the admin password in the web page. The agent writes the encrypted password into `/etc/vibepilot-deploy-agent.env`; restart the service once after that:

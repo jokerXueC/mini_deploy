@@ -2,10 +2,13 @@
 
 这份文档按“复制、粘贴、检查、启用”的顺序写。你不需要写 CI/CD 配置文件，只要准备一台 Linux 服务器和一个代码仓库。
 
+如果你想按流程图一步一步完成 Python、Go、Java 后端部署，请看：[小白全流程图](BEGINNER_DEPLOY_FLOW.zh-CN.md)。
+
 ## 你需要提前准备
 
 - 一台 Linux 服务器，建议至少 1 核 1G。
 - 服务器 root 权限，或者能执行 `sudo`。
+- 服务器已安装 `git`。这个不自动化，因为安装面板第一步 `git clone` 就需要它。
 - 服务器已经能访问你的代码仓库。
 - 仓库的 SSH Deploy Key 或访问令牌已经配置好。
 - 如果项目用 Docker，需要服务器已安装 Docker。
@@ -16,29 +19,83 @@
 在服务器执行：
 
 ```bash
-git clone https://github.com/your-org/vibepilot-deploy.git /root/vibepilot-deploy
+git clone https://gitee.com/XC1960/mini_deploy.git /root/vibepilot-deploy
 cd /root/vibepilot-deploy
 bash install.sh
-systemctl restart vibepilot-deploy-agent
+```
+
+安装脚本会先问你语言，默认中文：
+
+```text
+请选择安装向导语言 / Select installer language (zh/en，默认 zh):
+```
+
+直接回车就是中文；如果想用英文，输入 `en`。
+
+然后脚本会问你域名，例如：
+
+```text
+请输入部署面板域名，例如 deploy.example.com；直接回车则跳过 Nginx 自动配置:
+```
+
+有域名就填：
+
+```text
+deploy.example.com
+```
+
+没有域名就直接回车，先用本机地址测试。
+
+脚本会自动启动 Agent；如果你填了域名但服务器没装 Nginx，脚本会问你是否自动安装。装好后会自动生成 `/etc/nginx/conf.d/vibepilot-deploy.conf` 并重载 Nginx。脚本还会检测 certbot；如果没有，会询问是否自动安装并申请 HTTPS 证书。
+
+你也可以不交互，直接预填域名：
+
+```bash
+DEPLOY_DOMAIN=deploy.example.com bash install.sh
+```
+
+如果想不交互并使用英文向导：
+
+```bash
+INSTALL_LANG=en DEPLOY_DOMAIN=deploy.example.com bash install.sh
+```
+
+安装后检查：
+
+```bash
 systemctl status vibepilot-deploy-agent
 curl http://127.0.0.1:9010/health
 ```
 
 看到 `{"status":"ok"}` 就说明 Agent 已经启动。
 
-## 2. 配置 Nginx 反向代理
+## 2. 打开面板
 
-如果你希望用 `https://你的域名/deploy/ui` 访问，把 `docs/nginx.example.conf` 里的配置合并到你的站点 Nginx 配置中，然后执行：
+如果安装时填了域名，打开：
 
-```bash
-nginx -t
-systemctl reload nginx
+```text
+http://你的域名/deploy/ui
 ```
 
-没有域名时，也可以临时在服务器本机访问：
+没有 HTTPS 也能访问，只是公网长期使用时建议后续开启 HTTPS。
+
+如果后续用 certbot 配了 HTTPS，打开：
+
+```text
+https://你的域名/deploy/ui
+```
+
+没有域名时，在服务器本机访问：
 
 ```text
 http://127.0.0.1:9010/ui
+```
+
+如果要检查 Nginx：
+
+```bash
+nginx -t
+systemctl status nginx
 ```
 
 如果要从外网直接访问，请优先配置 HTTPS 反向代理，不建议直接暴露 `9010` 端口。

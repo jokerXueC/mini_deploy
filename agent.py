@@ -18,7 +18,6 @@ import json
 import os
 import queue
 import secrets
-import selectors
 import shutil
 import signal
 import subprocess
@@ -61,6 +60,7 @@ DOCKER_LOG_TAIL_MAX_LINES = int(os.getenv("DEPLOY_DOCKER_LOG_TAIL_MAX_LINES", "5
 UI_PASSWORD_HASH = os.getenv("DEPLOY_UI_PASSWORD_HASH", "")
 UI_SESSION_SECRET = os.getenv("DEPLOY_UI_SESSION_SECRET", "").strip() or WEBHOOK_SECRET
 UI_SESSION_TTL_SECONDS = int(os.getenv("DEPLOY_UI_SESSION_TTL_SECONDS", str(8 * 60 * 60)))
+COOKIE_SECURE_MODE = os.getenv("DEPLOY_COOKIE_SECURE", "auto").strip().lower()
 COOKIE_NAME = "vibepilot_deploy_session"
 PASSWORD_HASH_ITERATIONS = 260_000
 MAX_HISTORY = 60
@@ -188,6 +188,7 @@ PROJECTS = _load_projects()
 DEFAULT_PROJECT_KEY = next(iter(PROJECTS))
 
 _jobs: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=20)
+_jobs_admin_lock = threading.Lock()
 _projects_lock = threading.Lock()
 _running_lock = threading.Lock()
 _state_lock = threading.Lock()
@@ -787,24 +788,44 @@ def _project_doctor(project: DeployProject) -> dict[str, Any]:
 
 
 def _queued_jobs_snapshot() -> list[dict[str, Any]]:
-    with _jobs.mutex:
+    with _jobs_admin_lock:
         return list(_jobs.queue)
+
+
+def _enqueue_job(job: dict[str, Any]) -> None:
+    with _jobs_admin_lock:
+        _jobs.put_nowait(job)
+
+
+def _dequeue_job() -> dict[str, Any]:
+    while True:
+        with _jobs_admin_lock:
+            try:
+                return _jobs.get_nowait()
+            except queue.Empty:
+                pass
+        time.sleep(0.2)
 
 
 def _cancel_queued_jobs(project: DeployProject | None = None) -> list[dict[str, Any]]:
     canceled: list[dict[str, Any]] = []
-    with _jobs.mutex:
-        kept = []
-        while _jobs.queue:
-            job = _jobs.queue.popleft()
+    kept: list[dict[str, Any]] = []
+    with _jobs_admin_lock:
+        while True:
+            try:
+                job = _jobs.get_nowait()
+            except queue.Empty:
+                break
+            _jobs.task_done()
             if project is None or (job.get("project_key") or DEFAULT_PROJECT_KEY) == project.key:
                 canceled.append(job)
             else:
                 kept.append(job)
-        _jobs.queue.clear()
-        _jobs.queue.extend(kept)
-        _jobs.unfinished_tasks = max(0, _jobs.unfinished_tasks - len(canceled))
-        _jobs.not_full.notify_all()
+        for job in kept:
+            try:
+                _jobs.put_nowait(job)
+            except queue.Full:
+                canceled.append(job)
     _update_state(queue_size=_jobs.qsize())
     return canceled
 
@@ -833,6 +854,23 @@ def _kill_process(proc: subprocess.Popen[str]) -> None:
             proc.kill()
         except Exception:
             pass
+
+
+def _read_process_output(proc: subprocess.Popen[str], stop_event: threading.Event) -> None:
+    if proc.stdout is None:
+        return
+    try:
+        for line in proc.stdout:
+            clean_line = line.rstrip()
+            if clean_line:
+                _log(f"deploy: {clean_line}")
+                phase = _phase_from_deploy_line(clean_line)
+                if phase:
+                    _update_current_deploy(phase=phase[0], phase_detail=phase[1])
+            if stop_event.is_set() and proc.poll() is not None:
+                break
+    except Exception as exc:  # noqa: BLE001 - output reading must not orphan the deploy process
+        _log(f"deploy output read failed: {exc}")
 
 
 def _percent(value: float | int | str | None) -> float | None:
@@ -1429,6 +1467,10 @@ def _run_deploy(job: dict[str, Any]) -> None:
     }
     _update_state(running=True, current_deploy=current)
     canceled = False
+    exit_code = 1
+    proc: subprocess.Popen[str] | None = None
+    output_stop = threading.Event()
+    output_reader: threading.Thread | None = None
 
     try:
         env = os.environ.copy()
@@ -1469,52 +1511,37 @@ def _run_deploy(job: dict[str, Any]) -> None:
         with _deploy_process_lock:
             _deploy_process = proc
             _cancel_requested = None
+        output_reader = threading.Thread(target=_read_process_output, args=(proc, output_stop), daemon=True)
+        output_reader.start()
         timed_out = False
         deadline = time.time() + project.timeout_seconds
-        selector = selectors.DefaultSelector()
-        if proc.stdout is not None:
-            selector.register(proc.stdout, selectors.EVENT_READ)
-        try:
-            while True:
-                with _deploy_process_lock:
-                    cancel_request = _cancel_requested
-                if cancel_request:
-                    canceled = True
-                    _log(f"deploy canceled project={project.key} action={action} actor={cancel_request.get('actor', '')}")
-                    _update_current_deploy(
-                        phase="canceled",
-                        phase_label=_phase_label("canceled"),
-                        phase_detail=f"取消人 {cancel_request.get('actor', '')}",
-                    )
-                    if proc.poll() is None:
-                        _terminate_process(proc)
-                    break
-                if proc.poll() is not None:
-                    if proc.stdout is not None:
-                        for line in proc.stdout.read().splitlines():
-                            _log(f"deploy: {line}")
-                    break
-                if time.time() > deadline:
-                    timed_out = True
-                    _log(f"deploy timeout project={project.key} action={action} after {project.timeout_seconds}s")
-                    _update_current_deploy(
-                        phase="timeout",
-                        phase_label=_phase_label("timeout"),
-                        phase_detail=f"超过 {project.timeout_seconds}s",
-                    )
+        while True:
+            with _deploy_process_lock:
+                cancel_request = _cancel_requested
+            if cancel_request:
+                canceled = True
+                _log(f"deploy canceled project={project.key} action={action} actor={cancel_request.get('actor', '')}")
+                _update_current_deploy(
+                    phase="canceled",
+                    phase_label=_phase_label("canceled"),
+                    phase_detail=f"取消人 {cancel_request.get('actor', '')}",
+                )
+                if proc.poll() is None:
                     _terminate_process(proc)
-                    break
-                for key, _ in selector.select(timeout=1):
-                    line = key.fileobj.readline()
-                    if not line:
-                        continue
-                    clean_line = line.rstrip()
-                    _log(f"deploy: {clean_line}")
-                    phase = _phase_from_deploy_line(clean_line)
-                    if phase:
-                        _update_current_deploy(phase=phase[0], phase_detail=phase[1])
-        finally:
-            selector.close()
+                break
+            if proc.poll() is not None:
+                break
+            if time.time() > deadline:
+                timed_out = True
+                _log(f"deploy timeout project={project.key} action={action} after {project.timeout_seconds}s")
+                _update_current_deploy(
+                    phase="timeout",
+                    phase_label=_phase_label("timeout"),
+                    phase_detail=f"超过 {project.timeout_seconds}s",
+                )
+                _terminate_process(proc)
+                break
+            time.sleep(0.2)
         if timed_out:
             try:
                 proc.wait(timeout=10)
@@ -1534,8 +1561,18 @@ def _run_deploy(job: dict[str, Any]) -> None:
         _log(f"deploy finished project={project.key} action={action} code={exit_code} after={env['DEPLOY_AFTER']}")
     except Exception as exc:  # noqa: BLE001 - top-level worker guard
         exit_code = 1
+        if proc is not None and proc.poll() is None:
+            _terminate_process(proc)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _kill_process(proc)
+                proc.wait(timeout=10)
         _log(f"deploy failed: {exc}")
     finally:
+        output_stop.set()
+        if output_reader is not None:
+            output_reader.join(timeout=2)
         finished_ts = time.time()
         entry = {
             **current,
@@ -1556,7 +1593,7 @@ def _run_deploy(job: dict[str, Any]) -> None:
 
 def _worker() -> None:
     while True:
-        job = _jobs.get()
+        job = _dequeue_job()
         try:
             _run_deploy(job)
         finally:
@@ -1691,11 +1728,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _cookie_secure(self) -> bool:
-        forwarded_proto = self.headers.get("X-Forwarded-Proto", "")
-        host = self.headers.get("Host", "")
-        return forwarded_proto == "https" or (
-            not host.startswith("127.0.0.1") and not host.startswith("localhost")
-        )
+        if COOKIE_SECURE_MODE in {"1", "true", "yes", "on", "always"}:
+            return True
+        if COOKIE_SECURE_MODE in {"0", "false", "no", "off", "never"}:
+            return False
+        forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+        forwarded_ssl = self.headers.get("X-Forwarded-SSL", "").strip().lower()
+        return forwarded_proto == "https" or forwarded_ssl in {"1", "true", "on"}
 
     def _set_session_cookie(self) -> None:
         secure = "; Secure" if self._cookie_secure() else ""
@@ -2132,7 +2171,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         job = _manual_deploy_job(self.client_address[0], project)
         try:
-            _jobs.put_nowait(job)
+            _enqueue_job(job)
         except queue.Full:
             self._write_json(429, {"error": "deploy_queue_full"})
             return
@@ -2168,7 +2207,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         job = _rollback_job(self.client_address[0], project, state)
         try:
-            _jobs.put_nowait(job)
+            _enqueue_job(job)
         except queue.Full:
             self._write_json(429, {"error": "deploy_queue_full"})
             return
@@ -2185,6 +2224,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_cancel(self, query: dict[str, list[str]]) -> None:
         requested = query.get("project", [""])[0] or query.get("project_key", [""])[0]
+        all_requested = (query.get("all", [""])[0] or "").strip().lower() in {"1", "true", "yes", "all"}
+        if not requested and not all_requested:
+            self._write_json(400, {"error": "project_required"})
+            return
         project: DeployProject | None = None
         if requested:
             project = PROJECTS.get(_safe_project_key(requested))
@@ -2288,7 +2331,7 @@ class Handler(BaseHTTPRequestHandler):
             **_extract_commit_details(payload),
         }
         try:
-            _jobs.put_nowait(job)
+            _enqueue_job(job)
         except queue.Full:
             self._write_json(429, {"error": "deploy_queue_full"})
             return
@@ -2326,6 +2369,12 @@ def _project_script_path(project: DeployProject, action: str = "deploy") -> Path
     return script if script.is_absolute() else project.workdir / script
 
 
+def _script_is_executable(path: Path) -> bool:
+    if os.name == "nt":
+        return path.is_file()
+    return path.is_file() and os.access(path, os.X_OK)
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "hash-password":
         _print_password_hash()
@@ -2342,6 +2391,13 @@ def main() -> None:
     ]
     if missing_scripts:
         raise SystemExit(f"deploy script not found: {', '.join(missing_scripts)}")
+    non_executable_scripts = [
+        f"{project.key}:{_project_script_path(project)}"
+        for project in enabled_projects
+        if not _script_is_executable(_project_script_path(project))
+    ]
+    if non_executable_scripts:
+        raise SystemExit(f"deploy script is not executable, run chmod +x: {', '.join(non_executable_scripts)}")
     missing_rollback_scripts = [
         f"{project.key}:{_project_script_path(project, action='rollback')}"
         for project in enabled_projects
@@ -2349,6 +2405,13 @@ def main() -> None:
     ]
     if missing_rollback_scripts:
         raise SystemExit(f"rollback script not found: {', '.join(missing_rollback_scripts)}")
+    non_executable_rollback_scripts = [
+        f"{project.key}:{_project_script_path(project, action='rollback')}"
+        for project in enabled_projects
+        if project.rollback_script and not _script_is_executable(_project_script_path(project, action="rollback"))
+    ]
+    if non_executable_rollback_scripts:
+        raise SystemExit(f"rollback script is not executable, run chmod +x: {', '.join(non_executable_rollback_scripts)}")
 
     _read_state()
     threading.Thread(target=_worker, daemon=True).start()

@@ -730,6 +730,15 @@ function generateSetupCommands(project) {
   const deploySteps = deployStepsForTemplate(template, project);
   return [
     `# 项目类型：${projectTemplateLabel(template)}`,
+    '# 0. 检查服务器是否能访问仓库',
+    'command -v git >/dev/null 2>&1 || { echo "未安装 git，请先安装 git"; exit 1; }',
+    `git ls-remote ${shellQuote(repo)} HEAD >/dev/null || {`,
+    '  echo "服务器无法访问仓库。请先把服务器 SSH 公钥添加到代码平台 Deploy Key / SSH Key。";',
+    '  echo "查看服务器公钥：cat ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub 2>/dev/null";',
+    '  echo "如果没有公钥：ssh-keygen -t ed25519 -C deploy@$(hostname)";',
+    '  exit 1;',
+    '}',
+    '',
     '# 1. 准备项目目录和代码',
     `mkdir -p ${shellQuote(workdir)}`,
     `if [ ! -d ${shellQuote(workdir + '/.git')} ]; then`,
@@ -1272,9 +1281,14 @@ function renderStatus(data) {
   }
   const cancelDeployBtn = $('cancelDeployBtn');
   if (cancelDeployBtn) {
-    const canCancel = Boolean((activeProject && (activeProject.running || Number(activeProject.queue_size || 0) > 0)) || state.running || Number(state.queue_size || 0) > 0);
+    const projectCanCancel = Boolean(activeProject && (activeProject.running || Number(activeProject.queue_size || 0) > 0));
+    const allCanCancel = Boolean(!selectedProjectKey && (state.running || Number(state.queue_size || 0) > 0));
+    const canCancel = projectCanCancel || allCanCancel;
     cancelDeployBtn.disabled = !canCancel;
-    cancelDeployBtn.title = canCancel ? '取消当前运行或排队的部署任务' : '当前没有可取消的部署任务';
+    cancelDeployBtn.textContent = !selectedProjectKey ? '取消全部' : '取消';
+    cancelDeployBtn.title = canCancel
+      ? (!selectedProjectKey ? '取消所有项目当前运行或排队的部署任务' : '取消当前项目运行或排队的部署任务')
+      : '当前没有可取消的部署任务';
   }
 
   updateLiveIndicator(agent, state, active);
@@ -1600,10 +1614,11 @@ async function manualRollback() {
 }
 
 async function cancelDeploy() {
-  const projectParam = selectedProjectKey ? `?project=${encodeURIComponent(selectedProjectKey)}` : '';
+  const projectParam = selectedProjectKey ? `?project=${encodeURIComponent(selectedProjectKey)}` : '?all=1';
+  const targetText = selectedProjectKey || '全部项目';
   const confirmed = await showConfirmDialog({
     title: '取消部署',
-    message: `确认取消 ${selectedProjectKey || '当前'} 部署任务？正在运行的脚本会收到终止信号。`,
+    message: `确认取消 ${targetText} 的部署任务？正在运行的脚本会收到终止信号。`,
     confirmText: '取消部署',
   });
   if (!confirmed) return;
@@ -1619,7 +1634,7 @@ async function cancelDeploy() {
   } finally {
     window.setTimeout(() => {
       button.disabled = false;
-      button.textContent = '取消';
+      button.textContent = !selectedProjectKey ? '取消全部' : '取消';
     }, 1200);
   }
 }
