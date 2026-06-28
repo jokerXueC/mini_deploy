@@ -45,6 +45,7 @@ bash install.sh
 ```
 
 填了域名后，脚本会尝试自动配置 Nginx，并可选安装 certbot 申请 HTTPS。
+如果你的项目使用 Docker Compose，且服务器未安装 Docker，安装脚本也会询问是否自动安装 Docker；默认不安装。
 
 没有 HTTPS 也能访问：
 
@@ -80,19 +81,34 @@ curl http://127.0.0.1:9010/health
 - 部署分支，例如 `main`
 - 服务器目录，例如 `/srv/fastapi-demo`
 - 部署脚本，例如 `/srv/fastapi-demo/deploy/deploy.sh`
+- systemd 服务名，例如 `fastapi-demo`
+- 服务端口，例如 `8001`
+- 启动命令，不懂可以先留空
+- 业务域名，例如 `api.example.com`，没有可以先留空
 - 健康检查，例如 `http://127.0.0.1:8001/health`
 
-面板会生成一段“服务器执行指令”。你复制到服务器执行一次。
+然后点击“自动初始化”。面板会直接在服务器上准备项目，不需要你复制大段命令。
 
-这段指令会：
+自动初始化会：
 
 - 检查服务器是否能访问仓库
 - clone 或更新代码
 - 生成一份初版 `deploy.sh`
+- 对 Python / Go / Java 项目生成一份初版 systemd service
 - 创建日志目录
 - 设置脚本可执行权限
 
 如果仓库权限不通，它会提示你配置 SSH Key。
+
+“服务器执行指令”仍然保留，作为自动初始化失败时的备用方案。
+
+如果你填写了业务域名，可以点击“配置业务域名”。它会自动生成该项目的 Nginx 反向代理配置：
+
+```text
+api.example.com -> http://127.0.0.1:8001
+```
+
+如果勾选“业务域名申请 HTTPS”，会在服务器已安装 certbot 时尝试自动申请证书。没有 HTTPS 时，HTTP 访问仍然可用。
 
 ## 重要边界
 

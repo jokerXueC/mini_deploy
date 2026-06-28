@@ -9,6 +9,153 @@ let serverRefreshSeconds = 30;
 let serverRefreshTimer = null;
 let currentContainerLogName = '';
 let currentContainerLogLineLimit = 200;
+let containerLogKeywordTimer = null;
+let systemTrendRange = '24h';
+let notificationDirty = false;
+const THEME_STORAGE_KEY = 'mini_deploy-theme';
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function updateThemeToggle() {
+  const theme = currentTheme();
+  const button = $('themeToggleBtn');
+  const text = $('themeToggleText');
+  if (button) {
+    button.setAttribute('aria-pressed', theme === 'light' ? 'true' : 'false');
+    button.setAttribute('aria-label', theme === 'light' ? '切换深色模式' : '切换浅色模式');
+  }
+  if (text) text.textContent = theme === 'light' ? '深色' : '浅色';
+}
+
+function applyTheme(theme) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch (_) {}
+  updateThemeToggle();
+}
+
+function fallbackThemeReveal() {
+  const reveal = document.createElement('span');
+  reveal.className = 'theme-fallback-reveal';
+  document.body.appendChild(reveal);
+  reveal.addEventListener('animationend', () => reveal.remove(), { once: true });
+}
+
+function toggleTheme() {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  const revealClass = next === 'light' ? 'theme-reveal-light' : 'theme-reveal-dark';
+  if (document.startViewTransition) {
+    document.documentElement.classList.add(revealClass);
+    const transition = document.startViewTransition(() => applyTheme(next));
+    transition.finished.finally(() => {
+      document.documentElement.classList.remove('theme-reveal-light', 'theme-reveal-dark');
+    });
+    return;
+  }
+  applyTheme(next);
+  fallbackThemeReveal();
+}
+
+updateThemeToggle();
+
+function positiveLineCount(value, fallback = 200) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function syncCustomLineInput(selectId, inputId, currentValue = 200) {
+  const select = $(selectId);
+  const input = $(inputId);
+  if (!select || !input) return;
+  const isCustom = select.value === 'custom';
+  input.hidden = !isCustom;
+  if (isCustom && !positiveLineCount(input.value, 0)) {
+    input.value = String(positiveLineCount(currentValue, 200));
+  }
+}
+
+function selectedLineCount(selectId, inputId, fallback = 200) {
+  const select = $(selectId);
+  if (!select) return positiveLineCount(fallback, 200);
+  if (select.value === 'custom') {
+    return positiveLineCount($(inputId)?.value, fallback);
+  }
+  return positiveLineCount(select.value, fallback);
+}
+
+function selectedDownloadLines(selectId, inputId, currentValue = 200) {
+  const select = $(selectId);
+  const value = select ? select.value : 'current';
+  if (value === 'all') return 'all';
+  if (value === 'current') return positiveLineCount(currentValue, 200);
+  if (value === 'custom') return selectedLineCount(selectId, inputId, currentValue);
+  return positiveLineCount(value, currentValue);
+}
+
+function closeLogSelectMenus(except = null) {
+  document.querySelectorAll('.log-select-wrap.open').forEach(wrap => {
+    if (except && wrap === except) return;
+    wrap.classList.remove('open');
+  });
+}
+
+function enhanceLogSelect(selectId) {
+  const select = $(selectId);
+  if (!select || select.dataset.enhanced === '1') return;
+  select.dataset.enhanced = '1';
+  const wrap = document.createElement('span');
+  wrap.className = 'log-select-wrap';
+  select.parentNode.insertBefore(wrap, select);
+  wrap.appendChild(select);
+  select.addEventListener('focus', () => {
+    closeLogSelectMenus(wrap);
+    wrap.classList.add('open');
+  });
+  select.addEventListener('mousedown', () => {
+    closeLogSelectMenus(wrap);
+    wrap.classList.add('open');
+  });
+  select.addEventListener('change', () => wrap.classList.remove('open'));
+  select.addEventListener('blur', () => window.setTimeout(() => wrap.classList.remove('open'), 160));
+}
+
+function containerLogFilterOptions() {
+  const level = $('containerLogFilterSelect')?.value || 'all';
+  const keyword = ($('containerLogKeywordInput')?.value || '').trim();
+  const regex = $('containerLogRegexInput')?.checked ? '1' : '';
+  const context = positiveLineCount($('containerLogContextSelect')?.value, 0);
+  if (level === 'keyword' && !keyword) {
+    return { level: 'all', keyword: '', regex: '', context };
+  }
+  return {
+    level,
+    keyword: level === 'keyword' ? keyword : '',
+    regex: level === 'keyword' && keyword ? regex : '',
+    context,
+  };
+}
+
+function containerLogFilterLabel(options) {
+  if (!options || options.level === 'all') return '';
+  if (options.level === 'error') return ' · 异常';
+  if (options.level === 'warn') return ' · 警告';
+  if (options.level === 'keyword' && options.keyword) {
+    return options.regex ? ` · 正则 ${options.keyword}` : ` · 关键词 ${options.keyword}`;
+  }
+  return '';
+}
+
+function syncContainerLogFilterControls() {
+  const isKeyword = ($('containerLogFilterSelect')?.value || 'all') === 'keyword';
+  const keywordInput = $('containerLogKeywordInput');
+  const regexControl = $('containerLogRegexControl');
+  if (keywordInput) keywordInput.hidden = !isKeyword;
+  if (regexControl) regexControl.hidden = !isKeyword;
+}
 
 function fmtTime(value) {
   if (!value) return '-';
@@ -555,6 +702,8 @@ function renderDeployCard(item, index, historyItems, refreshSeconds, closedDetai
             <div><dt>Author</dt><dd title="${detailValue(item.commit_author)}">${detailValue(item.commit_author)}</dd></div>
             <div><dt>Ref</dt><dd title="${detailValue(item.ref)}">${detailValue(item.ref)}</dd></div>
             <div class="wide-detail"><dt>Message</dt><dd title="${detailValue(item.commit_message)}">${detailValue(item.commit_message)}</dd></div>
+            <div class="wide-detail"><dt>阶段耗时</dt><dd>${renderPhaseDurations(item)}</dd></div>
+            <div class="wide-detail"><dt>变更文件</dt><dd>${renderChangedFiles(item)}</dd></div>
           </dl>
         </details>
       </div>
@@ -610,6 +759,97 @@ async function postJsonBody(path, payload) {
   return data;
 }
 
+function severityClass(level) {
+  if (level === 'critical' || level === 'failed') return 'failed';
+  if (level === 'warning' || level === 'running') return 'running';
+  if (level === 'success' || level === 'ok') return 'success';
+  return 'neutral';
+}
+
+function renderPreflightData(data) {
+  const target = $('preflightResult');
+  if (!target) return;
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const level = data?.level || 'unknown';
+  const badgeClass = severityClass(level);
+  const label = level === 'critical'
+    ? '发现阻断问题'
+    : level === 'warning'
+      ? '有建议检查项'
+      : level === 'ok'
+        ? '体检通过'
+        : '暂无体检结果';
+  if (!items.length) {
+    target.innerHTML = `<div class="preflight-head"><span class="badge ${badgeClass}">${label}</span></div>`;
+    return;
+  }
+  target.innerHTML = `
+    <div class="preflight-head">
+      <span class="badge ${badgeClass}">${label}</span>
+      <span>${items.length} 项检查</span>
+    </div>
+    <div class="preflight-items">
+      ${items.map(item => `
+        <div class="preflight-item ${severityClass(item.level)}">
+          <div>
+            <strong>${escapeHtml(item.title || '-')}</strong>
+            <span>${escapeHtml(item.detail || '')}</span>
+          </div>
+          ${item.command ? `<code class="copy-command" title="点击复制">${escapeHtml(item.command)}</code>` : ''}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function fetchPreflightData() {
+  const projectParam = selectedProjectKey ? `?project=${encodeURIComponent(selectedProjectKey)}` : '';
+  const data = await fetchJson(`preflight${projectParam}`);
+  renderPreflightData(data);
+  return data;
+}
+
+async function runPreflight() {
+  const button = $('preflightBtn');
+  const oldText = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = '体检中';
+  }
+  const target = $('preflightResult');
+  if (target) target.textContent = '正在检查项目目录、Git、部署脚本、Docker、磁盘和日志目录...';
+  try {
+    await fetchPreflightData();
+  } catch (err) {
+    if (target) {
+      target.innerHTML = `<div class="preflight-item failed"><strong>体检失败</strong><span>${escapeHtml(err.message)}</span></div>`;
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = oldText || '运行体检';
+    }
+  }
+}
+
+async function forceUnlockDeploy() {
+  const confirmed = await showConfirmDialog({
+    title: '强制解除部署锁',
+    message: '只有确认没有部署脚本在运行时才建议强制解锁。确认继续？',
+    confirmText: '强制解锁',
+  });
+  if (!confirmed) return;
+  try {
+    const result = await postJson('force-unlock');
+    const target = $('preflightResult');
+    if (target) target.textContent = result.unlocked ? '部署锁已解除。' : '当前没有可解除的部署锁。';
+    await refresh();
+  } catch (err) {
+    const target = $('preflightResult');
+    if (target) target.textContent = `强制解锁失败: ${err.message}`;
+  }
+}
+
 function projectByKey(key) {
   return (lastProjects || []).find(project => project.key === key) || null;
 }
@@ -646,6 +886,7 @@ function normalizedProjectKeyFromForm(project) {
 function projectTemplateLabel(template) {
   return ({
     docker: 'Docker Compose',
+    python: 'Python / systemd',
     node: 'Node / PM2',
     java: 'Java / systemd',
     go: 'Go / systemd',
@@ -655,7 +896,7 @@ function projectTemplateLabel(template) {
 }
 
 function deployStepsForTemplate(template, project) {
-  const service = normalizedProjectKeyFromForm(project);
+  const service = project.service_name || normalizedProjectKeyFromForm(project);
   const healthUrl = project.health_url || '';
   const healthLine = healthUrl ? [`curl -fsS --max-time 10 ${shellQuote(healthUrl)}`] : ['# 可选：填写健康检查 URL 后这里会自动检查'];
   const map = {
@@ -670,8 +911,20 @@ function deployStepsForTemplate(template, project) {
       `pm2 restart ${shellQuote(service)} || pm2 start npm --name ${shellQuote(service)} -- start`,
       ...healthLine,
     ],
+    python: [
+      'python3 -m venv .venv',
+      '. .venv/bin/activate',
+      'pip install --upgrade pip',
+      'pip install -r requirements.txt',
+      `systemctl restart ${shellQuote(service)}`,
+      ...healthLine,
+    ],
     java: [
       'if [ -x ./gradlew ]; then ./gradlew clean build -x test; else mvn clean package -DskipTests; fi',
+      'mkdir -p target/deploy',
+      'jar_file=$(find target -maxdepth 1 -name \'*.jar\' ! -name \'*sources.jar\' ! -name \'*javadoc.jar\' | head -n 1)',
+      'if [ -z "${jar_file:-}" ]; then echo "未找到 target/*.jar"; exit 1; fi',
+      'cp "$jar_file" target/deploy/app.jar',
       `# 确认 /etc/systemd/system/${service}.service 已按你的 Java 项目配置好`,
       `systemctl restart ${shellQuote(service)}`,
       ...healthLine,
@@ -705,6 +958,10 @@ function applyTemplateDefaults(force = false) {
   const script = $('projectScriptInput');
   const log = $('projectLogInput');
   const health = $('projectHealthInput');
+  const serviceName = $('projectServiceNameInput');
+  const servicePort = $('projectServicePortInput');
+  const startCommand = $('projectStartCommandInput');
+  const appDomain = $('projectAppDomainInput');
   if (force || !workdir.value || workdir.value === '/root/' || workdir.value.includes('/root/example')) {
     workdir.value = `/srv/${key}`;
   }
@@ -714,9 +971,55 @@ function applyTemplateDefaults(force = false) {
   if (force || !log.value || log.value.includes('example-deploy')) {
     log.value = `/var/log/mini_deploy/${key}-deploy.log`;
   }
+  if (serviceName && (force || !serviceName.value)) {
+    serviceName.value = key;
+  }
+  if (servicePort && (force || !servicePort.value)) {
+    servicePort.value = template === 'java' ? '8003' : template === 'go' ? '8002' : '8001';
+  }
+  if (startCommand && force) {
+    startCommand.value = '';
+  }
+  if (appDomain && force) {
+    appDomain.value = '';
+  }
   if ((force || !health.value) && template !== 'custom') {
     health.value = health.value || `https://${key}.example.com/health`;
   }
+}
+
+function defaultStartCommand(project) {
+  const key = normalizedProjectKeyFromForm(project);
+  const servicePort = Number(project.service_port || 8000);
+  const workdir = project.workdir || `/srv/${key}`;
+  if (project.start_command) return project.start_command;
+  if (project.template === 'python') return `${workdir}/.venv/bin/uvicorn main:app --host 127.0.0.1 --port ${servicePort || 8000}`;
+  if (project.template === 'go') return `${workdir}/bin/app`;
+  if (project.template === 'java') return `/usr/bin/java -jar ${workdir}/target/deploy/app.jar --server.port=${servicePort || 8000}`;
+  return '';
+}
+
+function systemdServiceText(project) {
+  const key = normalizedProjectKeyFromForm(project);
+  const service = project.service_name || key;
+  const command = defaultStartCommand(project);
+  if (!command) return '';
+  return [
+    '[Unit]',
+    `Description=${project.name || key} service`,
+    'After=network.target',
+    '',
+    '[Service]',
+    'Type=simple',
+    `WorkingDirectory=${project.workdir || `/srv/${key}`}`,
+    `ExecStart=${command}`,
+    'Restart=always',
+    'RestartSec=3',
+    'KillSignal=SIGINT',
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+  ].join('\n');
 }
 
 function generateSetupCommands(project) {
@@ -730,6 +1033,48 @@ function generateSetupCommands(project) {
   const scriptDir = dirname(script, '.');
   const logDir = dirname(logFile, '/var/log');
   const deploySteps = deployStepsForTemplate(template, project);
+  const service = project.service_name || key;
+  const serviceText = systemdServiceText({ ...project, workdir, service_name: service });
+  const appDomain = String(project.app_domain || '').replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+  const serviceCommands = serviceText ? [
+    '',
+    '# 3. 可选：生成 systemd 初版服务文件；如果启动命令不符合你的项目，请先修改',
+    `cat > /etc/systemd/system/${service}.service <<'SERVICE'`,
+    serviceText,
+    'SERVICE',
+    'systemctl daemon-reload',
+    `systemctl enable ${shellQuote(service)}`,
+  ] : [
+    '',
+    '# 3. 如果项目通过 systemd 运行，请确认对应 service 已存在且能手动 restart',
+    `# 示例检查：systemctl status ${shellQuote(key)}`,
+  ];
+  const nginxCommands = appDomain ? [
+    '',
+    '# 4. 可选：生成业务域名 Nginx 反向代理；面板里的“配置业务域名”按钮也会做这件事',
+    'command -v nginx >/dev/null 2>&1 || { echo "未安装 nginx，请先安装 nginx"; exit 1; }',
+    `cat > /etc/nginx/conf.d/mini-deploy-${key}.conf <<'NGINX'`,
+    'server {',
+    '    listen 80;',
+    `    server_name ${appDomain};`,
+    '',
+    '    client_max_body_size 50m;',
+    '    location / {',
+    `        proxy_pass http://127.0.0.1:${Number(project.service_port || 8000)};`,
+    '        proxy_http_version 1.1;',
+    '        proxy_set_header Host $host;',
+    '        proxy_set_header X-Real-IP $remote_addr;',
+    '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+    '        proxy_set_header X-Forwarded-Proto $scheme;',
+    '        proxy_set_header Upgrade $http_upgrade;',
+    '        proxy_set_header Connection "upgrade";',
+    '    }',
+    '}',
+    'NGINX',
+    'nginx -t',
+    'systemctl reload nginx || systemctl restart nginx',
+    project.app_https ? `certbot --nginx -d ${shellQuote(appDomain)}` : '# 如需 HTTPS：certbot --nginx -d 你的业务域名',
+  ] : [];
   return [
     `# 项目类型：${projectTemplateLabel(template)}`,
     '# 0. 检查服务器是否能访问仓库',
@@ -767,11 +1112,10 @@ function generateSetupCommands(project) {
     `chmod +x ${shellQuote(script)}`,
     `mkdir -p ${shellQuote(logDir)}`,
     `touch ${shellQuote(logFile)}`,
+    ...serviceCommands,
+    ...nginxCommands,
     '',
-    '# 3. 如果项目通过 systemd 运行，请确认对应 service 已存在且能手动 restart',
-    `# 示例检查：systemctl status ${shellQuote(key)}`,
-    '',
-    '# 4. 回到部署面板保存项目配置；再到 Gitee/GitHub/GitLab WebHook 填写页面给出的 URL 和 Token',
+    '# 5. 回到部署面板保存项目配置；再到 Gitee/GitHub/GitLab WebHook 填写页面给出的 URL 和 Token',
   ].join('\n');
 }
 
@@ -847,6 +1191,171 @@ function renderDoctorResult(payload) {
   }).join('');
 }
 
+function renderBootstrapResult(payload) {
+  const target = $('projectDoctorResult');
+  if (!target) return;
+  const bootstrap = payload.bootstrap || payload;
+  const results = Array.isArray(bootstrap.results) ? bootstrap.results : [];
+  const sshKeys = Array.isArray(bootstrap.ssh_public_keys) ? bootstrap.ssh_public_keys : [];
+  const statusClass = bootstrap.ok ? 'ok' : 'fail';
+  const statusText = bootstrap.ok ? '自动初始化完成' : '自动初始化未完成';
+  target.innerHTML = `
+    <div class="doctor-item ${statusClass}">
+      <div class="doctor-icon">${bootstrap.ok ? '✓' : '×'}</div>
+      <div>
+        <strong>${escapeHtml(statusText)}</strong>
+        <span>${escapeHtml(bootstrap.message || (bootstrap.service_written ? `已生成 ${bootstrap.service_name}.service` : '已执行服务器初始化步骤'))}</span>
+      </div>
+    </div>
+    ${results.map(item => `
+      <div class="doctor-item ${item.ok ? 'ok' : 'fail'}">
+        <div class="doctor-icon">${item.ok ? '✓' : '×'}</div>
+        <div>
+          <strong>${escapeHtml(item.step || '-')}</strong>
+          <span>${escapeHtml(item.detail || item.output || '')}</span>
+        </div>
+      </div>
+    `).join('')}
+    ${sshKeys.length ? `
+      <div class="command-box bootstrap-key-box">
+        <div class="webhook-label">服务器 SSH 公钥，复制到代码平台 Deploy Key / SSH Key</div>
+        <pre class="command-output">${escapeHtml(sshKeys.join('\n'))}</pre>
+      </div>
+    ` : ''}
+  `;
+}
+
+function renderNginxResult(payload) {
+  const target = $('projectDoctorResult');
+  if (!target) return;
+  const nginx = payload.nginx || payload;
+  const results = Array.isArray(nginx.results) ? nginx.results : [];
+  const statusClass = nginx.ok ? 'ok' : 'fail';
+  const statusText = nginx.ok ? '业务域名配置完成' : '业务域名配置未完成';
+  target.innerHTML = `
+    <div class="doctor-item ${statusClass}">
+      <div class="doctor-icon">${nginx.ok ? '✓' : '×'}</div>
+      <div>
+        <strong>${escapeHtml(statusText)}</strong>
+        <span>${escapeHtml(nginx.url || nginx.domain || '请检查下方结果')}</span>
+      </div>
+    </div>
+    ${results.map(item => `
+      <div class="doctor-item ${item.ok ? 'ok' : 'fail'}">
+        <div class="doctor-icon">${item.ok ? '✓' : '×'}</div>
+        <div>
+          <strong>${escapeHtml(item.step || '-')}</strong>
+          <span>${escapeHtml(item.detail || item.output || '')}</span>
+        </div>
+      </div>
+    `).join('')}
+    ${nginx.conf ? `
+      <div class="doctor-item info">
+        <div class="doctor-icon">i</div>
+        <div><strong>Nginx 配置文件</strong><span>${escapeHtml(nginx.conf)}</span></div>
+      </div>
+    ` : ''}
+  `;
+}
+
+async function bootstrapCurrentProject() {
+  const project = collectProjectForm();
+  const key = normalizedProjectKeyFromForm(project);
+  if (!key) return;
+  const confirmed = await showConfirmDialog({
+    title: '自动初始化服务器',
+    message: `将保存项目配置，并在服务器上准备目录、拉取代码、写入 deploy.sh${['python', 'go', 'java'].includes(project.template) ? ' 和 systemd 初版 service' : ''}。确认继续？`,
+    confirmText: '开始初始化',
+    danger: false,
+  });
+  if (!confirmed) return;
+  const button = $('bootstrapProjectBtn');
+  const oldText = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = '初始化中';
+  }
+  $('projectDoctorResult').textContent = '正在初始化服务器目录、仓库、部署脚本和运行服务...';
+  try {
+    const payload = {
+      original_key: $('projectOriginalKey').value || editingProjectKey,
+      project,
+      options: { write_service: ['python', 'go', 'java'].includes(project.template) },
+    };
+    lastConfig = await postJsonBody('projects-config/bootstrap', payload);
+    lastProjects = lastConfig.projects || [];
+    const saved = projectByKey(key) || lastProjects.find(item => item.name === project.name) || lastProjects[0];
+    if (saved) {
+      selectedProjectKey = saved.key;
+      openProjectModal(saved);
+    }
+    renderBootstrapResult(lastConfig.bootstrap || {});
+    await refresh();
+  } catch (err) {
+    $('projectDoctorResult').innerHTML = `
+      <div class="doctor-item fail">
+        <div class="doctor-icon">×</div>
+        <div><strong>初始化失败</strong><span>${escapeHtml(err.message)}</span></div>
+      </div>
+    `;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = oldText || '自动初始化';
+    }
+  }
+}
+
+async function configureProjectNginx() {
+  const project = collectProjectForm();
+  if (!project.app_domain) {
+    setProjectFormError('请先填写业务域名，例如 api.example.com。');
+    return;
+  }
+  const confirmed = await showConfirmDialog({
+    title: '配置业务域名',
+    message: `将为 ${project.app_domain} 生成 Nginx 反向代理，转发到 127.0.0.1:${project.service_port || 8000}${project.app_https ? '，并尝试申请 HTTPS 证书' : ''}。确认继续？`,
+    confirmText: '配置域名',
+    danger: false,
+  });
+  if (!confirmed) return;
+  const button = $('configureNginxBtn');
+  const oldText = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = '配置中';
+  }
+  $('projectDoctorResult').textContent = '正在写入 Nginx 配置、测试并重载服务...';
+  try {
+    const payload = {
+      original_key: $('projectOriginalKey').value || editingProjectKey,
+      project,
+      options: { issue_https: Boolean(project.app_https) },
+    };
+    lastConfig = await postJsonBody('projects-config/nginx', payload);
+    lastProjects = lastConfig.projects || [];
+    const saved = projectByKey(normalizedProjectKeyFromForm(project));
+    if (saved) {
+      selectedProjectKey = saved.key;
+      openProjectModal(saved);
+    }
+    renderNginxResult(lastConfig.nginx || {});
+    await refresh();
+  } catch (err) {
+    $('projectDoctorResult').innerHTML = `
+      <div class="doctor-item fail">
+        <div class="doctor-icon">×</div>
+        <div><strong>业务域名配置失败</strong><span>${escapeHtml(err.message)}</span></div>
+      </div>
+    `;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = oldText || '配置业务域名';
+    }
+  }
+}
+
 async function doctorCurrentProject() {
   const key = $('projectOriginalKey').value || editingProjectKey || normalizedProjectKeyFromForm(collectProjectForm());
   if (!key) return;
@@ -887,12 +1396,17 @@ function openProjectModal(project = null) {
   $('projectTimeoutInput').value = project ? project.timeout_seconds : 900;
   $('projectWorkdirInput').value = project ? project.workdir : '';
   $('projectScriptInput').value = project ? project.script : '';
+  $('projectServiceNameInput').value = project ? (project.service_name || project.key || '') : '';
+  $('projectServicePortInput').value = project ? (project.service_port || 8000) : '';
+  $('projectStartCommandInput').value = project ? (project.start_command || '') : '';
+  $('projectAppDomainInput').value = project ? (project.app_domain || '') : '';
   $('projectRollbackInput').value = project ? project.rollback_script : '';
   $('projectHealthInput').value = project ? project.health_url : '';
   $('projectLogInput').value = project ? project.deploy_log_file : '';
   $('projectSecretInput').value = project ? project.webhook_secret : '';
   $('projectEnabledInput').checked = project ? Boolean(project.enabled) : false;
   $('projectManualInput').checked = project ? Boolean(project.manual_deploy_enabled) : true;
+  $('projectAppHttpsInput').checked = project ? Boolean(project.app_https) : false;
   $('deleteProjectBtn').hidden = !project;
   $('resetSecretBtn').hidden = !project;
   $('doctorProjectBtn').disabled = !project;
@@ -927,6 +1441,11 @@ function collectProjectForm() {
     timeout_seconds: Number($('projectTimeoutInput').value || 900),
     workdir: $('projectWorkdirInput').value,
     script: $('projectScriptInput').value,
+    service_name: $('projectServiceNameInput').value,
+    service_port: Number($('projectServicePortInput').value || 8000),
+    start_command: $('projectStartCommandInput').value,
+    app_domain: $('projectAppDomainInput').value,
+    app_https: $('projectAppHttpsInput').checked,
     rollback_script: $('projectRollbackInput').value,
     health_url: $('projectHealthInput').value,
     deploy_log_file: $('projectLogInput').value,
@@ -940,10 +1459,151 @@ async function refreshProjectConfig() {
   try {
     lastConfig = await fetchJson('projects-config');
     lastProjects = lastConfig.projects || [];
+    renderNotificationConfig(lastConfig.notifications || {});
     return lastConfig;
   } catch (err) {
     lastConfig = null;
     return null;
+  }
+}
+
+function defaultNotificationConfig() {
+  return {
+    wecom: { enabled: false, webhook_url: '' },
+    dingtalk: { enabled: false, webhook_url: '', secret: '' },
+    email: {
+      enabled: false,
+      smtp_host: '',
+      smtp_port: 465,
+      username: '',
+      password: '',
+      from_addr: '',
+      to_addrs: '',
+      use_ssl: true,
+      use_starttls: false,
+    },
+  };
+}
+
+function mergedNotificationConfig(config = {}) {
+  const defaults = defaultNotificationConfig();
+  return {
+    wecom: { ...defaults.wecom, ...(config.wecom || {}) },
+    dingtalk: { ...defaults.dingtalk, ...(config.dingtalk || {}) },
+    email: { ...defaults.email, ...(config.email || {}) },
+  };
+}
+
+function setInputValue(id, value) {
+  const input = $(id);
+  if (input) input.value = value == null ? '' : String(value);
+}
+
+function setInputChecked(id, value) {
+  const input = $(id);
+  if (input) input.checked = Boolean(value);
+}
+
+function countEnabledNotifications(config = {}) {
+  const parsed = mergedNotificationConfig(config);
+  return ['wecom', 'dingtalk', 'email'].filter(key => Boolean(parsed[key]?.enabled)).length;
+}
+
+function syncNotificationBadge(config = collectNotificationConfig()) {
+  const badge = $('notificationBadge');
+  if (!badge) return;
+  const count = countEnabledNotifications(config);
+  badge.className = `badge ${count ? 'success' : 'neutral'}`;
+  badge.textContent = count ? `${count} 个渠道` : '未启用';
+}
+
+function renderNotificationConfig(config = {}) {
+  if (notificationDirty) return;
+  const parsed = mergedNotificationConfig(config);
+  setInputChecked('notifyWecomEnabled', parsed.wecom.enabled);
+  setInputValue('notifyWecomWebhook', parsed.wecom.webhook_url);
+  setInputChecked('notifyDingtalkEnabled', parsed.dingtalk.enabled);
+  setInputValue('notifyDingtalkWebhook', parsed.dingtalk.webhook_url);
+  setInputValue('notifyDingtalkSecret', parsed.dingtalk.secret);
+  setInputChecked('notifyEmailEnabled', parsed.email.enabled);
+  setInputValue('notifyEmailHost', parsed.email.smtp_host);
+  setInputValue('notifyEmailPort', parsed.email.smtp_port || 465);
+  setInputValue('notifyEmailUsername', parsed.email.username);
+  setInputValue('notifyEmailPassword', parsed.email.password);
+  setInputValue('notifyEmailFrom', parsed.email.from_addr);
+  setInputValue('notifyEmailTo', parsed.email.to_addrs);
+  setInputChecked('notifyEmailSsl', parsed.email.use_ssl !== false);
+  setInputChecked('notifyEmailStarttls', Boolean(parsed.email.use_starttls));
+  syncNotificationBadge(parsed);
+}
+
+function collectNotificationConfig() {
+  return {
+    wecom: {
+      enabled: $('notifyWecomEnabled')?.checked || false,
+      webhook_url: $('notifyWecomWebhook')?.value || '',
+    },
+    dingtalk: {
+      enabled: $('notifyDingtalkEnabled')?.checked || false,
+      webhook_url: $('notifyDingtalkWebhook')?.value || '',
+      secret: $('notifyDingtalkSecret')?.value || '',
+    },
+    email: {
+      enabled: $('notifyEmailEnabled')?.checked || false,
+      smtp_host: $('notifyEmailHost')?.value || '',
+      smtp_port: Number($('notifyEmailPort')?.value || 465),
+      username: $('notifyEmailUsername')?.value || '',
+      password: $('notifyEmailPassword')?.value || '',
+      from_addr: $('notifyEmailFrom')?.value || '',
+      to_addrs: $('notifyEmailTo')?.value || '',
+      use_ssl: $('notifyEmailSsl')?.checked !== false,
+      use_starttls: $('notifyEmailStarttls')?.checked || false,
+    },
+  };
+}
+
+function renderNotificationResults(results = [], fallback = '') {
+  const target = $('notificationResult');
+  if (!target) return;
+  if (!Array.isArray(results) || !results.length) {
+    target.innerHTML = escapeHtml(fallback || '暂无通知结果。');
+    return;
+  }
+  target.innerHTML = results.map(item => {
+    const label = item.channel === 'wecom' ? '企业微信' : item.channel === 'dingtalk' ? '钉钉' : item.channel === 'email' ? '邮箱' : item.channel;
+    const cls = !item.enabled ? 'neutral' : item.ok ? 'success' : 'failed';
+    return `
+      <div class="notification-result-item ${cls}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(!item.enabled ? '未启用' : item.ok ? '成功' : '失败')}</strong>
+        <small>${escapeHtml(item.detail || '-')}</small>
+      </div>
+    `;
+  }).join('');
+}
+
+async function saveNotificationConfig() {
+  const target = $('notificationResult');
+  if (target) target.textContent = '正在保存通知配置...';
+  try {
+    lastConfig = await postJsonBody('projects-config/notifications', { notifications: collectNotificationConfig() });
+    lastProjects = lastConfig.projects || [];
+    notificationDirty = false;
+    renderNotificationConfig(lastConfig.notifications || {});
+    renderNotificationResults([], '通知配置已保存。');
+  } catch (err) {
+    renderNotificationResults([], `保存失败: ${err.message}`);
+  }
+}
+
+async function testNotificationConfig() {
+  const target = $('notificationResult');
+  if (target) target.textContent = '正在发送测试通知...';
+  try {
+    const result = await postJsonBody('notifications/test', { notifications: collectNotificationConfig() });
+    renderNotificationResults(result.results || [], result.ok ? '测试通知已发送。' : '测试通知失败。');
+  } catch (err) {
+    renderNotificationResults([], `测试失败: ${err.message}`);
   }
 }
 
@@ -1046,6 +1706,9 @@ function containerActions(container) {
   const state = String(container.state || '').toLowerCase();
   const name = container.name || container.id || '';
   const actions = [{ action: 'logs', label: '日志' }];
+  if (Number(container.recent_error_count || 0) > 0) {
+    actions.push({ action: 'logs-error', label: `异常 ${container.recent_error_count}`, danger: true });
+  }
   if (state === 'running') {
     actions.push(
       { action: 'restart', label: '重启', danger: true },
@@ -1080,6 +1743,207 @@ function renderMeter(label, value) {
   `;
 }
 
+function rangeCutoffSeconds(range) {
+  if (range === '6h') return 6 * 60 * 60;
+  if (range === '24h') return 24 * 60 * 60;
+  if (range === '7d') return 7 * 24 * 60 * 60;
+  return 0;
+}
+
+function formatTrendTime(point) {
+  const ts = Number(point?.ts);
+  if (Number.isFinite(ts) && ts > 0) {
+    return new Date(ts * 1000).toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  }
+  return point?.at || '-';
+}
+
+function trendPointValue(point, key) {
+  const value = Number(point?.[key]);
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null;
+}
+
+function trendPath(points, key, width, height, pad) {
+  const usableWidth = width - pad.left - pad.right;
+  const usableHeight = height - pad.top - pad.bottom;
+  const segments = [];
+  let current = [];
+  points.forEach((point, index) => {
+    const value = trendPointValue(point, key);
+    if (value == null) {
+      if (current.length) segments.push(current);
+      current = [];
+      return;
+    }
+    const x = pad.left + (points.length <= 1 ? usableWidth : (index / (points.length - 1)) * usableWidth);
+    const y = pad.top + (1 - value / 100) * usableHeight;
+    current.push([x, y]);
+  });
+  if (current.length) segments.push(current);
+  return segments.map(segment => segment
+    .map(([x, y], index) => `${index === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`)
+    .join(' ')
+  );
+}
+
+function trendDots(points, key, className, label, width, height, pad) {
+  const usableWidth = width - pad.left - pad.right;
+  const usableHeight = height - pad.top - pad.bottom;
+  return points.map((point, index) => {
+    const value = trendPointValue(point, key);
+    if (value == null) return '';
+    const x = pad.left + (points.length <= 1 ? usableWidth : (index / (points.length - 1)) * usableWidth);
+    const y = pad.top + (1 - value / 100) * usableHeight;
+    return `<circle class="trend-dot ${className}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8">
+      <title>${escapeHtml(formatTrendTime(point))} · ${escapeHtml(label)} ${formatPercent(value)}</title>
+    </circle>`;
+  }).join('');
+}
+
+function renderSystemTrend(system = {}) {
+  const chart = $('systemTrendChart');
+  if (!chart) return;
+  const rawHistory = Array.isArray(system.history) ? system.history : [];
+  const cutoff = rangeCutoffSeconds(systemTrendRange);
+  const nowTs = Math.floor(Date.now() / 1000);
+  const filtered = cutoff ? rawHistory.filter(point => Number(point?.ts) >= nowTs - cutoff) : rawHistory;
+  const points = filtered.slice().reverse();
+  const intervalMinutes = Math.round(Number(system.history_interval_seconds || 1800) / 60);
+  const latest = points[points.length - 1] || rawHistory[0] || {};
+  const hint = $('systemTrendHint');
+  if (hint) {
+    hint.textContent = points.length
+      ? `每 ${intervalMinutes || 30} 分钟采样 · 当前范围 ${points.length} 个样本 · 最新 ${formatTrendTime(latest)} · 网络 ${formatNumber(latest.network_total_kbps, 'KB/s')}`
+      : `每 ${intervalMinutes || 30} 分钟采样一次 CPU、内存和网络状态`;
+  }
+
+  chart.classList.remove('skeleton-block');
+  if (!points.length) {
+    chart.innerHTML = '<div class="trend-empty">等待下一次有效采样后生成趋势曲线</div>';
+    return;
+  }
+
+  const width = 760;
+  const height = 260;
+  const pad = { top: 22, right: 24, bottom: 34, left: 42 };
+  const grid = [0, 25, 50, 75, 100].map(value => {
+    const y = pad.top + (1 - value / 100) * (height - pad.top - pad.bottom);
+    return `
+      <line class="trend-grid-line" x1="${pad.left}" y1="${y.toFixed(1)}" x2="${width - pad.right}" y2="${y.toFixed(1)}"></line>
+      <text class="trend-axis-label" x="${pad.left - 10}" y="${(y + 4).toFixed(1)}">${value}</text>
+    `;
+  }).join('');
+  const series = [
+    ['cpu_percent', 'cpu', 'CPU'],
+    ['memory_percent', 'memory', '内存'],
+    ['network_percent', 'network', '网络'],
+  ].map(([key, className, label]) => trendPath(points, key, width, height, pad)
+    .map(path => `<path class="trend-line ${className}" d="${path}"></path>`)
+    .join('') + trendDots(points, key, className, label, width, height, pad)
+  ).join('');
+
+  chart.innerHTML = `
+    <svg class="trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="CPU 内存 网络趋势曲线">
+      <rect class="trend-plot-bg" x="${pad.left}" y="${pad.top}" width="${width - pad.left - pad.right}" height="${height - pad.top - pad.bottom}" rx="10"></rect>
+      ${grid}
+      ${series}
+      <text class="trend-time-label" x="${pad.left}" y="${height - 8}">${escapeHtml(formatTrendTime(points[0]))}</text>
+      <text class="trend-time-label end" x="${width - pad.right}" y="${height - 8}">${escapeHtml(formatTrendTime(points[points.length - 1]))}</text>
+    </svg>
+  `;
+}
+
+function renderAlerts(alerts = []) {
+  const list = $('alertList');
+  const badge = $('alertBadge');
+  if (!list || !badge) return;
+  list.classList.remove('skeleton-block');
+  const critical = alerts.filter(item => item.level === 'critical').length;
+  const warning = alerts.filter(item => item.level === 'warning').length;
+  badge.className = `badge ${critical ? 'failed' : warning ? 'running' : 'success'}`;
+  badge.textContent = critical ? `${critical} 个严重` : warning ? `${warning} 个提醒` : '正常';
+  if (!alerts.length) {
+    list.innerHTML = '<div class="project-empty compact-empty">暂无告警</div>';
+    return;
+  }
+  list.innerHTML = alerts.slice(0, 8).map(alert => `
+    <div class="alert-item ${severityClass(alert.level)}">
+      <div>
+        <strong>${escapeHtml(alert.title || '告警')}</strong>
+        <span>${escapeHtml(alert.detail || '-')}</span>
+      </div>
+      ${alert.command ? `<code>${escapeHtml(alert.command)}</code>` : ''}
+    </div>
+  `).join('');
+}
+
+function renderEvents(events = []) {
+  const target = $('eventTimeline');
+  if (!target) return;
+  target.classList.remove('skeleton-block');
+  const hint = $('eventTimelineHint');
+  if (hint) hint.textContent = events.length ? `最近 ${events.length} 条关键事件` : '部署、WebHook、容器和资源异常汇总';
+  if (!events.length) {
+    target.innerHTML = '<div class="project-empty compact-empty">暂无事件</div>';
+    return;
+  }
+  target.innerHTML = events.slice(0, 16).map(event => `
+    <div class="event-item ${severityClass(event.level)}">
+      <span class="event-dot"></span>
+      <div>
+        <strong>${escapeHtml(event.title || '-')}</strong>
+        <small>${escapeHtml(event.at || '-')} · ${escapeHtml(event.source || event.kind || '-')}</small>
+        <p>${escapeHtml(event.detail || '-')}</p>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderDeployLock(lock = {}) {
+  const target = $('deployLockStatus');
+  if (!target) return;
+  const locked = Boolean(lock.locked);
+  const canForce = Boolean(lock.can_force_unlock);
+  const activePid = lock.active_pid ? `PID ${lock.active_pid}` : '无活跃进程';
+  target.innerHTML = `
+    <div class="lock-main">
+      <span class="badge ${locked ? 'running' : 'success'}">${locked ? '部署锁定' : '未锁定'}</span>
+      <span>${escapeHtml(lock.phase_label || activePid)}</span>
+      ${lock.duration_seconds != null ? `<span>${escapeHtml(lock.duration_seconds)}s</span>` : ''}
+    </div>
+    ${canForce ? '<button id="forceUnlockBtn" class="danger-button compact-action" type="button">强制解锁</button>' : ''}
+    ${lock.active_process ? `<code>部署进程仍在运行：${escapeHtml(activePid)}</code>` : ''}
+  `;
+  $('forceUnlockBtn')?.addEventListener('click', forceUnlockDeploy);
+}
+
+function renderPhaseDurations(item = {}) {
+  const phases = Array.isArray(item.phase_durations) ? item.phase_durations : [];
+  if (!phases.length) return '<div class="phase-duration-empty">暂无阶段耗时</div>';
+  return `<div class="phase-duration-list">${phases.map(phase => `
+    <div class="phase-duration-item">
+      <span>${escapeHtml(phase.label || phase.phase || '-')}</span>
+      <strong>${escapeHtml(phase.duration_seconds ?? '-')}s</strong>
+    </div>
+  `).join('')}</div>`;
+}
+
+function renderChangedFiles(item = {}) {
+  const files = Array.isArray(item.changed_files) ? item.changed_files : [];
+  const count = Number(item.changed_file_count || files.length || 0);
+  if (!count) return '<div class="changed-file-empty">暂无变更文件摘要</div>';
+  return `
+    <div class="changed-file-summary">${count} 个文件变更${files.length < count ? `，显示前 ${files.length} 个` : ''}</div>
+    <div class="changed-file-list">${files.slice(0, 16).map(file => `<code>${escapeHtml(file)}</code>`).join('')}</div>
+  `;
+}
+
 function renderSystemStatus(system = {}) {
   const server = system.server || {};
   const memory = server.memory || {};
@@ -1104,6 +1968,7 @@ function renderSystemStatus(system = {}) {
   animateNumberText('networkValue', network.percent, formatPercent);
   $('networkSub').textContent = `RX ${formatNumber(network.rx_kbps, 'KB/s')} / TX ${formatNumber(network.tx_kbps, 'KB/s')}`;
   setResourceBar('networkBar', network.percent);
+  renderSystemTrend(system);
 
   const dockerBadge = $('dockerBadge');
   dockerBadge.className = `badge ${docker.available ? 'success' : 'failed'}`;
@@ -1137,6 +2002,8 @@ function renderSystemStatus(system = {}) {
             ${container.service ? `<span class="stat-pill">${escapeHtml(container.service)}</span>` : ''}
             ${container.memory_usage ? `<span class="stat-pill">${escapeHtml(container.memory_usage)}</span>` : ''}
             ${container.net_io ? `<span class="stat-pill">${escapeHtml(container.net_io)}</span>` : ''}
+            ${Number(container.recent_error_count || 0) ? `<span class="badge failed">异常 ${escapeHtml(container.recent_error_count)}</span>` : ''}
+            ${Number(container.recent_warn_count || 0) ? `<span class="badge running">警告 ${escapeHtml(container.recent_warn_count)}</span>` : ''}
           </div>
           <div class="container-ports" title="${escapeHtml(container.ports || '-')}">${escapeHtml(container.ports || '-')}</div>
         </div>
@@ -1161,31 +2028,31 @@ function closeContainerLogsModal() {
 function openContainerLogsModal(container, lines, meta = '') {
   currentContainerLogName = container || currentContainerLogName;
   $('containerLogsTitle').textContent = container;
-  $('containerLogCount').textContent = `${lines.length} 行`;
   $('containerLogsMeta').textContent = meta || `${lines.length} 行`;
+  $('containerLogCount').textContent = `${lines.length} 行`;
   $('containerLogsContent').innerHTML = lines.length
     ? renderLogLines(lines)
     : '<span class="log-line">暂无日志</span>';
   $('containerLogsModal').hidden = false;
 }
 
-async function showContainerLogs(container) {
-  openContainerLogsModal(container, ['加载中...'], '读取最近 200 行');
-  try {
-    const data = await fetchJson(`docker/logs?container=${encodeURIComponent(container)}&tail=200`);
-    openContainerLogsModal(data.container || container, data.lines || [], `最近 ${(data.lines || []).length} 行`);
-  } catch (err) {
-    openContainerLogsModal(container, [`读取日志失败: ${err.message}`], '读取失败');
-  }
-}
-
 async function showContainerLogs(container, tail = currentContainerLogLineLimit) {
-  const safeTail = Number(tail || 200);
+  const safeTail = positiveLineCount(tail, 200);
+  const filterOptions = containerLogFilterOptions();
+  currentContainerLogLineLimit = safeTail;
   currentContainerLogName = container;
-  openContainerLogsModal(container, ['加载中...'], `读取最近 ${safeTail} 行`);
+  openContainerLogsModal(container, ['加载中...'], `读取最近 ${safeTail} 行${containerLogFilterLabel(filterOptions)}`);
   try {
-    const data = await fetchJson(`docker/logs?container=${encodeURIComponent(container)}&tail=${encodeURIComponent(safeTail)}`);
-    openContainerLogsModal(data.container || container, data.lines || [], `最近 ${(data.lines || []).length} 行`);
+    const data = await fetchJson(logsUrl('docker/logs', {
+      container,
+      tail: safeTail,
+      ...filterOptions,
+    }));
+    const lines = data.lines || [];
+    const meta = data.filtered
+      ? `${data.filter_label || '筛选'}匹配 ${data.matched_count || 0} 条，显示 ${lines.length} 行，上下文 ${data.context || 0} 行`
+      : `最近 ${lines.length} 行`;
+    openContainerLogsModal(data.container || container, lines, meta);
   } catch (err) {
     openContainerLogsModal(container, [`读取日志失败: ${err.message}`], '读取失败');
   }
@@ -1193,11 +2060,18 @@ async function showContainerLogs(container, tail = currentContainerLogLineLimit)
 
 function downloadCurrentContainerLog() {
   if (!currentContainerLogName) return;
-  const selected = $('containerLogDownloadSelect').value || 'current';
-  const lines = selected === 'current' ? currentContainerLogLineLimit : selected;
+  if ($('containerLogLineSelect')?.value === 'custom') {
+    currentContainerLogLineLimit = selectedLineCount(
+      'containerLogLineSelect',
+      'containerLogLineCustomInput',
+      currentContainerLogLineLimit,
+    );
+  }
+  const lines = selectedDownloadLines('containerLogDownloadSelect', 'containerLogDownloadCustomInput', currentContainerLogLineLimit);
   window.location.href = logsUrl('docker/logs/download', {
     container: currentContainerLogName,
     lines,
+    ...containerLogFilterOptions(),
   });
 }
 
@@ -1236,6 +2110,13 @@ function handleContainerAction(event) {
     showContainerLogs(container);
     return;
   }
+  if (action === 'logs-error') {
+    const filter = $('containerLogFilterSelect');
+    if (filter) filter.value = 'error';
+    syncContainerLogFilterControls();
+    showContainerLogs(container);
+    return;
+  }
   runContainerAction(container, action);
 }
 
@@ -1245,6 +2126,9 @@ function renderStatus(data) {
   const git = data.git || {};
   const projects = data.projects || [];
   renderSystemStatus(data.system || {});
+  renderAlerts(data.alerts || []);
+  renderEvents(data.events || []);
+  renderDeployLock(data.lock || {});
   updateProjectSelect(projects);
   renderProjectOverview(projects, agent);
   const current = state.current_deploy;
@@ -1475,8 +2359,10 @@ async function refreshLogsOnly() {
 }
 
 function downloadCurrentLog() {
-  const selected = $('logDownloadSelect').value || 'current';
-  const lines = selected === 'current' ? currentLogLineLimit : selected;
+  if ($('logLineSelect')?.value === 'custom') {
+    currentLogLineLimit = selectedLineCount('logLineSelect', 'logLineCustomInput', currentLogLineLimit);
+  }
+  const lines = selectedDownloadLines('logDownloadSelect', 'logDownloadCustomInput', currentLogLineLimit);
   const params = { kind: currentLogKind, lines };
   if (currentLogKind === 'deploy' && selectedProjectKey) {
     params.project = selectedProjectKey;
@@ -1494,6 +2380,7 @@ async function refresh() {
     csrfToken = status.csrf_token || csrfToken;
     lastConfig = config;
     lastProjects = config.projects || [];
+    renderNotificationConfig(config.notifications || {});
     renderStatus(status);
     renderLogs(logs);
     scheduleRefresh(status.state && status.state.running ? 3000 : 30000);
@@ -1542,6 +2429,9 @@ async function refreshServerStatus() {
   try {
     const status = await fetchJson('status');
     renderSystemStatus(status.system || {});
+    renderAlerts(status.alerts || []);
+    renderEvents(status.events || []);
+    renderDeployLock(status.lock || {});
     $('updatedAt').textContent = `服务器刷新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
   } catch (err) {
     $('dockerHint').textContent = `服务器状态刷新失败: ${err.message}`;
@@ -1570,8 +2460,28 @@ window.addEventListener('resize', () => {
   resourceResizeTimer = window.setTimeout(refreshResourceTracks, 120);
 });
 
+async function ensurePreflightBeforeDeploy() {
+  try {
+    const preflight = await fetchPreflightData();
+    if (preflight.level === 'critical') {
+      const target = $('preflightResult');
+      if (target) target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      return false;
+    }
+  } catch (err) {
+    const target = $('preflightResult');
+    if (target) {
+      target.innerHTML = `<div class="preflight-item failed"><strong>体检失败</strong><span>${escapeHtml(err.message)}</span></div>`;
+      target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    return false;
+  }
+  return true;
+}
+
 async function manualRedeploy() {
   const projectParam = selectedProjectKey ? `?project=${encodeURIComponent(selectedProjectKey)}` : '';
+  if (!(await ensurePreflightBeforeDeploy())) return;
   const confirmed = await showConfirmDialog({
     title: '重新部署',
     message: `确认重新部署 ${selectedProjectKey || '默认项目'}？`,
@@ -1596,6 +2506,7 @@ async function manualRedeploy() {
 
 async function manualRollback() {
   const projectParam = selectedProjectKey ? `?project=${encodeURIComponent(selectedProjectKey)}` : '';
+  if (!(await ensurePreflightBeforeDeploy())) return;
   const confirmed = await showConfirmDialog({
     title: '回滚部署',
     message: `确认回滚 ${selectedProjectKey || '默认项目'}？`,
@@ -1653,9 +2564,49 @@ $('serverViewTab').addEventListener('click', () => setView('server'));
 document.querySelectorAll('[data-server-refresh]').forEach(button => {
   button.addEventListener('click', () => setServerRefreshInterval(button.dataset.serverRefresh));
 });
+document.querySelectorAll('[data-trend-range]').forEach(button => {
+  button.addEventListener('click', () => {
+    systemTrendRange = button.dataset.trendRange || '24h';
+    document.querySelectorAll('[data-trend-range]').forEach(item => item.classList.toggle('active', item === button));
+    if (activeView === 'server') refreshServerStatus();
+    else refresh();
+  });
+});
 $('redeployBtn').addEventListener('click', manualRedeploy);
 $('rollbackBtn').addEventListener('click', manualRollback);
 $('cancelDeployBtn').addEventListener('click', cancelDeploy);
+$('preflightBtn')?.addEventListener('click', runPreflight);
+$('saveNotificationBtn')?.addEventListener('click', saveNotificationConfig);
+$('testNotificationBtn')?.addEventListener('click', testNotificationConfig);
+[
+  'notifyWecomEnabled',
+  'notifyWecomWebhook',
+  'notifyDingtalkEnabled',
+  'notifyDingtalkWebhook',
+  'notifyDingtalkSecret',
+  'notifyEmailEnabled',
+  'notifyEmailHost',
+  'notifyEmailPort',
+  'notifyEmailUsername',
+  'notifyEmailPassword',
+  'notifyEmailFrom',
+  'notifyEmailTo',
+  'notifyEmailSsl',
+  'notifyEmailStarttls',
+].forEach(id => {
+  const input = $(id);
+  if (!input) return;
+  input.addEventListener('input', () => {
+    notificationDirty = true;
+    syncNotificationBadge();
+  });
+  input.addEventListener('change', () => {
+    notificationDirty = true;
+    if (id === 'notifyEmailSsl' && input.checked) setInputChecked('notifyEmailStarttls', false);
+    if (id === 'notifyEmailStarttls' && input.checked) setInputChecked('notifyEmailSsl', false);
+    syncNotificationBadge();
+  });
+});
 $('initProjectsBtn').addEventListener('click', initProjectConfig);
 $('addProjectBtn').addEventListener('click', () => openProjectModal(null));
 $('editProjectBtn').addEventListener('click', async () => {
@@ -1670,6 +2621,8 @@ $('cancelProjectBtn').addEventListener('click', closeProjectModal);
 $('closeContainerLogsBtn').addEventListener('click', closeContainerLogsModal);
 $('deleteProjectBtn').addEventListener('click', deleteCurrentProject);
 $('resetSecretBtn').addEventListener('click', resetCurrentSecret);
+$('bootstrapProjectBtn')?.addEventListener('click', bootstrapCurrentProject);
+$('configureNginxBtn')?.addEventListener('click', configureProjectNginx);
 $('doctorProjectBtn').addEventListener('click', doctorCurrentProject);
 $('copyWebhookBtn').addEventListener('click', () => copyFromElement('projectWebhookUrl', 'copyWebhookBtn'));
 $('copyWebhookTokenBtn').addEventListener('click', () => copyFromElement('projectWebhookToken', 'copyWebhookTokenBtn'));
@@ -1681,6 +2634,10 @@ $('copyWebhookTokenBtn').addEventListener('click', () => copyFromElement('projec
   'projectTimeoutInput',
   'projectWorkdirInput',
   'projectScriptInput',
+  'projectServiceNameInput',
+  'projectServicePortInput',
+  'projectStartCommandInput',
+  'projectAppDomainInput',
   'projectRollbackInput',
   'projectHealthInput',
   'projectLogInput',
@@ -1702,8 +2659,10 @@ $('projectTemplateInput').addEventListener('change', () => {
 });
 $('projectEnabledInput').addEventListener('change', updateWebhookPreview);
 $('projectManualInput').addEventListener('change', updateWebhookPreview);
+$('projectAppHttpsInput').addEventListener('change', updateWebhookPreview);
 $('copyProjectCommandsBtn').addEventListener('click', () => copyFromElement('projectSetupCommands', 'copyProjectCommandsBtn'));
 $('copyWebhookGuideBtn').addEventListener('click', () => copyFromElement('projectWebhookGuide', 'copyWebhookGuideBtn'));
+$('themeToggleBtn')?.addEventListener('click', toggleTheme);
 $('projectModal').addEventListener('click', (event) => {
   if (event.target === $('projectModal')) closeProjectModal();
 });
@@ -1723,13 +2682,24 @@ $('projectSelectButton').addEventListener('click', (event) => {
 $('projectSelectMenu').addEventListener('click', (event) => {
   event.stopPropagation();
 });
+$('preflightResult')?.addEventListener('click', async (event) => {
+  const code = event.target.closest('.copy-command');
+  if (!code) return;
+  try {
+    await navigator.clipboard.writeText(code.textContent || '');
+    code.dataset.copied = '1';
+    window.setTimeout(() => { delete code.dataset.copied; }, 900);
+  } catch (_) {}
+});
 document.addEventListener('click', () => {
   closeProjectMenu();
+  closeLogSelectMenus();
 });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     if (closeConfirmDialog(false)) return;
     closeProjectMenu();
+    closeLogSelectMenus();
     closeProjectModal();
     closeContainerLogsModal();
   }
@@ -1743,15 +2713,54 @@ $('agentLogBtn').addEventListener('click', () => {
   renderLogs();
 });
 $('logLineSelect').addEventListener('change', () => {
-  currentLogLineLimit = Number($('logLineSelect').value || 200);
+  syncCustomLineInput('logLineSelect', 'logLineCustomInput', currentLogLineLimit);
+  currentLogLineLimit = selectedLineCount('logLineSelect', 'logLineCustomInput', currentLogLineLimit);
   refreshLogsOnly();
+});
+$('logLineCustomInput').addEventListener('change', () => {
+  currentLogLineLimit = selectedLineCount('logLineSelect', 'logLineCustomInput', currentLogLineLimit);
+  refreshLogsOnly();
+});
+$('logDownloadSelect').addEventListener('change', () => {
+  syncCustomLineInput('logDownloadSelect', 'logDownloadCustomInput', currentLogLineLimit);
 });
 $('downloadLogBtn').addEventListener('click', downloadCurrentLog);
 $('containerLogLineSelect').addEventListener('change', () => {
-  currentContainerLogLineLimit = Number($('containerLogLineSelect').value || 200);
+  syncCustomLineInput('containerLogLineSelect', 'containerLogLineCustomInput', currentContainerLogLineLimit);
+  currentContainerLogLineLimit = selectedLineCount('containerLogLineSelect', 'containerLogLineCustomInput', currentContainerLogLineLimit);
   if (currentContainerLogName && !$('containerLogsModal').hidden) {
     showContainerLogs(currentContainerLogName, currentContainerLogLineLimit);
   }
 });
+$('containerLogLineCustomInput').addEventListener('change', () => {
+  currentContainerLogLineLimit = selectedLineCount('containerLogLineSelect', 'containerLogLineCustomInput', currentContainerLogLineLimit);
+  if (currentContainerLogName && !$('containerLogsModal').hidden) {
+    showContainerLogs(currentContainerLogName, currentContainerLogLineLimit);
+  }
+});
+$('containerLogDownloadSelect').addEventListener('change', () => {
+  syncCustomLineInput('containerLogDownloadSelect', 'containerLogDownloadCustomInput', currentContainerLogLineLimit);
+});
+function refreshOpenContainerLogs() {
+  if (currentContainerLogName && !$('containerLogsModal').hidden) {
+    showContainerLogs(currentContainerLogName, currentContainerLogLineLimit);
+  }
+}
+$('containerLogFilterSelect').addEventListener('change', () => {
+  syncContainerLogFilterControls();
+  refreshOpenContainerLogs();
+});
+$('containerLogContextSelect').addEventListener('change', refreshOpenContainerLogs);
+$('containerLogRegexInput').addEventListener('change', refreshOpenContainerLogs);
+$('containerLogKeywordInput').addEventListener('input', () => {
+  if (containerLogKeywordTimer) window.clearTimeout(containerLogKeywordTimer);
+  containerLogKeywordTimer = window.setTimeout(refreshOpenContainerLogs, 350);
+});
 $('downloadContainerLogBtn').addEventListener('click', downloadCurrentContainerLog);
+['logLineSelect', 'logDownloadSelect', 'containerLogLineSelect', 'containerLogDownloadSelect', 'containerLogFilterSelect', 'containerLogContextSelect'].forEach(enhanceLogSelect);
+syncCustomLineInput('containerLogLineSelect', 'containerLogLineCustomInput', currentContainerLogLineLimit);
+syncCustomLineInput('containerLogDownloadSelect', 'containerLogDownloadCustomInput', currentContainerLogLineLimit);
+syncCustomLineInput('logLineSelect', 'logLineCustomInput', currentLogLineLimit);
+syncCustomLineInput('logDownloadSelect', 'logDownloadCustomInput', currentLogLineLimit);
+syncContainerLogFilterControls();
 refresh();

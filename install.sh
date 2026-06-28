@@ -9,6 +9,7 @@ NGINX_CONF_FILE="${NGINX_CONF_FILE:-/etc/nginx/conf.d/mini-deploy.conf}"
 DEPLOY_DOMAIN="${DEPLOY_DOMAIN:-}"
 SETUP_NGINX="${SETUP_NGINX:-auto}"
 SETUP_HTTPS="${SETUP_HTTPS:-ask}"
+SETUP_DOCKER="${SETUP_DOCKER:-ask}"
 INSTALL_LANG="${INSTALL_LANG:-}"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAME_SOURCE_AND_TARGET="false"
@@ -190,6 +191,70 @@ install_certbot_if_missing() {
   fi
 }
 
+install_docker_if_requested() {
+  if command -v docker >/dev/null 2>&1; then
+    if is_en; then
+      echo "Docker is already installed."
+    else
+      echo "已检测到 Docker，跳过 Docker 安装。"
+    fi
+    return 0
+  fi
+
+  if [[ "$SETUP_DOCKER" == "0" || "$SETUP_DOCKER" == "false" || "$SETUP_DOCKER" == "no" ]]; then
+    return 0
+  fi
+
+  local prompt="检测到未安装 Docker。如果你的项目要用 Docker Compose 部署，是否现在自动安装 Docker？"
+  if is_en; then
+    prompt="Docker is not installed. Install Docker now for Docker Compose deployments?"
+  fi
+
+  if [[ "$SETUP_DOCKER" != "yes" && "$SETUP_DOCKER" != "true" && "$SETUP_DOCKER" != "1" ]]; then
+    if ! ask_yes_no "$prompt" "n"; then
+      if is_en; then
+        echo "Skipped Docker installation."
+      else
+        echo "已跳过 Docker 安装。"
+      fi
+      return 0
+    fi
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y docker.io docker-compose-plugin || apt-get install -y docker.io docker-compose
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y docker docker-compose-plugin || dnf install -y docker
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y docker docker-compose-plugin || yum install -y docker
+  else
+    if is_en; then
+      echo "No supported package manager found. Please install Docker manually if your projects need it."
+    else
+      echo "未找到支持的包管理器。如果你的项目需要 Docker，请先手动安装 Docker。"
+    fi
+    return 0
+  fi
+
+  systemctl enable docker
+  systemctl start docker
+
+  if docker compose version >/dev/null 2>&1; then
+    if is_en; then
+      echo "Docker and Docker Compose are ready."
+    else
+      echo "Docker 和 Docker Compose 已可用。"
+    fi
+  else
+    if is_en; then
+      echo "Docker is installed, but 'docker compose' is not available. Install the Docker Compose plugin before using Docker projects."
+    else
+      echo "Docker 已安装，但 docker compose 不可用。使用 Docker 项目前，请先安装 Docker Compose 插件。"
+    fi
+  fi
+}
+
 setup_nginx() {
   local domain="$1"
   if [[ -z "$domain" ]]; then
@@ -326,6 +391,8 @@ systemctl restart "$SERVICE_NAME"
 if [[ "$SETUP_NGINX" != "0" && "$SETUP_NGINX" != "false" ]]; then
   setup_nginx "$DEPLOY_DOMAIN"
 fi
+
+install_docker_if_requested
 
 if curl -fsS --max-time 5 http://127.0.0.1:9010/health >/dev/null 2>&1; then
   if is_en; then

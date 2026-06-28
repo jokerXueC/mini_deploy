@@ -4,11 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mini_deploy Status</title>
+  <script>
+    (() => {
+      let stored = '';
+      try {
+        stored = localStorage.getItem('mini_deploy-theme') || '';
+      } catch (_) {}
+      document.documentElement.dataset.theme = stored === 'light' ? 'light' : 'dark';
+    })();
+  </script>
   <link rel="stylesheet" href="ui/style.css">
 </head>
 <body>
   <main class="page">
-    <a class="back-pill" href="ui">部署面板</a>
+    <div class="top-bar">
+      <a class="back-pill" href="ui">部署面板</a>
+      <button id="themeToggleBtn" class="theme-toggle" type="button" aria-label="切换浅色模式" aria-pressed="false">
+        <span class="theme-toggle-icon" aria-hidden="true"></span>
+        <span id="themeToggleText">浅色</span>
+      </button>
+    </div>
     <header class="hero">
       <div>
         <div class="eyebrow">mini_deploy CI/CD</div>
@@ -140,6 +155,90 @@
       <div id="projectOverview" class="project-list skeleton-block"></div>
     </section>
 
+    <section class="panel notification-panel">
+      <div class="panel-head">
+        <div>
+          <h2>通知配置</h2>
+          <p id="notificationHint">选择企微、钉钉或邮箱，部署完成后自动推送结果</p>
+        </div>
+        <div class="notification-actions">
+          <span id="notificationBadge" class="badge neutral">未配置</span>
+          <button id="testNotificationBtn" class="ghost-button compact-action" type="button">发送测试</button>
+          <button id="saveNotificationBtn" class="danger-button compact-action" type="button">保存通知</button>
+        </div>
+      </div>
+      <div class="notification-grid">
+        <article class="notification-card">
+          <label class="notification-toggle">
+            <input id="notifyWecomEnabled" type="checkbox">
+            <span>企业微信</span>
+          </label>
+          <label class="field">
+            <span>Webhook 地址</span>
+            <input id="notifyWecomWebhook" type="url" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+          </label>
+        </article>
+        <article class="notification-card">
+          <label class="notification-toggle">
+            <input id="notifyDingtalkEnabled" type="checkbox">
+            <span>钉钉</span>
+          </label>
+          <label class="field">
+            <span>Webhook 地址</span>
+            <input id="notifyDingtalkWebhook" type="url" placeholder="https://oapi.dingtalk.com/robot/send?access_token=...">
+          </label>
+          <label class="field">
+            <span>加签 Secret</span>
+            <input id="notifyDingtalkSecret" type="password" autocomplete="new-password" placeholder="可选，开启加签时填写">
+          </label>
+        </article>
+        <article class="notification-card notification-card-wide">
+          <label class="notification-toggle">
+            <input id="notifyEmailEnabled" type="checkbox">
+            <span>邮箱</span>
+          </label>
+          <div class="notification-email-grid">
+            <label class="field"><span>SMTP 地址</span><input id="notifyEmailHost" type="text" placeholder="smtp.example.com"></label>
+            <label class="field"><span>端口</span><input id="notifyEmailPort" type="number" min="1" max="65535" value="465"></label>
+            <label class="field"><span>账号</span><input id="notifyEmailUsername" type="text" autocomplete="username"></label>
+            <label class="field"><span>密码 / 授权码</span><input id="notifyEmailPassword" type="password" autocomplete="new-password" placeholder="留空则保留旧密码"></label>
+            <label class="field"><span>发件人</span><input id="notifyEmailFrom" type="email" placeholder="deploy@example.com"></label>
+            <label class="field"><span>收件人</span><input id="notifyEmailTo" type="text" placeholder="a@example.com, b@example.com"></label>
+          </div>
+          <div class="notification-switches">
+            <label><input id="notifyEmailSsl" type="checkbox" checked> SSL</label>
+            <label><input id="notifyEmailStarttls" type="checkbox"> STARTTLS</label>
+          </div>
+        </article>
+      </div>
+      <div id="notificationResult" class="notification-result">保存后，部署成功或失败都会按启用渠道推送。</div>
+    </section>
+
+    <section class="panel-grid ops-panel-grid">
+      <article class="panel ops-panel">
+        <div class="panel-head">
+          <div>
+            <h2>告警与事件</h2>
+            <p id="eventTimelineHint">部署、WebHook、容器和资源异常汇总</p>
+          </div>
+          <span id="alertBadge" class="badge neutral">-</span>
+        </div>
+        <div id="alertList" class="alert-list skeleton-block"></div>
+        <div id="eventTimeline" class="event-timeline skeleton-block"></div>
+      </article>
+      <article class="panel ops-panel">
+        <div class="panel-head">
+          <div>
+            <h2>部署体检</h2>
+            <p id="preflightHint">部署前检查 Git、脚本、Docker、磁盘和日志目录</p>
+          </div>
+          <button id="preflightBtn" class="ghost-button compact-action" type="button">运行体检</button>
+        </div>
+        <div id="deployLockStatus" class="lock-status">锁状态加载中...</div>
+        <div id="preflightResult" class="preflight-result">点击运行体检后显示结果和修复命令。</div>
+      </article>
+    </section>
+
     <section class="panel-grid">
       <article class="panel wide">
         <div class="panel-head">
@@ -184,7 +283,9 @@
               <option value="1000">1000 行</option>
               <option value="2000">2000 行</option>
               <option value="5000">5000 行</option>
+              <option value="custom">自定义</option>
             </select>
+            <input id="logLineCustomInput" class="log-line-input" type="number" min="1" step="1" value="200" inputmode="numeric" aria-label="自定义预览行数" hidden>
           </label>
           <label class="log-control">下载
             <select id="logDownloadSelect">
@@ -192,8 +293,10 @@
               <option value="500">500 行</option>
               <option value="1000">1000 行</option>
               <option value="5000">5000 行</option>
+              <option value="custom">自定义</option>
               <option value="all">全部</option>
             </select>
+            <input id="logDownloadCustomInput" class="log-line-input" type="number" min="1" step="1" value="5000" inputmode="numeric" aria-label="自定义下载行数" hidden>
           </label>
           <button id="downloadLogBtn" class="log-tab log-download" type="button">下载日志</button>
           <span id="logCount" class="badge neutral">0 行</span>
@@ -248,6 +351,29 @@
         </article>
       </section>
 
+      <section class="panel system-trend-panel">
+        <div class="panel-head">
+          <div>
+            <h2>核心资源趋势</h2>
+            <p id="systemTrendHint">每 30 分钟采样一次 CPU、内存和网络状态</p>
+          </div>
+          <div class="trend-head-actions">
+            <div class="trend-range-controls" aria-label="趋势范围">
+              <button class="trend-range active" type="button" data-trend-range="24h">24h</button>
+              <button class="trend-range" type="button" data-trend-range="6h">6h</button>
+              <button class="trend-range" type="button" data-trend-range="7d">7d</button>
+              <button class="trend-range" type="button" data-trend-range="all">全部</button>
+            </div>
+            <div class="trend-legend" aria-label="资源曲线图例">
+              <span class="trend-legend-item cpu">CPU</span>
+              <span class="trend-legend-item memory">内存</span>
+              <span class="trend-legend-item network">网络</span>
+            </div>
+          </div>
+        </div>
+        <div id="systemTrendChart" class="system-trend-chart skeleton-block"></div>
+      </section>
+
       <section class="panel containers-panel">
         <div class="panel-head">
           <div>
@@ -286,6 +412,29 @@
               <option value="1000">1000 行</option>
               <option value="2000">2000 行</option>
               <option value="5000">5000 行</option>
+              <option value="custom">自定义</option>
+            </select>
+            <input id="containerLogLineCustomInput" class="log-line-input" type="number" min="1" step="1" value="200" inputmode="numeric" aria-label="自定义容器日志预览行数" hidden>
+          </label>
+          <label class="log-control">筛选
+            <select id="containerLogFilterSelect">
+              <option value="all" selected>全部</option>
+              <option value="error">异常</option>
+              <option value="warn">警告</option>
+              <option value="keyword">关键词</option>
+            </select>
+          </label>
+          <input id="containerLogKeywordInput" class="log-line-input log-keyword-input" type="search" placeholder="关键词 / 正则" aria-label="容器日志关键词" hidden>
+          <label id="containerLogRegexControl" class="log-control log-check-control" hidden>
+            <input id="containerLogRegexInput" type="checkbox">
+            正则
+          </label>
+          <label class="log-control">上下文
+            <select id="containerLogContextSelect">
+              <option value="0" selected>0 行</option>
+              <option value="2">2 行</option>
+              <option value="5">5 行</option>
+              <option value="10">10 行</option>
             </select>
           </label>
           <label class="log-control">下载
@@ -294,8 +443,10 @@
               <option value="500">500 行</option>
               <option value="1000">1000 行</option>
               <option value="5000">5000 行</option>
+              <option value="custom">自定义</option>
               <option value="all">全部</option>
             </select>
+            <input id="containerLogDownloadCustomInput" class="log-line-input" type="number" min="1" step="1" value="5000" inputmode="numeric" aria-label="自定义容器日志下载行数" hidden>
           </label>
           <button id="downloadContainerLogBtn" class="log-tab log-download" type="button">下载日志</button>
           <span id="containerLogCount" class="badge neutral">0 行</span>
@@ -321,6 +472,7 @@
             <label>项目类型
               <select id="projectTemplateInput" name="template">
                 <option value="docker">Docker Compose</option>
+                <option value="python">Python / systemd</option>
                 <option value="node">Node / PM2</option>
                 <option value="java">Java / systemd</option>
                 <option value="go">Go / systemd</option>
@@ -333,6 +485,10 @@
             <label>超时时间<input id="projectTimeoutInput" name="timeout_seconds" type="number" min="30" step="30" placeholder="900"></label>
             <label class="wide-field">服务器目录<input id="projectWorkdirInput" name="workdir" placeholder="/root/example-node"></label>
             <label class="wide-field">部署脚本<input id="projectScriptInput" name="script" placeholder="/root/example-node/deploy/deploy.sh"></label>
+            <label>systemd 服务名<input id="projectServiceNameInput" name="service_name" placeholder="fastapi-demo"></label>
+            <label>服务端口<input id="projectServicePortInput" name="service_port" type="number" min="1" max="65535" placeholder="8000"></label>
+            <label class="wide-field">启动命令<input id="projectStartCommandInput" name="start_command" placeholder="留空则按项目类型生成初版"></label>
+            <label class="wide-field">业务域名<input id="projectAppDomainInput" name="app_domain" placeholder="api.example.com，可留空"></label>
             <label class="wide-field">回滚脚本<input id="projectRollbackInput" name="rollback_script" placeholder="可留空"></label>
             <label class="wide-field">健康检查<input id="projectHealthInput" name="health_url" placeholder="https://example.com/health"></label>
             <label class="wide-field">日志文件<input id="projectLogInput" name="deploy_log_file" placeholder="/var/log/example-node-deploy.log"></label>
@@ -341,6 +497,7 @@
           <div class="toggle-row">
             <label><input id="projectEnabledInput" type="checkbox"> 启用项目</label>
             <label><input id="projectManualInput" type="checkbox"> 允许手动部署/回滚</label>
+            <label><input id="projectAppHttpsInput" type="checkbox"> 业务域名申请 HTTPS</label>
           </div>
           <div class="webhook-box">
             <div>
@@ -362,6 +519,8 @@
                 <div class="webhook-label">接入体检</div>
                 <p>保存项目后点击体检，检查服务器目录、仓库、脚本、运行环境和健康检查。</p>
               </div>
+              <button id="bootstrapProjectBtn" class="danger-button compact-action" type="button">自动初始化</button>
+              <button id="configureNginxBtn" class="ghost-button compact-action" type="button">配置业务域名</button>
               <button id="doctorProjectBtn" class="ghost-button compact-action" type="button">检查项目</button>
             </div>
             <div id="projectDoctorResult" class="doctor-result">保存项目后可以检查。</div>
