@@ -10,7 +10,9 @@
       try {
         stored = localStorage.getItem('mini_deploy-theme') || '';
       } catch (_) {}
-      document.documentElement.dataset.theme = stored === 'light' ? 'light' : 'dark';
+      const hour = new Date().getHours();
+      const autoTheme = hour >= 7 && hour < 19 ? 'light' : 'dark';
+      document.documentElement.dataset.theme = stored === 'light' || stored === 'dark' ? stored : autoTheme;
     })();
   </script>
   <link rel="stylesheet" href="ui/style.css">
@@ -28,7 +30,7 @@
       <div>
         <div class="eyebrow">mini_deploy CI/CD</div>
         <h1 id="panelTitle">部署健康面板</h1>
-        <p id="panelSubtitle">监控 Gitee WebHook、部署队列、最近发布和线上健康检查。</p>
+        <p id="panelSubtitle">监控 Git 平台 WebHook、部署队列、最近发布和线上健康检查。</p>
       </div>
       <div class="hero-actions">
         <div class="hero-action-row status-row">
@@ -60,6 +62,8 @@
     <nav class="view-tabs" aria-label="面板视图">
       <button id="deployViewTab" class="view-tab active" type="button" data-view="deploy">部署</button>
       <button id="serverViewTab" class="view-tab" type="button" data-view="server">服务器状态</button>
+      <button id="eventsViewTab" class="view-tab" type="button" data-view="events">告警事件</button>
+      <button id="notifyViewTab" class="view-tab" type="button" data-view="notify">通知配置</button>
     </nav>
 
     <div id="deployView" class="dashboard-view active">
@@ -221,7 +225,10 @@
             <h2>告警与事件</h2>
             <p id="eventTimelineHint">部署、WebHook、容器和资源异常汇总</p>
           </div>
-          <span id="alertBadge" class="badge neutral">-</span>
+          <div class="event-actions">
+            <span id="alertBadge" class="badge neutral">-</span>
+            <button id="clearAlertsBtn" class="ghost-button compact-action" type="button" disabled>清除当前</button>
+          </div>
         </div>
         <div id="alertList" class="alert-list skeleton-block"></div>
         <div id="eventTimeline" class="event-timeline skeleton-block"></div>
@@ -508,7 +515,7 @@
           </div>
           <div class="webhook-box">
             <div>
-              <div class="webhook-label">Gitee Token</div>
+              <div class="webhook-label">WebHook Token / Secret</div>
               <code id="projectWebhookToken">保存后生成</code>
             </div>
             <button id="copyWebhookTokenBtn" class="ghost-button compact-action" type="button">复制 Token</button>
@@ -538,8 +545,8 @@
           <div class="command-box">
             <div class="command-head">
               <div>
-                <div class="webhook-label">Gitee WebHook 填写项</div>
-                <p>URL 填 POST 地址，密码/Token 填下面的 Token。</p>
+                <div class="webhook-label">代码平台 WebHook 填写项</div>
+                <p>URL 不含凭据；Token 填入平台原生的密码或 Secret 字段。</p>
               </div>
               <button id="copyWebhookGuideBtn" class="ghost-button compact-action" type="button">复制 WebHook 配置</button>
             </div>

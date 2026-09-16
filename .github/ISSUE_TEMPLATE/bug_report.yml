@@ -1,0 +1,94 @@
+name: Bug 报告
+description: 报告可以稳定复现的 mini_deploy 问题
+title: "[Bug]: "
+labels:
+  - type/bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。安全漏洞不要在这里公开。当前仓库尚未配置并验证私密报告入口，请查看 `SECURITY.md` 的渠道状态；这里只能提交不含漏洞细节和敏感信息的联系请求。
+
+        提交前请删除 WebHook Secret、密码、Session Cookie、仓库令牌、SMTP 凭据、服务器 IP、客户数据及带凭据的 URL。
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true
+        - label: 该问题可在受支持的 Linux 服务器环境中复现。
+          required: true
+        - label: 这不是尚未公开修复的安全漏洞。
+          required: true
+        - label: 我已从文字、配置、日志和截图中移除所有真实凭据及敏感数据。
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: mini_deploy 版本
+      description: 填写发布版本或完整提交号。
+      placeholder: v0.1.0 或 0123456789abcdef...
+    validations:
+      required: true
+  - type: input
+    id: linux
+    attributes:
+      label: Linux 环境
+      description: 填写发行版、版本、架构和 Python 版本。
+      placeholder: Ubuntu 24.04, x86_64, Python 3.12.3
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: 相关组件
+      options:
+        - Agent/API
+        - 登录与权限
+        - WebHook
+        - 部署、取消或回滚
+        - 安装、升级或卸载
+        - systemd
+        - Nginx/HTTPS
+        - Docker Compose
+        - Web UI
+        - 通知
+        - 文档
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请提供能够在测试环境中重复问题的最小步骤。
+      placeholder: |
+        1. 使用以下已脱敏配置启动 Agent...
+        2. 执行...
+        3. 观察到...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏的配置或日志
+      description: 只粘贴必要片段，并再次确认不包含真实 Secret、Cookie、令牌、私有地址或客户数据。
+      render: shell
+  - type: textarea
+    id: verification
+    attributes:
+      label: 补充信息
+      description: 安装方式、Nginx/Docker/systemd 使用情况、最近变更、临时规避方法等。

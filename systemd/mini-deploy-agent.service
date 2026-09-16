@@ -1,3 +1,4 @@
+# mini_deploy-managed: agent-systemd-v1
 [Unit]
 Description=mini_deploy lightweight deploy agent
 After=network-online.target
@@ -6,6 +7,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
+RuntimeDirectory=mini-deploy-agent
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 WorkingDirectory=/opt/mini_deploy
 EnvironmentFile=/etc/mini-deploy-agent.env
 ExecStart=/usr/bin/python3 /opt/mini_deploy/agent.py

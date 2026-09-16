@@ -1,0 +1,73 @@
+name: 功能建议
+description: 提议符合轻量 Linux 部署目标的新能力或改进
+title: "[Feature]: "
+labels:
+  - type/feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先描述需要解决的用户问题，再讨论具体实现。mini_deploy 以轻量、Linux 服务器、无数据库和可审计部署为核心边界。
+
+        安全漏洞不要在这里公开。当前仓库尚未配置并验证私密报告入口，请查看 `SECURITY.md` 的渠道状态；任何公开内容都不得包含漏洞细节、真实凭据或私有环境信息。
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue 和路线图，未发现相同建议。
+          required: true
+        - label: 该建议面向 Linux 服务器部署场景。
+          required: true
+        - label: 我已移除所有真实凭据、私有地址和客户数据。
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 谁在什么场景遇到了什么困难？现有能力为什么不足？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 描述期望的行为、交互或配置方式，不需要先给出完整代码设计。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已考虑的替代方案
+      description: 说明现有规避方式，以及为什么仍需要项目改动。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      options:
+        - 安全
+        - 部署可靠性
+        - 安装与升级
+        - WebHook/代码平台
+        - UI/使用体验
+        - 通知与事件
+        - Docker/Nginx/systemd
+        - API/CLI
+        - 文档
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: 安全与兼容性影响
+      description: 是否新增依赖、端口、权限、持久数据、配置项或破坏性行为？旧配置如何继续工作？
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收方式
+      description: 用哪些可观察结果判断功能已经完成？
+    validations:
+      required: true

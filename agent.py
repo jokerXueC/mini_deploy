@@ -10,10 +10,12 @@ password hash and signed cookie.
 from __future__ import annotations
 
 import base64
+import errno
 import getpass
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import queue
@@ -24,36 +26,91 @@ import shutil
 import signal
 import smtplib
 import ssl
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from email.message import EmailMessage
+from functools import wraps
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote_plus, urlparse
 from urllib.request import Request, urlopen
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Linux is the production target
+    fcntl = None  # type: ignore[assignment]
+
+
+def _path_from_env(name: str, default: str | Path) -> Path:
+    value = os.getenv(name, "").strip()
+    return Path(value or default)
+
+
+def _projects_config_paths(
+    explicit_value: str,
+    state_file: Path,
+    app_home: Path,
+) -> tuple[Path, Path | None]:
+    """Return the active and optional legacy projects configuration paths.
+
+    An explicit DEPLOY_PROJECTS_FILE is authoritative and intentionally
+    disables legacy-copy comparison.  Otherwise projects.json belongs beside
+    the mutable agent state, while APP_HOME/projects.json is retained only as
+    a read-only upgrade signal.
+    """
+    explicit_value = explicit_value.strip()
+    if explicit_value:
+        return Path(explicit_value), None
+
+    config_file = state_file.parent / "projects.json"
+    legacy_file = app_home / "projects.json"
+    if legacy_file == config_file:
+        legacy_file = None
+    return config_file, legacy_file
 
 
 APP_HOME = Path(os.getenv("MINI_DEPLOY_HOME", os.getenv("VIBEPILOT_HOME", "/opt/mini_deploy")))
 HOST = os.getenv("DEPLOY_AGENT_HOST", "127.0.0.1")
 PORT = int(os.getenv("DEPLOY_AGENT_PORT", "9010"))
 WEBHOOK_SECRET = os.getenv("DEPLOY_WEBHOOK_SECRET", "")
+ALLOW_QUERY_WEBHOOK_TOKEN = os.getenv("DEPLOY_ALLOW_QUERY_TOKEN", "").strip().lower() in {
+    "1", "true", "yes", "on", "enabled",
+}
+TRUST_LOOPBACK_PROXY_HEADERS = os.getenv(
+    "DEPLOY_TRUST_LOOPBACK_PROXY_HEADERS",
+    "",
+).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 DEPLOY_BRANCH = os.getenv("DEPLOY_BRANCH", "main")
 DEPLOY_SCRIPT = os.getenv("DEPLOY_SCRIPT", str(APP_HOME / "scripts" / "deploy.sample.sh"))
 PROJECT_DIR = Path(os.getenv("PROJECT_DIR", str(APP_HOME / "workspace" / "default")))
 HEALTH_URL = os.getenv("HEALTH_URL", "")
+STATE_FILE = _path_from_env("DEPLOY_AGENT_STATE_FILE", "/var/lib/mini-deploy-agent/state.json")
 DEPLOY_PROJECTS_FILE_TEXT = os.getenv("DEPLOY_PROJECTS_FILE", "").strip()
 DEPLOY_PROJECTS_FILE = Path(DEPLOY_PROJECTS_FILE_TEXT) if DEPLOY_PROJECTS_FILE_TEXT else None
-PROJECTS_CONFIG_FILE = DEPLOY_PROJECTS_FILE or APP_HOME / "projects.json"
-AGENT_ENV_FILE = Path(os.getenv("DEPLOY_AGENT_ENV_FILE", "/etc/mini-deploy-agent.env"))
-LOG_FILE = Path(os.getenv("DEPLOY_AGENT_LOG", "/var/log/mini_deploy/mini-deploy-agent.log"))
-DEPLOY_LOG_FILE = Path(os.getenv("DEPLOY_LOG_FILE", "/var/log/mini_deploy/mini_deploy.log"))
-STATE_FILE = Path(os.getenv("DEPLOY_AGENT_STATE_FILE", "/var/lib/mini-deploy-agent/state.json"))
-AUDIT_LOG_FILE = Path(os.getenv("DEPLOY_AUDIT_LOG_FILE", str(STATE_FILE.with_name("audit.jsonl"))))
+PROJECTS_CONFIG_FILE, LEGACY_PROJECTS_CONFIG_FILE = _projects_config_paths(
+    DEPLOY_PROJECTS_FILE_TEXT,
+    STATE_FILE,
+    APP_HOME,
+)
+AGENT_ENV_FILE = _path_from_env("DEPLOY_AGENT_ENV_FILE", "/etc/mini-deploy-agent.env")
+AGENT_SERVICE_NAME = os.getenv("DEPLOY_AGENT_SERVICE_NAME", "").strip() or "mini-deploy-agent"
+LOG_FILE = _path_from_env("DEPLOY_AGENT_LOG", "/var/log/mini_deploy/mini-deploy-agent.log")
+DEPLOY_LOG_FILE = _path_from_env("DEPLOY_LOG_FILE", "/var/log/mini_deploy/mini_deploy.log")
+AUDIT_LOG_FILE = _path_from_env("DEPLOY_AUDIT_LOG_FILE", STATE_FILE.with_name("audit.jsonl"))
+PROJECT_CONFIG_BACKUP_DIR = _path_from_env(
+    "DEPLOY_PROJECT_CONFIG_BACKUP_DIR",
+    STATE_FILE.parent / "backups",
+)
+MAINTENANCE_LOCK_FILE = Path("/run/mini-deploy-agent/maintenance.lock")
+MAINTENANCE_LOCK_OWNER_UID = 0
 MAX_BODY_BYTES = int(os.getenv("DEPLOY_AGENT_MAX_BODY_BYTES", str(1024 * 1024)))
 PROJECT_CONFIG_BACKUP_LIMIT = int(os.getenv("DEPLOY_PROJECT_CONFIG_BACKUP_LIMIT", "20"))
 LOG_TAIL_LINES = int(os.getenv("DEPLOY_LOG_TAIL_LINES", "320"))
@@ -66,11 +123,18 @@ NETWORK_MAX_MBPS = float(os.getenv("DEPLOY_NETWORK_MAX_MBPS", "100"))
 DOCKER_LOG_TAIL_MAX_LINES = int(os.getenv("DEPLOY_DOCKER_LOG_TAIL_MAX_LINES", "5000"))
 
 UI_PASSWORD_HASH = os.getenv("DEPLOY_UI_PASSWORD_HASH", "")
-UI_SESSION_SECRET = os.getenv("DEPLOY_UI_SESSION_SECRET", "").strip() or WEBHOOK_SECRET
+UI_SESSION_SECRET = os.getenv("DEPLOY_UI_SESSION_SECRET", "").strip()
 UI_SESSION_TTL_SECONDS = int(os.getenv("DEPLOY_UI_SESSION_TTL_SECONDS", str(8 * 60 * 60)))
 COOKIE_SECURE_MODE = os.getenv("DEPLOY_COOKIE_SECURE", "auto").strip().lower()
 COOKIE_NAME = "mini_deploy_session"
 PASSWORD_HASH_ITERATIONS = 260_000
+MIN_PASSWORD_HASH_ITERATIONS = 200_000
+MAX_PASSWORD_HASH_ITERATIONS = 2_000_000
+MIN_UI_SESSION_SECRET_LENGTH = 32
+MIN_UI_SESSION_SECRET_UNIQUE_CHARS = 8
+LOGIN_ATTEMPT_LIMIT = 5
+LOGIN_ATTEMPT_WINDOW_SECONDS = 60.0
+LOGIN_FAILURE_MAX_CLIENTS = 4096
 MAX_HISTORY = 60
 
 DEPLOY_PHASE_LABELS = {
@@ -148,6 +212,24 @@ def _int_config(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+_WEBHOOK_SECRET_PLACEHOLDERS = frozenset({
+    "change-me",
+    "changeme",
+    "replace-me",
+    "replace-with-a-long-random-token",
+})
+
+
+def _is_placeholder_webhook_secret(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in _WEBHOOK_SECRET_PLACEHOLDERS or normalized.startswith("replace-with-")
+
+
+def _is_strong_webhook_secret(value: str) -> bool:
+    secret = str(value or "").strip()
+    return len(secret) >= 32 and not _is_placeholder_webhook_secret(secret)
+
+
 def _default_project() -> DeployProject:
     return DeployProject(
         key="default",
@@ -160,7 +242,7 @@ def _default_project() -> DeployProject:
         health_url=HEALTH_URL,
         deploy_log_file=DEPLOY_LOG_FILE,
         webhook_secret=WEBHOOK_SECRET,
-        enabled=_bool_config(os.getenv("DEPLOY_PROJECT_ENABLED"), True),
+        enabled=_bool_config(os.getenv("DEPLOY_PROJECT_ENABLED"), False),
         manual_deploy_enabled=_bool_config(os.getenv("DEPLOY_MANUAL_DEPLOY_ENABLED"), True),
         timeout_seconds=_int_config(os.getenv("DEPLOY_TIMEOUT_SECONDS"), 900),
         rollback_script=os.getenv("DEPLOY_ROLLBACK_SCRIPT", ""),
@@ -188,7 +270,7 @@ def _project_from_config(raw: dict[str, Any], fallback_key: str) -> DeployProjec
         script=script,
         health_url=str(raw.get("health_url") or HEALTH_URL),
         deploy_log_file=Path(str(raw.get("deploy_log_file") or raw.get("log_file") or DEPLOY_LOG_FILE)),
-        webhook_secret=str(raw.get("webhook_secret") or raw.get("secret") or WEBHOOK_SECRET),
+        webhook_secret=str(raw.get("webhook_secret") or raw.get("secret") or ""),
         enabled=_bool_config(raw.get("enabled"), True),
         manual_deploy_enabled=_bool_config(raw.get("manual_deploy_enabled"), True),
         timeout_seconds=_int_config(raw.get("timeout_seconds"), _int_config(os.getenv("DEPLOY_TIMEOUT_SECONDS"), 900)),
@@ -201,37 +283,136 @@ def _project_from_config(raw: dict[str, Any], fallback_key: str) -> DeployProjec
     )
 
 
-def _load_projects() -> dict[str, DeployProject]:
-    if PROJECTS_CONFIG_FILE.exists():
+def _read_regular_projects_config(path: Path, label: str) -> bytes | None:
+    """Read one configuration candidate without following a final symlink."""
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError(f"cannot inspect {label} projects config: {path}: {exc}") from exc
+
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise RuntimeError(f"{label} projects config must not be a symbolic link: {path}")
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise RuntimeError(f"{label} projects config must be a regular file: {path}")
+    if path_stat.st_nlink != 1:
+        raise RuntimeError(f"{label} projects config must have exactly one hard link: {path}")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise RuntimeError(f"{label} projects config must be a regular file: {path}")
+        if opened_stat.st_nlink != 1:
+            raise RuntimeError(f"{label} projects config must have exactly one hard link: {path}")
+        if (path_stat.st_dev, path_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+            raise RuntimeError(f"{label} projects config changed while it was being opened: {path}")
+        with os.fdopen(descriptor, "rb") as file_handle:
+            descriptor = -1
+            payload = file_handle.read()
+            final_stat = os.fstat(file_handle.fileno())
+        if (
+            opened_stat.st_size != final_stat.st_size
+            or opened_stat.st_mtime_ns != final_stat.st_mtime_ns
+        ):
+            raise RuntimeError(f"{label} projects config changed while it was being read: {path}")
         try:
-            raw = json.loads(PROJECTS_CONFIG_FILE.read_text(encoding="utf-8"))
+            final_path_stat = path.lstat()
+        except OSError as exc:
+            raise RuntimeError(
+                f"{label} projects config path changed while it was being read: {path}: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISREG(final_path_stat.st_mode)
+            or final_path_stat.st_nlink != 1
+            or (final_path_stat.st_dev, final_path_stat.st_ino)
+            != (opened_stat.st_dev, opened_stat.st_ino)
+        ):
+            raise RuntimeError(f"{label} projects config path changed while it was being read: {path}")
+        return payload
+    except RuntimeError:
+        raise
+    except OSError as exc:
+        raise RuntimeError(f"cannot read {label} projects config: {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _read_selected_projects_config() -> bytes | None:
+    """Read the authoritative projects config and detect stale legacy layouts."""
+    config_payload = _read_regular_projects_config(PROJECTS_CONFIG_FILE, "canonical")
+    if LEGACY_PROJECTS_CONFIG_FILE is None:
+        return config_payload
+
+    legacy_payload = _read_regular_projects_config(LEGACY_PROJECTS_CONFIG_FILE, "legacy")
+    if legacy_payload is None:
+        return config_payload
+    if config_payload is None:
+        raise RuntimeError(
+            "legacy projects config requires migration: "
+            f"found {LEGACY_PROJECTS_CONFIG_FILE}, but the canonical data file "
+            f"{PROJECTS_CONFIG_FILE} is missing; move it during installation or set "
+            "DEPLOY_PROJECTS_FILE explicitly"
+        )
+    if config_payload != legacy_payload:
+        raise RuntimeError(
+            "projects config conflict: canonical file "
+            f"{PROJECTS_CONFIG_FILE} and legacy file {LEGACY_PROJECTS_CONFIG_FILE} "
+            "both exist with different content; reconcile them and remove the legacy copy"
+        )
+    return config_payload
+
+
+def _load_projects() -> dict[str, DeployProject]:
+    config_payload = _read_selected_projects_config()
+    if config_payload is not None:
+        try:
+            raw = json.loads(config_payload.decode("utf-8"))
             items = raw.get("projects") if isinstance(raw, dict) else raw
-            if isinstance(items, list):
-                projects = {}
-                for index, item in enumerate(items):
-                    if not isinstance(item, dict):
-                        continue
-                    project = _project_from_config(item, f"project-{index + 1}")
-                    projects[project.key] = project
-                if projects:
-                    return projects
-        except Exception as exc:  # noqa: BLE001 - keep agent bootable on bad config
-            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} projects config load failed: {exc}", flush=True)
+            if not isinstance(items, list) or not items:
+                raise ValueError("projects must be a non-empty list")
+            projects = {}
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    raise ValueError(f"project at index {index} must be an object")
+                project = _project_from_config(item, f"project-{index + 1}")
+                if project.key in projects:
+                    raise ValueError(f"duplicate project key: {project.key}")
+                projects[project.key] = project
+            return projects
+        except Exception as exc:
+            raise RuntimeError(f"projects config is invalid: {PROJECTS_CONFIG_FILE}: {exc}") from exc
     project = _default_project()
     return {project.key: project}
 
 
-PROJECTS = _load_projects()
-DEFAULT_PROJECT_KEY = next(iter(PROJECTS))
+_RUNTIME_CONFIG_ERROR: RuntimeError | None = None
+try:
+    PROJECTS = _load_projects()
+except RuntimeError as exc:
+    # Administrative CLI commands are break-glass operations. Keep the module
+    # importable when projects.json is damaged, then fail closed only when the
+    # HTTP service itself is started.
+    PROJECTS = {}
+    _RUNTIME_CONFIG_ERROR = exc
+DEFAULT_PROJECT_KEY = next(iter(PROJECTS), "")
 
 _jobs: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=20)
 _jobs_admin_lock = threading.Lock()
 _projects_lock = threading.Lock()
+_config_transaction_lock = threading.RLock()
 _running_lock = threading.Lock()
 _state_lock = threading.Lock()
+_state_write_lock = threading.Lock()
 _audit_lock = threading.Lock()
 _deploy_process_lock = threading.Lock()
 _deploy_process: subprocess.Popen[str] | None = None
+_deploy_worker_thread: threading.Thread | None = None
 _cancel_requested: dict[str, Any] | None = None
 _state: dict[str, Any] = {
     "running": False,
@@ -244,28 +425,219 @@ _state: dict[str, Any] = {
     "system_metrics": [],
 }
 _login_failures: dict[str, list[float]] = {}
+_login_failures_lock = threading.Lock()
 _system_status_cache: dict[str, Any] = {"at": 0.0, "payload": {}}
 _system_status_lock = threading.Lock()
 _notifications_lock = threading.Lock()
 _last_cpu_sample: tuple[int, int] | None = None
 _last_network_sample: tuple[float, int, int] | None = None
+_JOB_MAINTENANCE_LOCK_KEY = "_maintenance_lock_fd"
+_JOB_DEPLOY_LIFECYCLE_OWNER_KEY = "_deploy_lifecycle_owner"
+_JOB_INTERNAL_KEYS = frozenset({_JOB_MAINTENANCE_LOCK_KEY, _JOB_DEPLOY_LIFECYCLE_OWNER_KEY})
+_ORPHAN_REAPER_WAIT_SECONDS = 60.0
+_ORPHAN_REAPER_LOG_SECONDS = 300.0
+_DEPLOY_LOCK_WAIT_SECONDS = 0.2
+_DEPLOY_LOCK_WAIT_LOG_SECONDS = 30.0
+
+
+class _MaintenanceLockError(RuntimeError):
+    pass
+
+
+class _MaintenanceActiveError(_MaintenanceLockError):
+    pass
 
 
 def _now_text() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _append_private_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        else:  # pragma: no cover - Windows-only development fallback
+            os.chmod(path, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8", newline="\n") as file_handle:
+            descriptor = -1
+            file_handle.write(text)
+            file_handle.flush()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _log(message: str) -> None:
     line = f"{_now_text()} {message}\n"
-    print(line, end="", flush=True)
     try:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with LOG_FILE.open("a", encoding="utf-8") as fh:
-            fh.write(line)
+        print(line, end="", flush=True)
+    except (OSError, UnicodeError, ValueError):
+        # Logging is diagnostic and must never change deployment lifecycle
+        # behavior when stdout is closed or cannot encode a message.
+        pass
+    try:
+        _append_private_text(LOG_FILE, line)
+    except (OSError, UnicodeError, ValueError):
+        pass
+
+
+def _log_without_raising(message: str) -> None:
+    try:
+        _log(message)
+    except Exception:  # noqa: BLE001 - lifecycle safety must not depend on diagnostics
+        pass
+
+
+def _validate_maintenance_lock_parent(path: Path) -> None:
+    if not path.is_absolute():
+        raise _MaintenanceLockError("maintenance lock path must be absolute")
+    try:
+        parent_status = os.lstat(path.parent)
+    except OSError as exc:
+        raise _MaintenanceLockError(f"maintenance lock directory is unavailable: {path.parent}") from exc
+    if not stat.S_ISDIR(parent_status.st_mode):
+        raise _MaintenanceLockError(f"maintenance lock directory is unsafe: {path.parent}")
+    if parent_status.st_uid != MAINTENANCE_LOCK_OWNER_UID or stat.S_IMODE(parent_status.st_mode) & 0o077:
+        raise _MaintenanceLockError(f"maintenance lock directory is unsafe: {path.parent}")
+
+
+def _acquire_maintenance_shared_lock(*, blocking: bool) -> int | None:
+    if fcntl is None:  # pragma: no cover - Windows-only development fallback
+        return None
+
+    path = MAINTENANCE_LOCK_FILE
+    _validate_maintenance_lock_parent(path)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        file_status = os.fstat(descriptor)
+        path_status = os.lstat(path)
+        if not stat.S_ISREG(file_status.st_mode) or file_status.st_nlink != 1:
+            raise _MaintenanceLockError(f"maintenance lock file is unsafe: {path}")
+        if (path_status.st_dev, path_status.st_ino) != (file_status.st_dev, file_status.st_ino):
+            raise _MaintenanceLockError(f"maintenance lock file changed while opening: {path}")
+        if file_status.st_uid != MAINTENANCE_LOCK_OWNER_UID or stat.S_IMODE(file_status.st_mode) & 0o077:
+            raise _MaintenanceLockError(f"maintenance lock file is unsafe: {path}")
+        lock_flags = fcntl.LOCK_SH | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(descriptor, lock_flags)
+        except OSError as exc:
+            if not blocking and exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise _MaintenanceActiveError("maintenance operation is active") from exc
+            raise
+        acquired_descriptor = descriptor
+        descriptor = -1
+        return acquired_descriptor
+    except _MaintenanceLockError:
+        raise
+    except OSError as exc:
+        raise _MaintenanceLockError(f"maintenance lock file is unavailable: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _release_maintenance_lock(descriptor: int | None) -> None:
+    if descriptor is None or fcntl is None:  # pragma: no cover - Windows-only fallback has no descriptor
+        return
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(descriptor)
     except OSError:
         pass
 
 
+@contextmanager
+def _maintenance_shared_lock():
+    descriptor = _acquire_maintenance_shared_lock(blocking=True)
+    try:
+        yield
+    finally:
+        _release_maintenance_lock(descriptor)
+
+
+def _maintenance_shared_operation(function: Any) -> Any:
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with _maintenance_shared_lock():
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+def _probe_maintenance_lock_for_startup() -> None:
+    descriptor: int | None = None
+    try:
+        descriptor = _acquire_maintenance_shared_lock(blocking=False)
+    except _MaintenanceActiveError:
+        # install.sh intentionally restarts the Agent while it still owns the
+        # exclusive lock. Read-only HTTP/health endpoints may start; every
+        # mutation remains blocked or returns maintenance_in_progress.
+        return
+    finally:
+        _release_maintenance_lock(descriptor)
+
+
+_SENSITIVE_QUERY_NAMES = frozenset({
+    "access_token",
+    "api_key",
+    "apikey",
+    "key",
+    "password",
+    "secret",
+    "session",
+    "session_id",
+    "signature",
+    "token",
+})
+_QUERY_VALUE_RE = re.compile(r"([?&;])([^=&;\s\"]+)=([^&;\s\"]*)")
+
+
+def _is_sensitive_query_name(value: str) -> bool:
+    normalized = unquote_plus(str(value or "")).strip().lower().replace("-", "_")
+    return normalized in _SENSITIVE_QUERY_NAMES or normalized.endswith((
+        "_password",
+        "_secret",
+        "_signature",
+        "_token",
+    ))
+
+
+def _redact_http_log_message(message: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if not _is_sensitive_query_name(match.group(2)):
+            return match.group(0)
+        return f"{match.group(1)}{match.group(2)}=[redacted]"
+
+    return _QUERY_VALUE_RE.sub(replace, str(message or ""))
+
+
+def _redact_audit_value(value: Any, *, field_name: str = "") -> Any:
+    if field_name and _is_sensitive_query_name(field_name):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_audit_value(item, field_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_audit_value(item) for item in value]
+    if isinstance(value, str):
+        return _redact_http_log_message(value)
+    return value
+
+
+@_maintenance_shared_operation
 def _audit_event(
     action: str,
     *,
@@ -277,16 +649,17 @@ def _audit_event(
     event = {
         "at": _now_text(),
         "action": action,
-        "actor": actor,
-        "target": target,
+        "actor": _redact_audit_value(actor),
+        "target": _redact_audit_value(target),
         "success": bool(success),
-        "detail": detail or {},
+        "detail": _redact_audit_value(detail or {}),
     }
     try:
-        AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with _audit_lock:
-            with AUDIT_LOG_FILE.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            _append_private_text(
+                AUDIT_LOG_FILE,
+                json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n",
+            )
     except OSError as exc:
         _log(f"audit write failed: {exc}")
 
@@ -296,7 +669,7 @@ def _constant_time_equal(left: str, right: str) -> bool:
 
 
 def _valid_signature(headers: Any, body: bytes, query: dict[str, list[str]]) -> bool:
-    if not WEBHOOK_SECRET:
+    if not _is_strong_webhook_secret(WEBHOOK_SECRET):
         return False
 
     token_candidates = [
@@ -304,9 +677,12 @@ def _valid_signature(headers: Any, body: bytes, query: dict[str, list[str]]) -> 
         headers.get("X-Gitlab-Token", ""),
         headers.get("X-Webhook-Token", ""),
         headers.get("X-Hook-Token", ""),
-        query.get("token", [""])[0],
-        query.get("secret", [""])[0],
     ]
+    if ALLOW_QUERY_WEBHOOK_TOKEN:
+        token_candidates.extend([
+            query.get("token", [""])[0],
+            query.get("secret", [""])[0],
+        ])
     if any(token and _constant_time_equal(token, WEBHOOK_SECRET) for token in token_candidates):
         return True
 
@@ -449,7 +825,7 @@ def _project_for_manual(query: dict[str, list[str]]) -> DeployProject | None:
 
 def _valid_signature_for_project(project: DeployProject, headers: Any, body: bytes, query: dict[str, list[str]]) -> bool:
     secret = project.webhook_secret
-    if not secret:
+    if not _is_strong_webhook_secret(secret):
         return False
 
     token_candidates = [
@@ -457,9 +833,12 @@ def _valid_signature_for_project(project: DeployProject, headers: Any, body: byt
         headers.get("X-Gitlab-Token", ""),
         headers.get("X-Webhook-Token", ""),
         headers.get("X-Hook-Token", ""),
-        query.get("token", [""])[0],
-        query.get("secret", [""])[0],
     ]
+    if ALLOW_QUERY_WEBHOOK_TOKEN:
+        token_candidates.extend([
+            query.get("token", [""])[0],
+            query.get("secret", [""])[0],
+        ])
     if any(token and _constant_time_equal(token, secret) for token in token_candidates):
         return True
 
@@ -477,14 +856,18 @@ def _clean_config_text(value: Any, default: str = "", max_length: int = 1024) ->
 
 
 def _load_config_file() -> dict[str, Any]:
-    if not PROJECTS_CONFIG_FILE.exists():
+    config_payload = _read_selected_projects_config()
+    if config_payload is None:
         return {}
     try:
-        raw = json.loads(PROJECTS_CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001 - keep agent bootable on bad config
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} projects config load failed: {exc}", flush=True)
-        return {}
-    return raw if isinstance(raw, dict) else {"projects": raw}
+        raw = json.loads(config_payload.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"projects config is invalid: {PROJECTS_CONFIG_FILE}: {exc}") from exc
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list):
+        return {"projects": raw}
+    raise RuntimeError(f"projects config must contain an object or list: {PROJECTS_CONFIG_FILE}")
 
 
 def _default_notification_config() -> dict[str, Any]:
@@ -554,7 +937,14 @@ def _load_notifications() -> dict[str, Any]:
     return _notification_config_from_raw(raw.get("notifications") if isinstance(raw, dict) else {})
 
 
-NOTIFICATIONS = _load_notifications()
+if _RUNTIME_CONFIG_ERROR is None:
+    try:
+        NOTIFICATIONS = _load_notifications()
+    except RuntimeError as exc:
+        NOTIFICATIONS = _default_notification_config()
+        _RUNTIME_CONFIG_ERROR = exc
+else:
+    NOTIFICATIONS = _default_notification_config()
 
 
 def _project_to_config(project: DeployProject, include_secret: bool = True) -> dict[str, Any]:
@@ -584,7 +974,9 @@ def _project_to_config(project: DeployProject, include_secret: bool = True) -> d
 
 
 def _projects_config_items(include_secret: bool = True) -> list[dict[str, Any]]:
-    return [_project_to_config(project, include_secret=include_secret) for project in PROJECTS.values()]
+    with _projects_lock:
+        projects = list(PROJECTS.values())
+    return [_project_to_config(project, include_secret=include_secret) for project in projects]
 
 
 def _notification_config_payload(include_secret: bool = True) -> dict[str, Any]:
@@ -599,12 +991,13 @@ def _notification_config_payload(include_secret: bool = True) -> dict[str, Any]:
 
 
 def _projects_config_payload(include_secret: bool = True) -> dict[str, Any]:
-    return {
-        "config_file": str(PROJECTS_CONFIG_FILE),
-        "config_exists": PROJECTS_CONFIG_FILE.exists(),
-        "projects": _projects_config_items(include_secret=include_secret),
-        "notifications": _notification_config_payload(include_secret=include_secret),
-    }
+    with _config_transaction_lock:
+        return {
+            "config_file": str(PROJECTS_CONFIG_FILE),
+            "config_exists": PROJECTS_CONFIG_FILE.exists(),
+            "projects": _projects_config_items(include_secret=include_secret),
+            "notifications": _notification_config_payload(include_secret=include_secret),
+        }
 
 
 def _project_from_form(raw: dict[str, Any], existing: DeployProject | None = None) -> DeployProject:
@@ -639,8 +1032,10 @@ def _project_from_form(raw: dict[str, Any], existing: DeployProject | None = Non
         max_length=253,
     )
     webhook_secret = _clean_config_text(raw.get("webhook_secret") or raw.get("secret"), existing.webhook_secret if existing else "", max_length=256)
-    if not webhook_secret:
+    if not webhook_secret or _is_placeholder_webhook_secret(webhook_secret):
         webhook_secret = secrets.token_hex(32)
+    elif not _is_strong_webhook_secret(webhook_secret):
+        raise ValueError("WebHook Token/Secret 至少需要 32 位")
     return DeployProject(
         key=key,
         name=name,
@@ -670,11 +1065,23 @@ def _project_from_form(raw: dict[str, Any], existing: DeployProject | None = Non
 def _backup_projects_config() -> str:
     if not PROJECTS_CONFIG_FILE.exists():
         return ""
-    backup_dir = PROJECTS_CONFIG_FILE.parent / ".backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir = PROJECT_CONFIG_BACKUP_DIR
+    backup_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(backup_dir, 0o700)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup_path = backup_dir / f"{PROJECTS_CONFIG_FILE.name}.{stamp}.bak"
-    shutil.copy2(PROJECTS_CONFIG_FILE, backup_path)
+    descriptor, raw_backup_path = tempfile.mkstemp(
+        prefix=f"{PROJECTS_CONFIG_FILE.name}.{stamp}.",
+        suffix=".bak",
+        dir=backup_dir,
+    )
+    os.close(descriptor)
+    backup_path = Path(raw_backup_path)
+    try:
+        shutil.copyfile(PROJECTS_CONFIG_FILE, backup_path)
+        os.chmod(backup_path, 0o600)
+    except Exception:
+        backup_path.unlink(missing_ok=True)
+        raise
     backups = sorted(
         backup_dir.glob(f"{PROJECTS_CONFIG_FILE.name}.*.bak"),
         key=lambda item: item.stat().st_mtime,
@@ -688,6 +1095,33 @@ def _backup_projects_config() -> str:
     return str(backup_path)
 
 
+def _atomic_write_private_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        descriptor, raw_temporary_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temporary_path = Path(raw_temporary_path)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as file_handle:
+            descriptor = -1
+            file_handle.write(text)
+            file_handle.flush()
+            os.fsync(file_handle.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+@_maintenance_shared_operation
 def _write_projects_config(projects: dict[str, DeployProject], notifications: dict[str, Any] | None = None) -> None:
     backup_path = _backup_projects_config()
     PROJECTS_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -697,13 +1131,10 @@ def _write_projects_config(projects: dict[str, DeployProject], notifications: di
             notifications if notifications is not None else _notification_config_payload(include_secret=True),
         ),
     }
-    tmp = PROJECTS_CONFIG_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(PROJECTS_CONFIG_FILE)
-    try:
-        os.chmod(PROJECTS_CONFIG_FILE, 0o600)
-    except OSError:
-        pass
+    _atomic_write_private_text(
+        PROJECTS_CONFIG_FILE,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
     if backup_path:
         _log(f"projects config backup created file={backup_path}")
 
@@ -718,8 +1149,9 @@ def _replace_projects(projects: dict[str, DeployProject]) -> None:
 
 
 def _save_and_reload_projects(projects: dict[str, DeployProject]) -> None:
-    _write_projects_config(projects)
-    _replace_projects(projects)
+    with _config_transaction_lock:
+        _write_projects_config(projects)
+        _replace_projects(projects)
 
 
 def _replace_notifications(notifications: dict[str, Any]) -> None:
@@ -729,9 +1161,98 @@ def _replace_notifications(notifications: dict[str, Any]) -> None:
 
 
 def _save_and_reload_notifications(notifications: dict[str, Any]) -> None:
-    parsed = _notification_config_from_raw(notifications, existing=_notification_config_payload(include_secret=True))
-    _write_projects_config(PROJECTS, notifications=parsed)
-    _replace_notifications(parsed)
+    with _config_transaction_lock:
+        parsed = _notification_config_from_raw(
+            notifications,
+            existing=_notification_config_payload(include_secret=True),
+        )
+        _write_projects_config(PROJECTS, notifications=parsed)
+        _replace_notifications(parsed)
+
+
+class _ProjectKeyExistsError(ValueError):
+    pass
+
+
+class _ProjectNotFoundError(ValueError):
+    pass
+
+
+class _LastProjectError(ValueError):
+    pass
+
+
+class _ProjectRunningError(ValueError):
+    pass
+
+
+def _save_project_transaction(raw_project: dict[str, Any], original_key: str = "") -> DeployProject:
+    with _config_transaction_lock:
+        projects = dict(PROJECTS)
+        existing = projects.get(original_key) if original_key else None
+        project = _project_from_form(raw_project, existing=existing)
+        if original_key and original_key != project.key:
+            projects.pop(original_key, None)
+        if project.key in projects and original_key != project.key:
+            raise _ProjectKeyExistsError(project.key)
+        projects[project.key] = project
+        _save_and_reload_projects(projects)
+        return project
+
+
+def _delete_project_transaction(key: str) -> None:
+    with _config_transaction_lock:
+        projects = dict(PROJECTS)
+        if key not in projects:
+            raise _ProjectNotFoundError(key)
+        if len(projects) <= 1:
+            raise _LastProjectError(key)
+        with _state_lock:
+            current = _state.get("current_deploy")
+        if (
+            isinstance(current, dict)
+            and (current.get("project_key") or "default") == key
+            and current.get("status") == "running"
+        ):
+            raise _ProjectRunningError(key)
+        projects.pop(key)
+        _save_and_reload_projects(projects)
+
+
+def _reset_project_secret_transaction(key: str) -> DeployProject:
+    with _config_transaction_lock:
+        projects = dict(PROJECTS)
+        project = projects.get(key)
+        if not project:
+            raise _ProjectNotFoundError(key)
+        projects[key] = DeployProject(
+            key=project.key,
+            name=project.name,
+            template=project.template,
+            repo=project.repo,
+            branch=project.branch,
+            workdir=project.workdir,
+            script=project.script,
+            health_url=project.health_url,
+            deploy_log_file=project.deploy_log_file,
+            webhook_secret=secrets.token_hex(32),
+            enabled=project.enabled,
+            manual_deploy_enabled=project.manual_deploy_enabled,
+            timeout_seconds=project.timeout_seconds,
+            rollback_script=project.rollback_script,
+            service_name=project.service_name,
+            service_port=project.service_port,
+            start_command=project.start_command,
+            app_domain=project.app_domain,
+            app_https=project.app_https,
+        )
+        _save_and_reload_projects(projects)
+        return projects[key]
+
+
+def _initialize_projects_config_transaction() -> None:
+    with _config_transaction_lock:
+        _write_projects_config(PROJECTS, notifications=_notification_config_payload(include_secret=True))
 
 
 def _notification_result(channel: str, enabled: bool, ok: bool, detail: str) -> dict[str, Any]:
@@ -902,15 +1423,17 @@ def _read_state() -> None:
             _state["queue_size"] = 0
 
 
+@_maintenance_shared_operation
 def _write_state() -> None:
     try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_FILE.with_suffix(".tmp")
-        with _state_lock:
-            data = dict(_state)
-            data["queue_size"] = _jobs.qsize()
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(STATE_FILE)
+        with _state_write_lock:
+            with _state_lock:
+                data = dict(_state)
+                data["queue_size"] = _jobs.qsize()
+            _atomic_write_private_text(
+                STATE_FILE,
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            )
     except OSError as exc:
         _log(f"state write failed: {exc}")
 
@@ -980,6 +1503,30 @@ def _phase_from_deploy_line(line: str) -> tuple[str, str] | None:
     if not phase:
         return None
     return phase, text
+
+
+def _build_progress_detail(line: str) -> str | None:
+    """Map stable BuildKit/Compose output to a concise dashboard detail."""
+    text = str(line or "").strip().lower()
+    if not text:
+        return None
+    if "apt-get install" in text:
+        return "安装系统依赖"
+    if "pip install" in text or "-r requirements.txt" in text:
+        return "安装 Python 依赖"
+    if "exporting layers" in text:
+        return "导出镜像层"
+    if "exporting manifest" in text or "exporting config" in text:
+        return "写入镜像元数据"
+    if "unpacking to docker.io" in text or "unpacking to " in text:
+        return "写入 Docker 镜像"
+    if "container " in text and (" recreat" in text or " restart" in text):
+        return "重建容器"
+    if "container " in text and (" starting" in text or " started" in text):
+        return "启动容器"
+    if "container " in text and (" running" in text or " healthy" in text):
+        return "容器已启动"
+    return None
 
 
 def _append_history(entry: dict[str, Any]) -> None:
@@ -1461,6 +2008,7 @@ def _run_bootstrap_command(command: list[str], *, step: str, timeout: float = 60
     return _bootstrap_result(step, code == 0, "ok" if code == 0 else f"exit code {code}", output)
 
 
+@_maintenance_shared_operation
 def _bootstrap_project(project: DeployProject, *, write_service: bool = True) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     service_written = False
@@ -1566,6 +2114,7 @@ def _project_nginx_config_text(project: DeployProject) -> str:
     ])
 
 
+@_maintenance_shared_operation
 def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None = None) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     domain = _normalize_domain(project.app_domain)
@@ -1647,12 +2196,32 @@ def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None
 
 def _queued_jobs_snapshot() -> list[dict[str, Any]]:
     with _jobs_admin_lock:
-        return list(_jobs.queue)
+        return [
+            {key: value for key, value in job.items() if key not in _JOB_INTERNAL_KEYS}
+            for job in _jobs.queue
+        ]
+
+
+def _release_job_maintenance_lock(job: dict[str, Any]) -> None:
+    descriptor = job.pop(_JOB_MAINTENANCE_LOCK_KEY, None)
+    _release_maintenance_lock(descriptor)
 
 
 def _enqueue_job(job: dict[str, Any]) -> None:
-    with _jobs_admin_lock:
-        _jobs.put_nowait(job)
+    descriptor = _acquire_maintenance_shared_lock(blocking=False)
+    try:
+        with _jobs_admin_lock:
+            if _JOB_MAINTENANCE_LOCK_KEY in job:
+                raise RuntimeError("deploy job already owns a maintenance lock")
+            job[_JOB_MAINTENANCE_LOCK_KEY] = descriptor
+            try:
+                _jobs.put_nowait(job)
+            except Exception:
+                job.pop(_JOB_MAINTENANCE_LOCK_KEY, None)
+                raise
+        descriptor = None
+    finally:
+        _release_maintenance_lock(descriptor)
 
 
 def _dequeue_job() -> dict[str, Any]:
@@ -1684,6 +2253,8 @@ def _cancel_queued_jobs(project: DeployProject | None = None) -> list[dict[str, 
                 _jobs.put_nowait(job)
             except queue.Full:
                 canceled.append(job)
+    for job in canceled:
+        _release_job_maintenance_lock(job)
     _update_state(queue_size=_jobs.qsize())
     return canceled
 
@@ -1725,6 +2296,10 @@ def _read_process_output(proc: subprocess.Popen[str], stop_event: threading.Even
                 phase = _phase_from_deploy_line(clean_line)
                 if phase:
                     _update_current_deploy(phase=phase[0], phase_detail=phase[1])
+                else:
+                    build_detail = _build_progress_detail(clean_line)
+                    if build_detail:
+                        _update_current_deploy(phase="docker_build", phase_detail=build_detail)
             if stop_event.is_set() and proc.poll() is not None:
                 break
     except Exception as exc:  # noqa: BLE001 - output reading must not orphan the deploy process
@@ -2010,6 +2585,7 @@ def _docker_logs_text(container: str, lines: int | None = None, all_lines: bool 
     return output, False
 
 
+@_maintenance_shared_operation
 def _docker_action(container: str, action: str) -> str:
     if not shutil.which("docker"):
         raise RuntimeError("docker command not found")
@@ -2047,6 +2623,18 @@ def _system_status_payload() -> dict[str, Any]:
         _system_status_cache["at"] = now
         _system_status_cache["payload"] = payload
         return json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def _system_metric_sampler() -> None:
+    """Keep long-range system trends populated independently of UI traffic."""
+    _cpu_percent()
+    time.sleep(2)
+    while True:
+        try:
+            _system_status_payload()
+        except Exception as exc:  # noqa: BLE001 - sampler must never stop the agent
+            _log(f"system metric sample failed: {exc}")
+        time.sleep(max(60, SYSTEM_METRIC_INTERVAL_SECONDS))
 
 
 def _project_history(state: dict[str, Any], project: DeployProject) -> list[dict[str, Any]]:
@@ -2132,43 +2720,184 @@ def _deploy_lock_status(state: dict[str, Any]) -> dict[str, Any]:
     with _deploy_process_lock:
         proc = _deploy_process
         active_pid = proc.pid if proc is not None and proc.poll() is None else None
+        worker_active = bool(_deploy_worker_thread and _deploy_worker_thread.is_alive())
+        locked = _running_lock.locked()
     current = state.get("current_deploy") if isinstance(state.get("current_deploy"), dict) else {}
-    locked = _running_lock.locked()
     duration = current.get("duration_seconds")
     return {
         "locked": locked,
         "active_pid": active_pid,
         "active_process": active_pid is not None,
+        "active_worker": worker_active,
         "duration_seconds": duration,
         "project_key": current.get("project_key") or "",
         "phase": current.get("phase") or "",
         "phase_label": current.get("phase_label") or "",
-        "can_force_unlock": bool(locked and active_pid is None),
+        "can_force_unlock": bool(locked and active_pid is None and not worker_active),
     }
 
 
 def _force_unlock_deploy() -> tuple[bool, dict[str, Any]]:
+    global _cancel_requested, _deploy_process, _deploy_worker_thread
     with _deploy_process_lock:
         proc = _deploy_process
         active_pid = proc.pid if proc is not None and proc.poll() is None else None
-    if active_pid is not None:
-        return False, {
-            "error": "deploy_process_running",
-            "active_pid": active_pid,
-            "suggested_commands": [
-                f"ps -fp {active_pid}",
-                f"kill {active_pid}",
-                "systemctl restart mini-deploy-agent",
-            ],
-        }
-    if not _running_lock.locked():
-        return True, {"ok": True, "message": "deploy lock is already clear"}
-    try:
-        _running_lock.release()
-    except RuntimeError:
-        pass
-    _update_state(running=False, current_deploy=None, queue_size=_jobs.qsize())
+        worker_active = bool(_deploy_worker_thread and _deploy_worker_thread.is_alive())
+        if active_pid is not None:
+            return False, {
+                "error": "deploy_process_running",
+                "active_pid": active_pid,
+                "suggested_commands": [
+                    f"ps -fp {active_pid}",
+                    f"kill {active_pid}",
+                    f"systemctl restart {shlex.quote(AGENT_SERVICE_NAME)}",
+                ],
+            }
+        if worker_active:
+            return False, {
+                "error": "deploy_worker_active",
+                "active_pid": None,
+                "message": "deployment worker is still starting or cleaning up",
+            }
+        if not _running_lock.locked():
+            return True, {"ok": True, "message": "deploy lock is already clear"}
+        try:
+            # Clear persisted/in-memory state before making the deploy lock
+            # available. Otherwise a newly acquired job can publish running=True
+            # and then be overwritten by this stale unlock request.
+            _update_state(running=False, current_deploy=None, queue_size=_jobs.qsize())
+        finally:
+            try:
+                _running_lock.release()
+            except RuntimeError:
+                pass
+            _deploy_process = None
+            _cancel_requested = None
+            _deploy_worker_thread = None
     return True, {"ok": True, "message": "stale deploy lock cleared"}
+
+
+def _release_deploy_worker_lifecycle() -> None:
+    global _cancel_requested, _deploy_process, _deploy_worker_thread
+    with _deploy_process_lock:
+        if _deploy_worker_thread is not threading.current_thread():
+            return
+        # The queue worker is long-lived, but its ownership of this job ends
+        # here even if an unresponsive child has not exited yet. Keep the lock
+        # and process while it is active; force-unlock may clear them only after
+        # poll() confirms that the orphaned process is gone.
+        _deploy_worker_thread = None
+        if _deploy_process is not None and _deploy_process.poll() is None:
+            return
+        _deploy_process = None
+        _cancel_requested = None
+        if _running_lock.locked():
+            _running_lock.release()
+
+
+def _clear_completed_orphan_lifecycle(proc: subprocess.Popen[str]) -> None:
+    global _cancel_requested, _deploy_process, _deploy_worker_thread
+    with _deploy_process_lock:
+        if _deploy_process is not proc or _deploy_worker_thread is not None:
+            return
+        try:
+            if proc.poll() is None:
+                return
+        except Exception:  # noqa: BLE001 - unreadable process state must remain fail closed
+            return
+        try:
+            _update_state(running=False, current_deploy=None, queue_size=_jobs.qsize())
+        finally:
+            if _running_lock.locked():
+                _running_lock.release()
+            _deploy_process = None
+            _cancel_requested = None
+            _deploy_worker_thread = None
+
+
+def _reap_orphan_process_maintenance_lock(proc: subprocess.Popen[str], descriptor: int) -> None:
+    try:
+        pid = getattr(proc, "pid", "unknown")
+        _log_without_raising(
+            f"deploy process pid={pid} outlived its worker; maintenance remains blocked until it exits"
+        )
+        last_log_at = time.monotonic()
+        while True:
+            try:
+                if proc.poll() is not None:
+                    return
+                proc.wait(timeout=_ORPHAN_REAPER_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception as exc:  # noqa: BLE001 - fail closed while an orphan may still be mutating files
+                now = time.monotonic()
+                if now - last_log_at >= _ORPHAN_REAPER_LOG_SECONDS:
+                    _log_without_raising(f"still waiting for orphan deploy process pid={pid}: {exc}")
+                    last_log_at = now
+                time.sleep(min(_ORPHAN_REAPER_WAIT_SECONDS, 5.0))
+                continue
+            now = time.monotonic()
+            if now - last_log_at >= _ORPHAN_REAPER_LOG_SECONDS:
+                _log_without_raising(
+                    f"still waiting for orphan deploy process pid={pid}; maintenance remains blocked"
+                )
+                last_log_at = now
+    finally:
+        try:
+            _clear_completed_orphan_lifecycle(proc)
+        finally:
+            _release_maintenance_lock(descriptor)
+
+
+def _retain_job_lock_for_orphan_process(job: dict[str, Any]) -> None:
+    if not job.pop(_JOB_DEPLOY_LIFECYCLE_OWNER_KEY, False):
+        return
+    descriptor = job.get(_JOB_MAINTENANCE_LOCK_KEY)
+    if not isinstance(descriptor, int) or fcntl is None:
+        return
+
+    with _deploy_process_lock:
+        proc = _deploy_process
+        if proc is None:
+            return
+        try:
+            active = proc.poll() is None
+        except Exception:  # noqa: BLE001 - an unreadable process state must fail closed
+            active = True
+        if not active:
+            return
+        # flock(2) locks are shared by dup() descriptors, so unlocking the
+        # worker's original descriptor would also unlock a duplicate. Transfer
+        # the original descriptor to the reaper and remove it from the job.
+        retained_descriptor = job.pop(_JOB_MAINTENANCE_LOCK_KEY)
+
+    try:
+        reaper = threading.Thread(
+            target=_reap_orphan_process_maintenance_lock,
+            args=(proc, retained_descriptor),
+            name=f"deploy-orphan-reaper-{getattr(proc, 'pid', 'unknown')}",
+            daemon=True,
+        )
+        reaper.start()
+    except Exception as exc:  # noqa: BLE001 - synchronous fallback must keep the shared lock held
+        _log_without_raising(f"failed to start orphan deploy reaper: {exc}; waiting synchronously")
+        _reap_orphan_process_maintenance_lock(proc, retained_descriptor)
+
+
+def _acquire_deploy_worker_lifecycle(job: dict[str, Any]) -> None:
+    global _deploy_worker_thread
+    last_log_at = time.monotonic()
+    while True:
+        with _deploy_process_lock:
+            if _running_lock.acquire(blocking=False):
+                _deploy_worker_thread = threading.current_thread()
+                job[_JOB_DEPLOY_LIFECYCLE_OWNER_KEY] = True
+                return
+        now = time.monotonic()
+        if now - last_log_at >= _DEPLOY_LOCK_WAIT_LOG_SECONDS:
+            _log_without_raising("deploy worker is waiting for the previous process lifecycle to clear")
+            last_log_at = now
+        time.sleep(_DEPLOY_LOCK_WAIT_SECONDS)
 
 
 def _alert(level: str, title: str, detail: str, source: str, command: str = "") -> dict[str, Any]:
@@ -2226,7 +2955,13 @@ def _alerts_payload(system: dict[str, Any], state: dict[str, Any], lock: dict[st
     if lock.get("locked") and isinstance(duration, (int, float)) and duration > 600:
         alerts.append(_alert("warning", "Deployment has been running for a long time", f"{duration}s at {current.get('phase_label') or '-'}", "deploy", "journalctl -u mini-deploy-agent -f"))
     if lock.get("locked") and lock.get("can_force_unlock"):
-        alerts.append(_alert("critical", "Deployment lock may be stale", "No active deploy process was found, but the lock is still held.", "deploy", "systemctl restart mini-deploy-agent"))
+        alerts.append(_alert(
+            "critical",
+            "Deployment lock may be stale",
+            "No active deploy process was found, but the lock is still held.",
+            "deploy",
+            f"systemctl restart {shlex.quote(AGENT_SERVICE_NAME)}",
+        ))
     return alerts[:40]
 
 
@@ -2458,22 +3193,35 @@ def _hash_password(password: str, salt: bytes | None = None) -> str:
     )
 
 
-def _verify_password(password: str) -> bool:
+def _parse_password_hash(value: str) -> tuple[int, bytes, bytes] | None:
     try:
-        scheme, iterations, salt_b64, expected_b64 = UI_PASSWORD_HASH.split("$", 3)
+        scheme, iterations_text, salt_b64, expected_b64 = str(value or "").split("$", 3)
         if scheme != "pbkdf2_sha256":
-            return False
-        salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
-        expected = base64.urlsafe_b64decode(expected_b64.encode("ascii"))
-        digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt,
-            int(iterations),
-        )
-        return hmac.compare_digest(digest, expected)
-    except Exception:
+            return None
+        iterations = int(iterations_text)
+        if not MIN_PASSWORD_HASH_ITERATIONS <= iterations <= MAX_PASSWORD_HASH_ITERATIONS:
+            return None
+        salt = base64.b64decode(salt_b64.encode("ascii"), altchars=b"-_", validate=True)
+        expected = base64.b64decode(expected_b64.encode("ascii"), altchars=b"-_", validate=True)
+        if len(salt) != 16 or len(expected) != hashlib.sha256().digest_size:
+            return None
+        return iterations, salt, expected
+    except (UnicodeEncodeError, ValueError):
+        return None
+
+
+def _verify_password(password: str) -> bool:
+    parsed = _parse_password_hash(UI_PASSWORD_HASH)
+    if parsed is None:
         return False
+    iterations, salt, expected = parsed
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        iterations,
+    )
+    return hmac.compare_digest(digest, expected)
 
 
 def _session_signature(expires: int) -> str:
@@ -2506,23 +3254,86 @@ def _verify_session_cookie(value: str) -> bool:
     return _constant_time_equal(signature, _session_signature(expires))
 
 
-def _is_rate_limited(ip: str) -> bool:
+def _request_client_ip(handler: Any) -> str:
+    peer_ip = str(handler.client_address[0])
+    try:
+        peer_address = ipaddress.ip_address(peer_ip)
+    except ValueError:
+        return peer_ip
+    if not TRUST_LOOPBACK_PROXY_HEADERS or not peer_address.is_loopback:
+        return peer_ip
+    forwarded = str(handler.headers.get("X-Real-IP", "")).strip()
+    try:
+        return str(ipaddress.ip_address(forwarded)) if forwarded else peer_ip
+    except ValueError:
+        return peer_ip
+
+
+def _reserve_login_attempt(ip: str) -> bool:
     now = time.time()
-    failures = [ts for ts in _login_failures.get(ip, []) if now - ts < 60]
-    _login_failures[ip] = failures
-    return len(failures) >= 5
+    with _login_failures_lock:
+        for client_ip, timestamps in list(_login_failures.items()):
+            active = [
+                timestamp
+                for timestamp in timestamps
+                if 0 <= now - timestamp < LOGIN_ATTEMPT_WINDOW_SECONDS
+            ]
+            if active:
+                _login_failures[client_ip] = active
+            else:
+                _login_failures.pop(client_ip, None)
+
+        attempts = list(_login_failures.get(ip, []))
+        if len(attempts) >= LOGIN_ATTEMPT_LIMIT:
+            _login_failures[ip] = attempts
+            return False
+        if ip not in _login_failures and len(_login_failures) >= LOGIN_FAILURE_MAX_CLIENTS:
+            oldest_ip = min(
+                _login_failures,
+                key=lambda client_ip: _login_failures[client_ip][-1],
+            )
+            _login_failures.pop(oldest_ip, None)
+        attempts.append(now)
+        _login_failures[ip] = attempts
+        return True
 
 
-def _record_login_failure(ip: str) -> None:
-    failures = _login_failures.setdefault(ip, [])
-    failures.append(time.time())
-    _login_failures[ip] = failures[-10:]
+def _clear_login_attempts(ip: str) -> None:
+    with _login_failures_lock:
+        _login_failures.pop(ip, None)
 
 
 def _upsert_env_file(path: Path, values: dict[str, str]) -> None:
     existing_lines: list[str] = []
-    if path.exists():
-        existing_lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        metadata = None
+    if metadata is not None:
+        if stat.S_ISLNK(metadata.st_mode):
+            raise OSError(f"refusing to update symbolic-link environment file: {path}")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"environment file is not a regular file: {path}")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened_metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_metadata.st_mode):
+                raise OSError(f"environment file is not a regular file: {path}")
+            if (
+                metadata.st_dev,
+                metadata.st_ino,
+            ) != (
+                opened_metadata.st_dev,
+                opened_metadata.st_ino,
+            ):
+                raise OSError(f"environment file changed while opening: {path}")
+            with os.fdopen(descriptor, "r", encoding="utf-8") as file_handle:
+                descriptor = -1
+                existing_lines = file_handle.read().splitlines()
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
     seen: set[str] = set()
     output: list[str] = []
     for line in existing_lines:
@@ -2535,57 +3346,107 @@ def _upsert_env_file(path: Path, values: dict[str, str]) -> None:
     for key, value in values.items():
         if key not in seen:
             output.append(f"{key}={value}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
-    tmp.replace(path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    _atomic_write_private_text(path, "\n".join(output).rstrip() + "\n")
+
+
+_DEPLOY_CONTROL_SECRET_ENV_NAMES = frozenset({
+    "DEPLOY_UI_PASSWORD",
+    "DEPLOY_UI_PASSWORD_FILE",
+    "DEPLOY_UI_PASSWORD_HASH",
+    "DEPLOY_UI_SESSION_SECRET",
+    "DEPLOY_WEBHOOK_SECRET",
+})
+
+
+def _deploy_subprocess_environment(
+    project: DeployProject,
+    action: str,
+    script_path: Path,
+    job: dict[str, Any],
+) -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _DEPLOY_CONTROL_SECRET_ENV_NAMES
+    }
+    env.update({
+        "DEPLOY_PROJECT_KEY": project.key,
+        "DEPLOY_PROJECT_NAME": project.name,
+        "PROJECT_DIR": str(project.workdir),
+        "DEPLOY_BRANCH": project.branch,
+        "DEPLOY_SCRIPT": str(script_path),
+        "DEPLOY_ACTION": action,
+        "HEALTH_URL": project.health_url,
+        "DEPLOY_LOG_FILE": str(project.deploy_log_file),
+        "DEPLOY_SERVICE_NAME": project.service_name,
+        "DEPLOY_SERVICE_PORT": str(project.service_port),
+        "DEPLOY_REF": str(job.get("ref") or ""),
+        "DEPLOY_BEFORE": str(job.get("before") or ""),
+        "DEPLOY_AFTER": str(job.get("after") or ""),
+        "DEPLOY_SOURCE": str(job.get("source") or "webhook"),
+        "DEPLOY_TRIGGERED_AT": str(int(time.time())),
+    })
+    return env
 
 
 def _run_deploy(job: dict[str, Any]) -> None:
-    if not _running_lock.acquire(blocking=False):
-        _log(f"deploy skipped because another job is running after={job.get('after')}")
-        return
+    owns_maintenance_lock = _JOB_MAINTENANCE_LOCK_KEY not in job
+    if owns_maintenance_lock:
+        job[_JOB_MAINTENANCE_LOCK_KEY] = _acquire_maintenance_shared_lock(blocking=True)
+    try:
+        _run_deploy_locked(job)
+    finally:
+        if owns_maintenance_lock:
+            try:
+                _retain_job_lock_for_orphan_process(job)
+            finally:
+                _release_job_maintenance_lock(job)
+
+
+def _run_deploy_locked(job: dict[str, Any]) -> None:
+    global _cancel_requested, _deploy_process, _deploy_worker_thread
+    _acquire_deploy_worker_lifecycle(job)
 
     project_key = str(job.get("project_key") or DEFAULT_PROJECT_KEY)
     project = PROJECTS.get(project_key)
     if not project:
         _log(f"deploy skipped because project no longer exists project={project_key} after={job.get('after')}")
-        _running_lock.release()
+        _release_deploy_worker_lifecycle()
         return
-    action = str(job.get("action") or "deploy")
-    script_path = _project_script_path(project, action=action)
-    started_at = _now_text()
-    started_ts = time.time()
-    current = {
-        "status": "running",
-        "project_key": project.key,
-        "project_name": project.name,
-        "ref": job.get("ref") or "",
-        "before": job.get("before") or "",
-        "after": job.get("after") or "",
-        "source": job.get("source") or "webhook",
-        "action": action,
-        "actor": job.get("actor") or "",
-        "commit_message": job.get("commit_message") or "",
-        "commit_author": job.get("commit_author") or "",
-        "started_at": started_at,
-        "started_ts": started_ts,
-        "finished_at": None,
-        "duration_seconds": None,
-        "exit_code": None,
-        "phase": "starting",
-        "phase_label": _phase_label("starting"),
-        "phase_detail": "",
-        "phase_started_ts": started_ts,
-        "phase_durations": [],
-        "changed_files": job.get("changed_files") or [],
-        "changed_file_count": job.get("changed_file_count") or 0,
-    }
-    _update_state(running=True, current_deploy=current)
+    try:
+        action = str(job.get("action") or "deploy")
+        script_path = _project_script_path(project, action=action)
+        started_at = _now_text()
+        started_ts = time.time()
+        current = {
+            "status": "running",
+            "project_key": project.key,
+            "project_name": project.name,
+            "ref": job.get("ref") or "",
+            "before": job.get("before") or "",
+            "after": job.get("after") or "",
+            "source": job.get("source") or "webhook",
+            "action": action,
+            "actor": job.get("actor") or "",
+            "commit_message": job.get("commit_message") or "",
+            "commit_author": job.get("commit_author") or "",
+            "started_at": started_at,
+            "started_ts": started_ts,
+            "finished_at": None,
+            "duration_seconds": None,
+            "exit_code": None,
+            "phase": "starting",
+            "phase_label": _phase_label("starting"),
+            "phase_detail": "",
+            "phase_started_ts": started_ts,
+            "phase_durations": [],
+            "changed_files": job.get("changed_files") or [],
+            "changed_file_count": job.get("changed_file_count") or 0,
+        }
+        _update_state(running=True, current_deploy=current)
+    except Exception:
+        _release_deploy_worker_lifecycle()
+        raise
     canceled = False
     exit_code = 1
     proc: subprocess.Popen[str] | None = None
@@ -2593,22 +3454,7 @@ def _run_deploy(job: dict[str, Any]) -> None:
     output_reader: threading.Thread | None = None
 
     try:
-        env = os.environ.copy()
-        env["DEPLOY_PROJECT_KEY"] = project.key
-        env["DEPLOY_PROJECT_NAME"] = project.name
-        env["PROJECT_DIR"] = str(project.workdir)
-        env["DEPLOY_BRANCH"] = project.branch
-        env["DEPLOY_SCRIPT"] = str(script_path)
-        env["DEPLOY_ACTION"] = action
-        env["HEALTH_URL"] = project.health_url
-        env["DEPLOY_LOG_FILE"] = str(project.deploy_log_file)
-        env["DEPLOY_SERVICE_NAME"] = project.service_name
-        env["DEPLOY_SERVICE_PORT"] = str(project.service_port)
-        env["DEPLOY_REF"] = str(job.get("ref") or "")
-        env["DEPLOY_BEFORE"] = str(job.get("before") or "")
-        env["DEPLOY_AFTER"] = str(job.get("after") or "")
-        env["DEPLOY_SOURCE"] = str(job.get("source") or "webhook")
-        env["DEPLOY_TRIGGERED_AT"] = str(int(time.time()))
+        env = _deploy_subprocess_environment(project, action, script_path, job)
 
         _log(
             "deploy start "
@@ -2629,7 +3475,6 @@ def _run_deploy(job: dict[str, Any]) -> None:
             stderr=subprocess.STDOUT,
             **popen_kwargs,
         )
-        global _deploy_process, _cancel_requested
         with _deploy_process_lock:
             _deploy_process = proc
             _cancel_requested = None
@@ -2713,11 +3558,7 @@ def _run_deploy(job: dict[str, Any]) -> None:
         }
         _append_history(entry)
         _notify_deploy_finished(entry)
-        with _deploy_process_lock:
-            if _deploy_process is not None and _deploy_process.poll() is not None:
-                _deploy_process = None
-            _cancel_requested = None
-        _running_lock.release()
+        _release_deploy_worker_lifecycle()
 
 
 def _worker() -> None:
@@ -2725,8 +3566,19 @@ def _worker() -> None:
         job = _dequeue_job()
         try:
             _run_deploy(job)
+        except Exception as exc:  # noqa: BLE001 - one failed job must not stop the worker
+            _log(f"deploy worker recovered from unexpected error: {exc}")
         finally:
-            _jobs.task_done()
+            try:
+                _release_deploy_worker_lifecycle()
+            finally:
+                try:
+                    _retain_job_lock_for_orphan_process(job)
+                finally:
+                    try:
+                        _jobs.task_done()
+                    finally:
+                        _release_job_maintenance_lock(job)
 
 
 def _normal_path(path: str) -> str:
@@ -2764,19 +3616,18 @@ def _render_login(error: str = "") -> str:
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     setup_note = ""
     if not UI_PASSWORD_HASH:
-        setup_note = """
+        setup_command = (
+            f"DEPLOY_AGENT_ENV_FILE={shlex.quote(str(AGENT_ENV_FILE))} "
+            f"python3 {shlex.quote(str(Path(__file__).resolve()))} admin set-password"
+        )
+        setup_note = f"""
         <div class="setup">
-          <strong>首次使用：请设置管理密码。</strong>
-          密码会加密写入环境文件，设置完成后重启 Agent 即可登录。
+          <strong>管理员密码尚未初始化。</strong>
+          为避免公网抢注，网页不提供初始化功能。请在服务器执行
+          <code>{html.escape(setup_command)}</code>。
         </div>
         """
-        form_html = """
-        <form method="post" action="setup-password" class="login-form">
-          <input type="password" name="password" placeholder="设置管理密码" autofocus autocomplete="new-password">
-          <input type="password" name="password_confirm" placeholder="再次输入密码" autocomplete="new-password">
-          <button type="submit">初始化密码</button>
-        </form>
-        """
+        form_html = ""
     else:
         form_html = """
         <form method="post" action="login" class="login-form">
@@ -3099,8 +3950,8 @@ class Handler(BaseHTTPRequestHandler):
         if not UI_PASSWORD_HASH or not UI_SESSION_SECRET:
             self._write_html(500, _render_login("部署面板密码尚未初始化。"))
             return
-        ip = self.client_address[0]
-        if _is_rate_limited(ip):
+        ip = _request_client_ip(self)
+        if not _reserve_login_attempt(ip):
             self._write_html(429, _render_login("登录失败次数过多，请稍后再试。"))
             return
 
@@ -3112,11 +3963,11 @@ class Handler(BaseHTTPRequestHandler):
         fields = parse_qs(body)
         password = fields.get("password", [""])[0]
         if not _verify_password(password):
-            _record_login_failure(ip)
             _audit_event("login", actor=ip, success=False, detail={"reason": "bad_password"})
             self._write_html(401, _render_login("密码错误。"))
             return
 
+        _clear_login_attempts(ip)
         _audit_event("login", actor=ip, success=True)
         self.send_response(303)
         self.send_header("Location", "ui")
@@ -3124,42 +3975,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _handle_setup_password(self) -> None:
-        global UI_PASSWORD_HASH, UI_SESSION_SECRET
-        if UI_PASSWORD_HASH:
-            self._write_html(403, _render_login("管理密码已经初始化。"))
-            return
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        if length <= 0 or length > 4096:
-            self._write_html(400, _render_login("请求内容无效。"))
-            return
-        body = self.rfile.read(length).decode("utf-8", errors="replace")
-        fields = parse_qs(body)
-        password = fields.get("password", [""])[0]
-        password_confirm = fields.get("password_confirm", [""])[0]
-        if len(password) < 8:
-            self._write_html(400, _render_login("密码至少需要 8 位。"))
-            return
-        if password != password_confirm:
-            self._write_html(400, _render_login("两次输入的密码不一致。"))
-            return
-        password_hash = _hash_password(password)
-        session_secret = secrets.token_hex(32)
-        try:
-            _upsert_env_file(AGENT_ENV_FILE, {
-                "DEPLOY_UI_PASSWORD_HASH": password_hash,
-                "DEPLOY_UI_SESSION_SECRET": session_secret,
-            })
-        except OSError as exc:
-            self._write_html(500, _render_login(f"写入环境文件失败：{exc}"))
-            return
-        UI_PASSWORD_HASH = password_hash
-        UI_SESSION_SECRET = session_secret
-        _audit_event("setup_password", actor=self.client_address[0], target=str(AGENT_ENV_FILE), success=True)
-        self._write_html(200, _render_login(f"密码已写入 {AGENT_ENV_FILE}，现在可以直接登录。后续重启服务也会继续生效。"))
+        self._write_html(403, _render_login("网页不允许初始化管理员密码，请在服务器终端执行 set-password。"))
 
     def _handle_projects_config_init(self) -> None:
         try:
-            _write_projects_config(PROJECTS)
+            _initialize_projects_config_transaction()
         except OSError as exc:
             _log(f"projects config init failed: {exc}")
             _audit_event("projects_config_init", actor=self.client_address[0], target=str(PROJECTS_CONFIG_FILE), success=False, detail={"error": str(exc)})
@@ -3182,25 +4002,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         original_key_raw = data.get("original_key") or raw_project.get("original_key") or ""
         original_key = _safe_project_key(str(original_key_raw)) if original_key_raw else ""
-        projects = dict(PROJECTS)
-        existing = projects.get(original_key) if original_key else None
         try:
-            project = _project_from_form(raw_project, existing=existing)
-        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
-            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
-            return
-        if original_key and original_key != project.key:
-            projects.pop(original_key, None)
-        if project.key in projects and original_key != project.key:
+            project = _save_project_transaction(raw_project, original_key)
+        except _ProjectKeyExistsError:
             self._write_json(409, {"error": "project_key_exists"})
             return
-        projects[project.key] = project
-        try:
-            _save_and_reload_projects(projects)
         except OSError as exc:
+            target = original_key or _safe_project_key(str(raw_project.get("key") or "project"))
             _log(f"projects config save failed: {exc}")
-            _audit_event("projects_config_save", actor=self.client_address[0], target=project.key, success=False, detail={"error": str(exc)})
+            _audit_event("projects_config_save", actor=self.client_address[0], target=target, success=False, detail={"error": str(exc)})
             self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
+            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
             return
         _log(f"projects config saved project={project.key} file={PROJECTS_CONFIG_FILE}")
         _audit_event("projects_config_save", actor=self.client_address[0], target=project.key, success=True, detail={"original_key": original_key})
@@ -3219,25 +4033,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         original_key_raw = data.get("original_key") or raw_project.get("original_key") or ""
         original_key = _safe_project_key(str(original_key_raw)) if original_key_raw else ""
-        projects = dict(PROJECTS)
-        existing = projects.get(original_key) if original_key else None
         try:
-            project = _project_from_form(raw_project, existing=existing)
-        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
-            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
-            return
-        if original_key and original_key != project.key:
-            projects.pop(original_key, None)
-        if project.key in projects and original_key != project.key:
+            project = _save_project_transaction(raw_project, original_key)
+        except _ProjectKeyExistsError:
             self._write_json(409, {"error": "project_key_exists"})
             return
-        projects[project.key] = project
-        try:
-            _save_and_reload_projects(projects)
         except OSError as exc:
+            target = original_key or _safe_project_key(str(raw_project.get("key") or "project"))
             _log(f"projects bootstrap config save failed: {exc}")
-            _audit_event("projects_config_bootstrap", actor=self.client_address[0], target=project.key, success=False, detail={"error": str(exc)})
+            _audit_event("projects_config_bootstrap", actor=self.client_address[0], target=target, success=False, detail={"error": str(exc)})
             self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
+            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
             return
 
         options = data.get("options") if isinstance(data.get("options"), dict) else {}
@@ -3268,25 +4076,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         original_key_raw = data.get("original_key") or raw_project.get("original_key") or ""
         original_key = _safe_project_key(str(original_key_raw)) if original_key_raw else ""
-        projects = dict(PROJECTS)
-        existing = projects.get(original_key) if original_key else None
         try:
-            project = _project_from_form(raw_project, existing=existing)
-        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
-            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
-            return
-        if original_key and original_key != project.key:
-            projects.pop(original_key, None)
-        if project.key in projects and original_key != project.key:
+            project = _save_project_transaction(raw_project, original_key)
+        except _ProjectKeyExistsError:
             self._write_json(409, {"error": "project_key_exists"})
             return
-        projects[project.key] = project
-        try:
-            _save_and_reload_projects(projects)
         except OSError as exc:
+            target = original_key or _safe_project_key(str(raw_project.get("key") or "project"))
             _log(f"projects nginx config save failed: {exc}")
-            _audit_event("projects_config_nginx", actor=self.client_address[0], target=project.key, success=False, detail={"error": str(exc)})
+            _audit_event("projects_config_nginx", actor=self.client_address[0], target=target, success=False, detail={"error": str(exc)})
             self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
+            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
             return
 
         options = data.get("options") if isinstance(data.get("options"), dict) else {}
@@ -3314,21 +4116,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_projects_config_delete(self, query: dict[str, list[str]]) -> None:
         key = _safe_project_key(query.get("project", [""])[0] or query.get("key", [""])[0])
-        projects = dict(PROJECTS)
-        if key not in projects:
+        try:
+            _delete_project_transaction(key)
+        except _ProjectNotFoundError:
             self._write_json(404, {"error": "project_not_found"})
             return
-        if len(projects) <= 1:
+        except _LastProjectError:
             self._write_json(400, {"error": "at_least_one_project_required"})
             return
-        with _state_lock:
-            current = _state.get("current_deploy")
-        if isinstance(current, dict) and (current.get("project_key") or "default") == key and current.get("status") == "running":
+        except _ProjectRunningError:
             self._write_json(409, {"error": "project_is_running"})
             return
-        projects.pop(key)
-        try:
-            _save_and_reload_projects(projects)
         except OSError as exc:
             _log(f"projects config delete failed: {exc}")
             _audit_event("projects_config_delete", actor=self.client_address[0], target=key, success=False, detail={"error": str(exc)})
@@ -3340,34 +4138,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_projects_config_secret(self, query: dict[str, list[str]]) -> None:
         key = _safe_project_key(query.get("project", [""])[0] or query.get("key", [""])[0])
-        projects = dict(PROJECTS)
-        project = projects.get(key)
-        if not project:
+        try:
+            _reset_project_secret_transaction(key)
+        except _ProjectNotFoundError:
             self._write_json(404, {"error": "project_not_found"})
             return
-        projects[key] = DeployProject(
-            key=project.key,
-            name=project.name,
-            template=project.template,
-            repo=project.repo,
-            branch=project.branch,
-            workdir=project.workdir,
-            script=project.script,
-            health_url=project.health_url,
-            deploy_log_file=project.deploy_log_file,
-            webhook_secret=secrets.token_hex(32),
-            enabled=project.enabled,
-            manual_deploy_enabled=project.manual_deploy_enabled,
-            timeout_seconds=project.timeout_seconds,
-            rollback_script=project.rollback_script,
-            service_name=project.service_name,
-            service_port=project.service_port,
-            start_command=project.start_command,
-            app_domain=project.app_domain,
-            app_https=project.app_https,
-        )
-        try:
-            _save_and_reload_projects(projects)
         except OSError as exc:
             _log(f"projects config secret reset failed: {exc}")
             _audit_event("projects_config_secret_reset", actor=self.client_address[0], target=key, success=False, detail={"error": str(exc)})
@@ -3388,8 +4163,7 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(400, {"error": "invalid_notifications"})
             return
         try:
-            config = _notification_config_from_raw(raw, existing=_notification_config_payload(include_secret=True))
-            _save_and_reload_notifications(config)
+            _save_and_reload_notifications(raw)
         except OSError as exc:
             _log(f"notifications config save failed: {exc}")
             self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
@@ -3530,6 +4304,13 @@ class Handler(BaseHTTPRequestHandler):
         job = _manual_deploy_job(self.client_address[0], project)
         try:
             _enqueue_job(job)
+        except _MaintenanceActiveError:
+            self._write_json(503, {"error": "maintenance_in_progress"})
+            return
+        except _MaintenanceLockError as exc:
+            _log(f"manual deploy rejected because maintenance lock is unavailable: {exc}")
+            self._write_json(503, {"error": "maintenance_lock_unavailable"})
+            return
         except queue.Full:
             self._write_json(429, {"error": "deploy_queue_full"})
             return
@@ -3566,6 +4347,13 @@ class Handler(BaseHTTPRequestHandler):
         job = _rollback_job(self.client_address[0], project, state)
         try:
             _enqueue_job(job)
+        except _MaintenanceActiveError:
+            self._write_json(503, {"error": "maintenance_in_progress"})
+            return
+        except _MaintenanceLockError as exc:
+            _log(f"rollback rejected because maintenance lock is unavailable: {exc}")
+            self._write_json(503, {"error": "maintenance_lock_unavailable"})
+            return
         except queue.Full:
             self._write_json(429, {"error": "deploy_queue_full"})
             return
@@ -3653,20 +4441,21 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(400, {"error": "invalid_json"})
             return
 
+        client_ip = _request_client_ip(self)
         project = _project_for_webhook(payload, query)
         if not project:
-            _log(f"webhook rejected from {self.client_address[0]}: project not found")
-            self._write_json(404, {"error": "project_not_found"})
+            _log(f"webhook rejected from {client_ip}: project not found")
+            self._write_json(403, {"error": "forbidden"})
+            return
+        if not _valid_signature_for_project(project, self.headers, body, query):
+            _log(f"webhook rejected from {client_ip}: invalid secret project={project.key}")
+            self._write_json(403, {"error": "forbidden"})
             return
         if not project.enabled:
             ignored = {"project_key": project.key, "reason": "project_disabled", "at": _now_text()}
             _update_state(last_ignored_webhook=ignored)
             _log(f"webhook ignored project={project.key}: project disabled")
             self._write_json(202, {"status": "ignored", "project": project.key, "reason": "project_disabled"})
-            return
-        if not _valid_signature_for_project(project, self.headers, body, query):
-            _log(f"webhook rejected from {self.client_address[0]}: invalid secret project={project.key}")
-            self._write_json(403, {"error": "invalid_secret"})
             return
 
         ref = _extract_ref(payload)
@@ -3690,6 +4479,13 @@ class Handler(BaseHTTPRequestHandler):
         }
         try:
             _enqueue_job(job)
+        except _MaintenanceActiveError:
+            self._write_json(503, {"error": "maintenance_in_progress"})
+            return
+        except _MaintenanceLockError as exc:
+            _log(f"webhook rejected because maintenance lock is unavailable: {exc}")
+            self._write_json(503, {"error": "maintenance_lock_unavailable"})
+            return
         except queue.Full:
             self._write_json(429, {"error": "deploy_queue_full"})
             return
@@ -3699,7 +4495,7 @@ class Handler(BaseHTTPRequestHandler):
         self._write_json(202, {"status": "queued", "project": project.key, "queue_size": _jobs.qsize()})
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        message = fmt % args
+        message = _redact_http_log_message(fmt % args)
         if (
             '"GET /status ' in message
             or '"GET /logs ' in message
@@ -3721,6 +4517,87 @@ def _print_password_hash() -> None:
     print(f"DEPLOY_UI_SESSION_SECRET={secrets.token_hex(32)}")
 
 
+def _write_admin_password(password: str) -> None:
+    if len(password) < 8:
+        raise SystemExit("管理员密码至少需要 8 位")
+    _upsert_env_file(AGENT_ENV_FILE, {
+        "DEPLOY_UI_PASSWORD_HASH": _hash_password(password),
+        "DEPLOY_UI_SESSION_SECRET": secrets.token_hex(32),
+    })
+    print(f"管理员密码已写入 {AGENT_ENV_FILE}；重启 {AGENT_SERVICE_NAME} 后生效。")
+
+
+def _set_admin_password() -> None:
+    first = getpass.getpass("新的部署面板密码: ")
+    second = getpass.getpass("再次输入部署面板密码: ")
+    if first != second:
+        raise SystemExit("两次输入的密码不一致")
+    _write_admin_password(first)
+
+
+def _set_admin_password_from_stdin() -> None:
+    password = sys.stdin.readline().rstrip("\r\n")
+    if not password:
+        raise SystemExit("标准输入中没有管理员密码")
+    _write_admin_password(password)
+
+
+def _reset_admin_sessions() -> None:
+    _upsert_env_file(AGENT_ENV_FILE, {
+        "DEPLOY_UI_SESSION_SECRET": secrets.token_hex(32),
+    })
+    print(f"Session Secret 已写入 {AGENT_ENV_FILE}；重启 {AGENT_SERVICE_NAME} 后所有旧 Session 将失效。")
+
+
+def _print_cli_help() -> None:
+    print(
+        "mini_deploy agent commands:\n"
+        "  set-password              set the administrator password and revoke sessions\n"
+        "  set-password-stdin        read the new password from stdin (installer use)\n"
+        "  reset-session             revoke all administrator sessions\n"
+        "  validate-config           validate projects configuration without starting HTTP\n"
+        "  validate-auth             validate credentials from the process environment\n"
+        "  hash-password             print credentials without writing the env file\n"
+        "  admin set-password        alias for set-password\n"
+        "  admin reset-session       alias for reset-session"
+    )
+
+
+def _is_strong_ui_session_secret(value: str) -> bool:
+    secret = str(value or "").strip()
+    normalized = secret.lower()
+    if len(secret) < MIN_UI_SESSION_SECRET_LENGTH:
+        return False
+    if len(set(secret)) < MIN_UI_SESSION_SECRET_UNIQUE_CHARS:
+        return False
+    return not normalized.startswith((
+        "change-me",
+        "changeme",
+        "replace-me",
+        "replace-with-",
+        "session-secret",
+        "your-secret",
+    ))
+
+
+def _validate_ui_auth_config() -> None:
+    if bool(UI_PASSWORD_HASH) != bool(UI_SESSION_SECRET):
+        raise SystemExit(
+            "管理员认证配置不完整：DEPLOY_UI_PASSWORD_HASH 和 "
+            "DEPLOY_UI_SESSION_SECRET 必须同时设置；请执行 agent.py set-password。"
+        )
+    if not UI_PASSWORD_HASH:
+        return
+    if _parse_password_hash(UI_PASSWORD_HASH) is None:
+        raise SystemExit(
+            "DEPLOY_UI_PASSWORD_HASH 格式或强度无效；请执行 agent.py set-password 重新生成。"
+        )
+    if not _is_strong_ui_session_secret(UI_SESSION_SECRET):
+        raise SystemExit(
+            "DEPLOY_UI_SESSION_SECRET 强度不足；请执行 agent.py reset-session 重新生成。"
+        )
+
+
 def _project_script_path(project: DeployProject, action: str = "deploy") -> Path:
     script_text = project.rollback_script if action == "rollback" and project.rollback_script else project.script
     script = Path(script_text)
@@ -3733,15 +4610,23 @@ def _script_is_executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
-def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "hash-password":
-        _print_password_hash()
-        return
+def _validate_projects_runtime_config() -> list[DeployProject]:
+    if _RUNTIME_CONFIG_ERROR is not None:
+        raise SystemExit(str(_RUNTIME_CONFIG_ERROR))
+    if not PROJECTS or not DEFAULT_PROJECT_KEY or DEFAULT_PROJECT_KEY not in PROJECTS:
+        raise SystemExit("projects config did not load a valid default project")
 
     enabled_projects = [project for project in PROJECTS.values() if project.enabled]
-    missing_secrets = [project.key for project in enabled_projects if not project.webhook_secret]
-    if missing_secrets:
-        raise SystemExit(f"webhook secret missing for projects: {', '.join(missing_secrets)}")
+    weak_secrets = [
+        project.key
+        for project in enabled_projects
+        if not _is_strong_webhook_secret(project.webhook_secret)
+    ]
+    if weak_secrets:
+        raise SystemExit(
+            "webhook secret missing, too short, or still a placeholder for projects: "
+            f"{', '.join(weak_secrets)}"
+        )
     missing_scripts = [
         f"{project.key}:{_project_script_path(project)}"
         for project in enabled_projects
@@ -3769,10 +4654,57 @@ def main() -> None:
         if project.rollback_script and not _script_is_executable(_project_script_path(project, action="rollback"))
     ]
     if non_executable_rollback_scripts:
-        raise SystemExit(f"rollback script is not executable, run chmod +x: {', '.join(non_executable_rollback_scripts)}")
+        raise SystemExit(
+            "rollback script is not executable, run chmod +x: "
+            f"{', '.join(non_executable_rollback_scripts)}"
+        )
+    return enabled_projects
+
+
+def main() -> None:
+    arguments = sys.argv[1:]
+    if arguments in (["help"], ["--help"], ["-h"]):
+        _print_cli_help()
+        return
+    if arguments == ["hash-password"]:
+        _print_password_hash()
+        return
+    if arguments in (["set-password"], ["admin", "set-password"]):
+        _set_admin_password()
+        return
+    if arguments == ["set-password-stdin"]:
+        _set_admin_password_from_stdin()
+        return
+    if arguments in (["reset-session"], ["admin", "reset-session"]):
+        _reset_admin_sessions()
+        return
+    if arguments == ["validate-auth"]:
+        _validate_ui_auth_config()
+        return
+    if arguments == ["validate-config"]:
+        enabled_projects = _validate_projects_runtime_config()
+        print(
+            "projects config OK: "
+            f"file={PROJECTS_CONFIG_FILE} projects={len(PROJECTS)} enabled={len(enabled_projects)}"
+        )
+        return
+    if arguments:
+        raise SystemExit(f"未知命令：{' '.join(arguments)}；使用 --help 查看可用命令。")
+
+    _validate_projects_runtime_config()
+
+    _validate_ui_auth_config()
+
+    try:
+        _probe_maintenance_lock_for_startup()
+    except _MaintenanceLockError as exc:
+        raise SystemExit(f"maintenance lock is unavailable: {exc}") from exc
 
     _read_state()
+    if ALLOW_QUERY_WEBHOOK_TOKEN:
+        _log("security warning: query-string webhook tokens are enabled and may leak through access logs")
     threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_system_metric_sampler, name="system-metric-sampler", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     _log(f"deploy agent listening on {HOST}:{PORT}, projects={len(PROJECTS)} default={DEFAULT_PROJECT_KEY}")
     server.serve_forever()

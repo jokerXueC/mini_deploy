@@ -4,6 +4,11 @@
 
 如果你只是想快速安装和接入第一个项目，先看：[快速上手](QUICKSTART.zh-CN.md)。
 
+> [!WARNING]
+> 当前默认安装器以 `root` 运行 Agent，权限拆分、版本化自动回滚和恢复命令仍是开源发布阻塞项。本文档用于受控专用测试服务器，不代表当前版本已经适合生产部署。
+
+本文中的路径和 systemd 服务名均使用默认值；自定义安装请以 `install.sh` 最后输出的实际路径、服务名和参数化维护命令为准。
+
 这份文档主要解释完整链路，以及 Python / Go / Java 项目接入时常见的配置方式。
 
 你最终要得到的是：
@@ -64,8 +69,9 @@ flowchart TD
 
 - 1 核 CPU。
 - 1GB 内存。
-- Ubuntu / Debian / CentOS / Rocky Linux 都可以。
+- 使用 systemd 的现代 Linux 服务器；文中的包管理示例覆盖 Ubuntu / Debian 和使用 DNF 的 CentOS / Rocky Linux，但这不是对所有发行版版本的兼容承诺。
 - 有 root 权限，或者能用 `sudo`。
+- 已安装 Python 3.10 或更高版本，供 mini_deploy Agent 自身运行；当前 CI 覆盖 3.10-3.13，即使业务项目不是 Python，也仍然需要。
 - 已安装 `git`。这是安装面板前的前置条件，需要你自己先装好，因为第一步 `git clone` 就要用到它。
 - 如果要用域名访问，先把域名解析到这台服务器；Nginx 可以让安装脚本自动安装。
 
@@ -82,7 +88,7 @@ dnf install -y git
 
 ### 项目运行环境
 
-按项目类型准备：
+下面是业务项目自己的额外运行环境，不替代 Agent 的 Python 3.10+ 前置条件：
 
 - Python 项目：`python3`、`python3-venv`、`pip`。
 - Go 项目：`go`。
@@ -95,11 +101,10 @@ flowchart TD
     A[登录 Linux 服务器] --> B[准备域名并解析到服务器]
     B --> C[clone mini_deploy]
     C --> D[执行 bash install.sh]
-    D --> E[输入域名]
-    E --> F[脚本自动安装文件/启动 Agent/生成 Nginx 配置]
-    F --> G[打开面板 /deploy/ui]
-    G --> H[首次设置面板密码]
-    H --> I[添加项目]
+    D --> E[输入域名和管理员密码]
+    E --> F[写入凭据/启动 Agent/生成 Nginx 配置]
+    F --> G[打开面板 /deploy/ui 并登录]
+    G --> I[添加项目]
     I --> J[点击自动初始化]
     J --> K[保存项目配置并生成脚本/service]
     K --> L[点击检查项目]
@@ -152,7 +157,7 @@ deploy.example.com
 
 - 复制程序到 `/opt/mini_deploy`。
 - 创建 `/etc/mini-deploy-agent.env`。
-- 创建 `/opt/mini_deploy/projects.json`。
+- 创建 `/var/lib/mini-deploy-agent/projects.json`；它是持久数据，不放在程序发布目录中。
 - 安装 systemd 服务。
 - 启动 `mini-deploy-agent`。
 - 如果服务器没装 Nginx，会问你是否自动安装。
@@ -174,13 +179,13 @@ http://deploy.example.com/deploy/ui
 https://deploy.example.com/deploy/ui
 ```
 
-如果你想完全不交互，也可以一条命令预填域名：
+如果你想预填域名，可以使用下面的命令；安装器仍会在终端中要求设置管理员密码：
 
 ```bash
 DEPLOY_DOMAIN=deploy.example.com bash install.sh
 ```
 
-如果你想完全使用英文向导：
+如果你想使用英文向导并预填域名：
 
 ```bash
 INSTALL_LANG=en DEPLOY_DOMAIN=deploy.example.com bash install.sh
@@ -237,15 +242,19 @@ systemctl status nginx
 http://deploy.example.com/deploy/ui
 ```
 
-第一次打开会让你设置管理员密码。设置后密码会加密写入：
+管理员密码已经在安装脚本中通过终端设置，并以哈希形式写入：
 
 ```text
 /etc/mini-deploy-agent.env
 ```
 
-设置完以后建议重启一次 Agent：
+网页不会提供管理员初始化入口。需要修改密码或撤销全部旧 Session 时，在服务器执行：
 
 ```bash
+python3 /opt/mini_deploy/agent.py admin set-password
+systemctl restart mini-deploy-agent
+
+python3 /opt/mini_deploy/agent.py admin reset-session
 systemctl restart mini-deploy-agent
 ```
 
@@ -256,7 +265,7 @@ apt install -y certbot python3-certbot-nginx
 certbot --nginx -d deploy.example.com
 ```
 
-安装脚本会检测 `certbot`。如果没有，会询问是否自动安装；如果你跳过 HTTPS，HTTP 地址 `http://deploy.example.com/deploy/ui` 仍然可以访问，只是不建议长期公网裸奔使用。
+安装脚本会检测 `certbot`。如果没有，会询问是否自动安装；跳过 HTTPS 后 HTTP 地址仍可用于受控网络内的短期测试，但不要把当前 root 模式面板长期暴露到公网。
 
 ## 5. 面板里添加项目时怎么填
 
@@ -453,9 +462,9 @@ sequenceDiagram
     participant App as 后端服务
 
     Dev->>Git: git push
-    Git->>Nginx: POST /deploy/webhook?project=xxx&token=xxx
+    Git->>Nginx: POST /deploy/webhook?project=xxx + 平台原生 Token/签名
     Nginx->>Agent: 转发请求
-    Agent->>Agent: 校验 project、token、branch
+    Agent->>Agent: 校验 project、请求头/HMAC、branch
     Agent->>Agent: 加入部署队列
     Agent->>Script: 执行 deploy.sh
     Script->>Git: git fetch / git pull
@@ -974,6 +983,8 @@ Token 类似：
 8f4e...很长的一串
 ```
 
+不要把 Token 拼进 URL 的 `token` 或 `secret` 查询参数。URL 凭据默认被拒绝，并且可能被代理、监控系统和访问日志泄漏。只使用下面各平台提供的原生 Secret/Token 字段。
+
 ### Gitee
 
 进入仓库：
@@ -1084,6 +1095,7 @@ systemctl restart mini-deploy-agent
 nginx -t
 systemctl status nginx
 tail -n 100 /var/log/nginx/access.log
+tail -n 100 /var/log/nginx/mini-deploy-webhook.access.log
 tail -n 100 /var/log/nginx/error.log
 ```
 

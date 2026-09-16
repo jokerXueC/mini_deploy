@@ -1,8 +1,15 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .DS_Store
 .env
+server.env
+.mini-deploy-install
 projects.json
+projects.json.*.bak
+.backups/
 state.json
 *.log
-

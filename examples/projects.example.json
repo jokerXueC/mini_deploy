@@ -19,7 +19,7 @@
       "enabled": false,
       "manual_deploy_enabled": true,
       "timeout_seconds": 900,
-      "webhook_secret": "replace-with-node-api-webhook-token"
+      "webhook_secret": ""
     },
     {
       "key": "spring-api",
@@ -40,7 +40,7 @@
       "enabled": false,
       "manual_deploy_enabled": true,
       "timeout_seconds": 1200,
-      "webhook_secret": "replace-with-spring-api-webhook-token"
+      "webhook_secret": ""
     },
     {
       "key": "go-service",
@@ -61,7 +61,7 @@
       "enabled": false,
       "manual_deploy_enabled": true,
       "timeout_seconds": 600,
-      "webhook_secret": "replace-with-go-service-webhook-token"
+      "webhook_secret": ""
     }
   ]
 }

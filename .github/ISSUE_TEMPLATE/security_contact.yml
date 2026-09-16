@@ -1,0 +1,27 @@
+name: 安全联系方式请求
+description: 仅请求建立私密联系，不得包含漏洞细节、影响、复现步骤或凭据
+title: "[Security contact]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        当前仓库尚未配置并验证私密漏洞报告入口。这个公开模板只能用于提醒维护者建立私密联系。
+
+        不要填写漏洞类型、受影响组件、版本、服务器信息、复现步骤、日志、截图、利用方式或任何凭据。私密入口可用前，请把完整报告保存在本地。
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 公开内容确认
+      options:
+        - label: 我确认本 Issue 不包含任何漏洞细节、影响说明、环境信息、复现步骤或敏感数据。
+          required: true
+        - label: 我会等待 SECURITY.md 公布并验证私密入口后，再提交完整报告。
+          required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: 联系请求
+      description: 只能填写类似“请配置并公布私密安全报告入口”，不要补充原因或技术信息。
+      placeholder: 请配置并公布经过验证的私密安全报告入口。
+    validations:
+      required: true

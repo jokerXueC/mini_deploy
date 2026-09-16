@@ -7,15 +7,37 @@ let activeView = 'deploy';
 let csrfToken = '';
 let serverRefreshSeconds = 30;
 let serverRefreshTimer = null;
+let eventsRefreshTimer = null;
 let currentContainerLogName = '';
 let currentContainerLogLineLimit = 200;
 let containerLogKeywordTimer = null;
 let systemTrendRange = '24h';
 let notificationDirty = false;
+let projectPreflightResults = new Map();
 const THEME_STORAGE_KEY = 'mini_deploy-theme';
+const DISMISSED_NOTICE_STORAGE_KEY = 'mini_deploy-dismissed-notices';
+let lastAlerts = [];
+let lastEvents = [];
+let lastContainerNoticeKeys = [];
+let lastSystemPayload = null;
+let dismissedNoticeKeys = loadDismissedNoticeKeys();
+let trendTooltipEl = null;
+const THEME_DAY_START_HOUR = 7;
+const THEME_DAY_END_HOUR = 19;
+
+function timeBasedTheme() {
+  const hour = new Date().getHours();
+  return hour >= THEME_DAY_START_HOUR && hour < THEME_DAY_END_HOUR ? 'light' : 'dark';
+}
 
 function currentTheme() {
   return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function ensureInitialTheme() {
+  const theme = document.documentElement.dataset.theme;
+  if (theme === 'light' || theme === 'dark') return;
+  document.documentElement.dataset.theme = timeBasedTheme();
 }
 
 function updateThemeToggle() {
@@ -60,6 +82,7 @@ function toggleTheme() {
   fallbackThemeReveal();
 }
 
+ensureInitialTheme();
 updateThemeToggle();
 
 function positiveLineCount(value, fallback = 200) {
@@ -97,9 +120,13 @@ function selectedDownloadLines(selectId, inputId, currentValue = 200) {
 }
 
 function closeLogSelectMenus(except = null) {
-  document.querySelectorAll('.log-select-wrap.open').forEach(wrap => {
-    if (except && wrap === except) return;
-    wrap.classList.remove('open');
+  document.querySelectorAll('.log-select').forEach(root => {
+    if (root === except) return;
+    root.classList.remove('open');
+    const button = root.querySelector('.log-select-button');
+    const menu = root.querySelector('.log-select-menu');
+    if (button) button.setAttribute('aria-expanded', 'false');
+    if (menu) menu.hidden = true;
   });
 }
 
@@ -107,20 +134,64 @@ function enhanceLogSelect(selectId) {
   const select = $(selectId);
   if (!select || select.dataset.enhanced === '1') return;
   select.dataset.enhanced = '1';
-  const wrap = document.createElement('span');
-  wrap.className = 'log-select-wrap';
-  select.parentNode.insertBefore(wrap, select);
-  wrap.appendChild(select);
-  select.addEventListener('focus', () => {
-    closeLogSelectMenus(wrap);
-    wrap.classList.add('open');
+
+  const root = document.createElement('div');
+  root.className = 'log-select';
+  root.dataset.selectFor = selectId;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'log-select-button';
+  button.setAttribute('aria-haspopup', 'listbox');
+  button.setAttribute('aria-expanded', 'false');
+  button.innerHTML = '<span></span><span class="select-caret" aria-hidden="true"></span>';
+
+  const menu = document.createElement('div');
+  menu.className = 'log-select-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.hidden = true;
+
+  function syncLabel() {
+    const selected = select.options[select.selectedIndex];
+    button.querySelector('span').textContent = selected ? selected.textContent : select.value;
+    menu.querySelectorAll('.log-select-option').forEach(option => {
+      const active = option.dataset.value === select.value;
+      option.classList.toggle('active', active);
+      option.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  }
+
+  Array.from(select.options).forEach(item => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'log-select-option';
+    option.setAttribute('role', 'option');
+    option.dataset.value = item.value;
+    option.textContent = item.textContent;
+    option.addEventListener('click', () => {
+      select.value = item.value;
+      syncLabel();
+      closeLogSelectMenus();
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    menu.appendChild(option);
   });
-  select.addEventListener('mousedown', () => {
-    closeLogSelectMenus(wrap);
-    wrap.classList.add('open');
+
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    const willOpen = menu.hidden;
+    closeLogSelectMenus(root);
+    root.classList.toggle('open', willOpen);
+    menu.hidden = !willOpen;
+    button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
   });
-  select.addEventListener('change', () => wrap.classList.remove('open'));
-  select.addEventListener('blur', () => window.setTimeout(() => wrap.classList.remove('open'), 160));
+  root.addEventListener('click', event => event.stopPropagation());
+  select.addEventListener('change', syncLabel);
+
+  root.appendChild(button);
+  root.appendChild(menu);
+  select.insertAdjacentElement('afterend', root);
+  syncLabel();
 }
 
 function containerLogFilterOptions() {
@@ -231,6 +302,150 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+function loadDismissedNoticeKeys() {
+  try {
+    const raw = localStorage.getItem(DISMISSED_NOTICE_STORAGE_KEY);
+    const keys = JSON.parse(raw || '[]');
+    return new Set(Array.isArray(keys) ? keys.filter(Boolean).slice(-400) : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function saveDismissedNoticeKeys() {
+  try {
+    const keys = Array.from(dismissedNoticeKeys).slice(-400);
+    dismissedNoticeKeys = new Set(keys);
+    localStorage.setItem(DISMISSED_NOTICE_STORAGE_KEY, JSON.stringify(keys));
+  } catch (_) {}
+}
+
+function noticeSignature(type, item = {}) {
+  const kind = String(item.kind || '').trim();
+  const parts = [
+    type,
+    kind,
+    item.level || '',
+    item.title || '',
+    item.source || '',
+    item.command || '',
+  ].map(value => String(value ?? '').trim());
+  if (type === 'event' && !['alert', 'docker'].includes(kind)) {
+    parts.push(String(item.detail || '').trim(), String(item.at || '').trim());
+  }
+  return parts.join('|');
+}
+
+function containerDisplayName(container = {}) {
+  return String(container.name || container.id || '').trim();
+}
+
+function containerNoticeEntries(container = {}) {
+  const name = containerDisplayName(container);
+  if (!name) return [];
+  const state = String(container.state || '').toLowerCase();
+  const health = String(container.health || '').toLowerCase();
+  const errorCount = Number(container.recent_error_count || 0);
+  const warnCount = Number(container.recent_warn_count || 0);
+  const entries = [];
+  if (state && state !== 'running') {
+    entries.push({
+      category: 'state',
+      type: 'alert',
+      item: { level: 'critical', title: `容器未运行：${name}`, source: 'docker', command: `docker start ${name}` },
+    });
+    entries.push({
+      category: 'state',
+      type: 'event',
+      item: { kind: 'docker', level: 'critical', title: `${name} 未运行`, source: 'docker' },
+    });
+  } else if (health === 'unhealthy') {
+    entries.push({
+      category: 'health',
+      type: 'alert',
+      item: { level: 'critical', title: `容器健康检查失败：${name}`, source: 'docker', command: `docker logs --tail=200 ${name}` },
+    });
+  }
+  if (errorCount > 0) {
+    entries.push({
+      category: 'error',
+      type: 'alert',
+      item: { level: 'warning', title: `容器近期异常日志：${name}`, source: 'docker', command: `docker logs --tail=200 ${name}` },
+    });
+    entries.push({
+      category: 'error',
+      type: 'event',
+      item: { kind: 'docker', level: 'warning', title: `${name} 出现异常日志`, source: 'docker' },
+    });
+  }
+  if (warnCount > 0) {
+    entries.push({
+      category: 'warn',
+      type: 'container',
+      item: { kind: 'docker', level: 'warning', title: `容器近期警告日志：${name}`, source: 'docker', command: `docker logs --tail=200 ${name}` },
+    });
+  }
+  return entries;
+}
+
+function containerNoticeKeys(container = {}, category = null) {
+  return containerNoticeEntries(container)
+    .filter(entry => !category || entry.category === category)
+    .map(entry => noticeSignature(entry.type, entry.item))
+    .filter(Boolean);
+}
+
+function areNoticeKeysDismissed(keys = []) {
+  return keys.length > 0 && keys.every(key => dismissedNoticeKeys.has(key));
+}
+
+function visibleNoticeKeys(keys = []) {
+  return keys.filter(key => !dismissedNoticeKeys.has(key));
+}
+
+function isAbnormalEvent(event = {}) {
+  const level = String(event?.level || '').toLowerCase();
+  return Boolean(level) && !['success', 'ok', 'completed'].includes(level);
+}
+
+function currentNoticeKeys() {
+  const alertKeys = lastAlerts.map(alert => noticeSignature('alert', alert));
+  const eventKeys = lastEvents
+    .filter(isAbnormalEvent)
+    .map(event => noticeSignature('event', event));
+  return Array.from(new Set([...alertKeys, ...eventKeys, ...lastContainerNoticeKeys])).filter(Boolean);
+}
+
+function updateClearAlertsButton() {
+  const button = $('clearAlertsBtn');
+  if (!button) return;
+  const keys = currentNoticeKeys();
+  const visibleCount = keys.filter(key => !dismissedNoticeKeys.has(key)).length;
+  const dismissedCount = keys.length - visibleCount;
+  button.disabled = keys.length === 0;
+  button.textContent = visibleCount > 0 ? '清除当前' : dismissedCount > 0 ? '恢复显示' : '清除当前';
+  button.title = visibleCount > 0
+    ? '清除当前已经看到的警告和异常，新的异常仍会显示'
+    : dismissedCount > 0
+      ? '恢复显示当前这批已清除的告警'
+      : '暂无可清除的告警';
+}
+
+function toggleCurrentNoticeDismissal() {
+  const keys = currentNoticeKeys();
+  if (!keys.length) return;
+  const visibleKeys = keys.filter(key => !dismissedNoticeKeys.has(key));
+  if (visibleKeys.length) {
+    visibleKeys.forEach(key => dismissedNoticeKeys.add(key));
+  } else {
+    keys.forEach(key => dismissedNoticeKeys.delete(key));
+  }
+  saveDismissedNoticeKeys();
+  renderAlerts(lastAlerts);
+  renderEvents(lastEvents);
+  if (lastSystemPayload) renderSystemStatus(lastSystemPayload);
+}
+
 let confirmDialogResolve = null;
 
 function closeConfirmDialog(result = false) {
@@ -302,7 +517,65 @@ function projectBadge(label, enabled) {
   return `<span class="badge ${enabled ? 'success' : 'neutral'}">${label}</span>`;
 }
 
-function renderProjectOverview(projects = [], agent = {}) {
+function renderProjectLock(project, lock = {}) {
+  if (!lock || !lock.locked) return '';
+  const lockProject = lock.project_key || '';
+  if (lockProject && lockProject !== project.key) return '';
+  const activePid = lock.active_pid ? `PID ${lock.active_pid}` : '无活跃进程';
+  return `
+    <div class="lock-status compact-lock">
+      <div class="lock-main">
+        <span class="badge running">部署锁定</span>
+        <span>${escapeHtml(lock.phase_label || activePid)}</span>
+        ${lock.duration_seconds != null ? `<span>${escapeHtml(lock.duration_seconds)}s</span>` : ''}
+      </div>
+      ${lock.can_force_unlock ? `<button class="danger-button compact-action" type="button" data-force-unlock-project="${escapeHtml(project.key)}">强制解锁</button>` : ''}
+      ${lock.active_process ? `<code>部署进程仍在运行：${escapeHtml(activePid)}</code>` : ''}
+    </div>
+  `;
+}
+
+function renderProjectPreflightPanel(project, lock = {}) {
+  const data = projectPreflightResults.get(project.key);
+  const status = data
+    ? `<span class="badge ${severityClass(data.level)}">${data.ok ? '通过' : data.level === 'critical' ? '阻塞' : '提醒'}</span>`
+    : '<span class="badge neutral">未体检</span>';
+  return `
+    <div class="project-preflight">
+      <div class="project-preflight-head">
+        <div>
+          <strong>部署体检</strong>
+          <span>${data ? `检查于 ${escapeHtml(data.checked_at || '-')}` : '检查 Git、脚本、Docker、磁盘和日志目录'}</span>
+        </div>
+        <div class="project-preflight-actions">
+          ${status}
+          <button class="ghost-button compact-action" type="button" data-project-preflight="${escapeHtml(project.key)}">运行体检</button>
+        </div>
+      </div>
+      ${renderProjectLock(project, lock)}
+      <div class="preflight-result project-preflight-result" data-project-preflight-result data-project-key="${escapeHtml(project.key)}">
+        ${data ? preflightHtml(data) : '<div class="project-empty compact-empty">点击运行体检后显示结果和修复命令。</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderProjectRuntimeDetails(project, agent = {}, state = {}) {
+  const branch = project.branch || project.git_branch || agent.branch || '-';
+  const workdir = project.project_dir || agent.project_dir || '-';
+  const script = project.deploy_script || agent.deploy_script || '-';
+  const webhook = project.last_webhook_at || state.last_webhook_at || '-';
+  return `
+    <dl class="project-runtime">
+      <div><dt>目标分支</dt><dd class="mono" title="${escapeHtml(branch)}">${escapeHtml(branch)}</dd></div>
+      <div><dt>项目目录</dt><dd class="mono" title="${escapeHtml(workdir)}">${escapeHtml(workdir)}</dd></div>
+      <div><dt>部署脚本</dt><dd class="mono" title="${escapeHtml(script)}">${escapeHtml(script)}</dd></div>
+      <div><dt>最近 WebHook</dt><dd title="${escapeHtml(fmtTime(webhook))}">${escapeHtml(fmtTime(webhook))}</dd></div>
+    </dl>
+  `;
+}
+
+function renderProjectOverview(projects = [], agent = {}, lock = {}, state = {}) {
   const count = projects.length || Number(agent.project_count || 0);
   const multi = count > 1;
   const modeBadge = $('projectModeBadge');
@@ -329,14 +602,14 @@ function renderProjectOverview(projects = [], agent = {}) {
     const last = project.last_deploy || {};
     const head = project.short_head || shortSha(project.head);
     return `
-      <button class="project-row ${selected ? 'active' : ''}" type="button" data-project-key="${escapeHtml(project.key)}">
-        <div>
+      <article class="project-row ${selected ? 'active' : ''}" data-project-key="${escapeHtml(project.key)}">
+        <button class="project-select-area" type="button" data-project-select="${escapeHtml(project.key)}" aria-label="选择 ${escapeHtml(project.name || project.key)}">
           <div class="project-title-line">
             <span class="project-name">${escapeHtml(project.name || project.key)}</span>
             <span class="badge ${state.level}">${state.label}</span>
           </div>
           <div class="project-repo mono" title="${escapeHtml(projectRepoText(project))}">${escapeHtml(projectRepoText(project))}</div>
-        </div>
+        </button>
         <div class="project-tags">
           ${projectBadge(project.enabled ? '启用' : '禁用', project.enabled)}
           ${projectBadge(project.manual_deploy_enabled ? '手动部署' : '禁止手动', project.manual_deploy_enabled)}
@@ -347,15 +620,30 @@ function renderProjectOverview(projects = [], agent = {}) {
           <span>HEAD <strong class="mono">${escapeHtml(head || '-')}</strong></span>
           <span>最近 <strong>${escapeHtml(last.finished_at || last.started_at || '-')}</strong></span>
         </div>
-      </button>
+        ${renderProjectRuntimeDetails(project, agent, state)}
+        ${renderProjectPreflightPanel(project, lock)}
+      </article>
     `;
   }).join('');
-  list.querySelectorAll('.project-row[data-project-key]').forEach(row => {
+  list.querySelectorAll('[data-project-select]').forEach(row => {
     row.addEventListener('click', () => {
-      selectedProjectKey = row.dataset.projectKey || '';
+      selectedProjectKey = row.dataset.projectSelect || '';
       updateProjectSelect(projects);
       renderLogs();
       refresh();
+    });
+  });
+  list.querySelectorAll('[data-project-preflight]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      runPreflight(button.dataset.projectPreflight || '');
+    });
+  });
+  list.querySelectorAll('[data-force-unlock-project]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      selectedProjectKey = button.dataset.forceUnlockProject || selectedProjectKey;
+      forceUnlockDeploy();
     });
   });
 }
@@ -469,17 +757,49 @@ function successSummary(items) {
   return { success, total, percent, level };
 }
 
-function renderHistoryBars(items) {
-  const bars = items.slice(0, 60);
-  while (bars.length < 60) bars.push(null);
-  return bars.map(item => `
+function renderHistoryBars(items, options = {}) {
+  const bars = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!bars.length) {
+    return '<div class="history-empty-label">暂无历史</div>';
+  }
+  return bars.map((item, index) => {
+    const detailKey = options.linkDeploy ? deployDetailKey(item, index) : '';
+    return `
     <button
       type="button"
       class="history-bar ${historyClass(item)}"
       title="${escapeHtml(itemTitle(item))}"
-      aria-label="${escapeHtml(itemTitle(item))}">
+      aria-label="${escapeHtml(itemTitle(item))}"
+      ${detailKey ? `data-detail-key="${escapeHtml(detailKey)}"` : ''}>
     </button>
-  `).join('');
+  `;
+  }).join('');
+}
+
+function historyTrackStyle(items) {
+  const count = Math.max(1, (Array.isArray(items) ? items.filter(Boolean).length : 0));
+  const minWidth = Math.max(0, (count * 6.75) - 2);
+  return `--history-count:${count};--history-min-width:${minWidth}px`;
+}
+
+function findDeployDetailByKey(detailKey) {
+  if (!detailKey) return null;
+  return Array.from(document.querySelectorAll('#deployStats .deploy-details[data-detail-key]'))
+    .find(el => el.dataset.detailKey === detailKey) || null;
+}
+
+function focusDeployRecord(detailKey) {
+  const detail = findDeployDetailByKey(detailKey);
+  if (!detail) return;
+  const card = detail.closest('.deploy-stat-card');
+  if (!card) return;
+  detail.open = true;
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+  card.classList.remove('deploy-stat-card-focused');
+  window.requestAnimationFrame(() => {
+    card.classList.add('deploy-stat-card-focused');
+    window.setTimeout(() => card.classList.remove('deploy-stat-card-focused'), 1600);
+  });
 }
 
 function renderMiniHistory(id, items) {
@@ -620,22 +940,50 @@ function animateNumberText(id, value, formatter) {
 }
 
 function setView(view) {
-  activeView = view === 'server' ? 'server' : 'deploy';
-  $('deployView')?.classList.toggle('active', activeView === 'deploy');
-  $('serverView')?.classList.toggle('active', activeView === 'server');
-  $('deployViewTab')?.classList.toggle('active', activeView === 'deploy');
-  $('serverViewTab')?.classList.toggle('active', activeView === 'server');
-  $('panelTitle').textContent = activeView === 'server' ? '服务器健康面板' : '部署健康面板';
-  $('panelSubtitle').textContent = activeView === 'server'
-    ? '查看服务器资源、网络吞吐和 Docker 容器运行状态。'
-    : '监控 Gitee WebHook、部署队列、最近发布和线上健康检查。';
-  if (activeView === 'server') {
-    clearRefresh();
-    refreshServerStatus();
-  } else {
-    clearServerRefresh();
-    refresh();
-  }
+  activeView = ['server', 'events', 'notify'].includes(view) ? view : 'deploy';
+  ['deploy', 'server', 'events', 'notify'].forEach(name => {
+    $(`${name}View`)?.classList.toggle('active', activeView === name);
+    $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
+  });
+  const titles = {
+    deploy: ['部署健康面板', '监控 Git 平台 WebHook、部署队列、最近发布和线上健康检查。'],
+    server: ['服务器健康面板', '查看服务器资源、网络吞吐和 Docker 容器运行状态。'],
+    events: ['告警与事件', '集中查看部署、WebHook、容器和资源异常。'],
+    notify: ['通知配置', '配置部署结果、服务器和 Docker 异常的推送渠道。'],
+  };
+  const [title, subtitle] = titles[activeView];
+  $('panelTitle').textContent = title;
+  $('panelSubtitle').textContent = subtitle;
+  clearRefresh();
+  clearServerRefresh();
+  clearEventsRefresh();
+  if (activeView === 'server') refreshServerStatus();
+  else if (activeView === 'events') refreshEventsStatus();
+  else if (activeView === 'notify') refreshNotificationConfig();
+  else refresh();
+}
+
+function setupSecondaryViews() {
+  const deploy = $('deployView');
+  if (!deploy || $('notifyView') || $('eventsView')) return;
+
+  const notification = deploy.querySelector('.notification-panel');
+  const opsGrid = deploy.querySelector('.ops-panel-grid');
+  const eventPanel = opsGrid?.querySelector('.ops-panel');
+  if (!notification || !eventPanel) return;
+
+  const notifyView = document.createElement('div');
+  notifyView.id = 'notifyView';
+  notifyView.className = 'dashboard-view';
+  deploy.insertAdjacentElement('afterend', notifyView);
+  notifyView.appendChild(notification);
+
+  const eventsView = document.createElement('div');
+  eventsView.id = 'eventsView';
+  eventsView.className = 'dashboard-view';
+  notifyView.insertAdjacentElement('afterend', eventsView);
+  eventPanel.classList.add('standalone-panel');
+  eventsView.appendChild(eventPanel);
 }
 
 function renderDeployCard(item, index, historyItems, refreshSeconds, closedDetailKeys) {
@@ -658,7 +1006,7 @@ function renderDeployCard(item, index, historyItems, refreshSeconds, closedDetai
         <div class="stat-identity">
           <div class="stat-icon">CI</div>
           <div class="stat-meta">
-            <span class="stat-pill">Gitee</span>
+            <span class="stat-pill">Git</span>
             <span class="stat-pill">${escapeHtml(projectTitle)}</span>
             <span class="mono">${escapeHtml(shortSha(item.after))}</span>
             <span class="badge ${statusClass}">${statusLabel(item.status)}</span>
@@ -692,28 +1040,29 @@ function renderDeployCard(item, index, historyItems, refreshSeconds, closedDetai
         </div>
         <details class="deploy-details" data-detail-key="${escapeHtml(detailKey)}"${detailsOpen}>
           <summary>部署详情</summary>
+          <div class="deploy-time-row">
+            <div><span>Started</span><strong title="${detailValue(item.started_at)}">${detailValue(item.started_at)}</strong></div>
+            <div><span>Finished</span><strong title="${detailValue(item.finished_at)}">${detailValue(item.finished_at)}</strong></div>
+          </div>
           <dl class="deploy-detail-list">
             <div><dt>Source</dt><dd title="${detailValue(item.source)}">${detailValue(item.source)}</dd></div>
             <div><dt>Actor</dt><dd title="${detailValue(item.actor)}">${detailValue(item.actor)}</dd></div>
-            <div><dt>Started</dt><dd title="${detailValue(item.started_at)}">${detailValue(item.started_at)}</dd></div>
-            <div><dt>Finished</dt><dd title="${detailValue(item.finished_at)}">${detailValue(item.finished_at)}</dd></div>
             <div><dt>Before</dt><dd class="mono" title="${detailValue(item.before)}">${detailValue(shortSha(item.before))}</dd></div>
             <div><dt>After</dt><dd class="mono" title="${detailValue(item.after)}">${detailValue(shortSha(item.after))}</dd></div>
             <div><dt>Author</dt><dd title="${detailValue(item.commit_author)}">${detailValue(item.commit_author)}</dd></div>
             <div><dt>Ref</dt><dd title="${detailValue(item.ref)}">${detailValue(item.ref)}</dd></div>
-            <div class="wide-detail"><dt>Message</dt><dd title="${detailValue(item.commit_message)}">${detailValue(item.commit_message)}</dd></div>
-            <div class="wide-detail"><dt>阶段耗时</dt><dd>${renderPhaseDurations(item)}</dd></div>
-            <div class="wide-detail"><dt>变更文件</dt><dd>${renderChangedFiles(item)}</dd></div>
+            <div class="wide-detail deploy-message-detail"><dt>Message</dt><dd title="${detailValue(item.commit_message)}">${detailValue(item.commit_message)}</dd></div>
+            <div class="wide-detail deploy-insight-detail"><dt>执行摘要</dt><dd>${renderDeployDetailInsights(item)}</dd></div>
           </dl>
         </details>
       </div>
       <div class="stat-history">
         <div class="history-head">
-          <span>History (60pts)</span>
+          <span>History (${Math.max(60, historyItems.length)}pts)</span>
           <span class="history-next">Next update in ${refreshSeconds}s</span>
         </div>
         <div class="history-bars">
-          <div class="history-track">${renderHistoryBars(historyItems)}</div>
+          <div class="history-track" style="${historyTrackStyle(historyItems)}">${renderHistoryBars(historyItems, { linkDeploy: true })}</div>
         </div>
         <div class="history-axis">
           <span>Oldest</span>
@@ -766,26 +1115,29 @@ function severityClass(level) {
   return 'neutral';
 }
 
-function renderPreflightData(data) {
-  const target = $('preflightResult');
-  if (!target) return;
+function preflightTarget(projectKey) {
+  return Array.from(document.querySelectorAll('[data-project-preflight-result]'))
+    .find(item => item.dataset.projectKey === String(projectKey || ''));
+}
+
+function preflightHtml(data) {
   const items = Array.isArray(data?.items) ? data.items : [];
   const level = data?.level || 'unknown';
   const badgeClass = severityClass(level);
   const label = level === 'critical'
-    ? '发现阻断问题'
+    ? '阻塞'
     : level === 'warning'
-      ? '有建议检查项'
+      ? '提醒'
       : level === 'ok'
-        ? '体检通过'
-        : '暂无体检结果';
+        ? '通过'
+        : '未知';
   if (!items.length) {
-    target.innerHTML = `<div class="preflight-head"><span class="badge ${badgeClass}">${label}</span></div>`;
-    return;
+    return `<div class="preflight-head"><span class="badge ${badgeClass}">${label}</span></div>`;
   }
-  target.innerHTML = `
+  return `
     <div class="preflight-head">
       <span class="badge ${badgeClass}">${label}</span>
+      <strong>${escapeHtml(data.project_name || data.project || '-')}</strong>
       <span>${items.length} 项检查</span>
     </div>
     <div class="preflight-items">
@@ -802,14 +1154,26 @@ function renderPreflightData(data) {
   `;
 }
 
-async function fetchPreflightData() {
-  const projectParam = selectedProjectKey ? `?project=${encodeURIComponent(selectedProjectKey)}` : '';
+function renderPreflightData(data, projectKey = selectedProjectKey) {
+  const target = $('preflightResult');
+  const html = preflightHtml(data);
+  if (target) target.innerHTML = html;
+  const key = data?.project || projectKey || '';
+  if (key) {
+    projectPreflightResults.set(key, data);
+    const projectTarget = preflightTarget(key);
+    if (projectTarget) projectTarget.innerHTML = html;
+  }
+}
+
+async function fetchPreflightData(projectKey = selectedProjectKey) {
+  const projectParam = projectKey ? `?project=${encodeURIComponent(projectKey)}` : '';
   const data = await fetchJson(`preflight${projectParam}`);
-  renderPreflightData(data);
+  renderPreflightData(data, projectKey);
   return data;
 }
 
-async function runPreflight() {
+async function runPreflight(projectKey = selectedProjectKey) {
   const button = $('preflightBtn');
   const oldText = button ? button.textContent : '';
   if (button) {
@@ -818,11 +1182,16 @@ async function runPreflight() {
   }
   const target = $('preflightResult');
   if (target) target.textContent = '正在检查项目目录、Git、部署脚本、Docker、磁盘和日志目录...';
+  const projectTarget = preflightTarget(projectKey);
+  if (projectTarget) projectTarget.innerHTML = '<div class="project-empty compact-empty">体检中...</div>';
   try {
-    await fetchPreflightData();
+    await fetchPreflightData(projectKey);
   } catch (err) {
     if (target) {
       target.innerHTML = `<div class="preflight-item failed"><strong>体检失败</strong><span>${escapeHtml(err.message)}</span></div>`;
+    }
+    if (projectTarget) {
+      projectTarget.innerHTML = `<div class="preflight-item failed"><strong>体检失败</strong><span>${escapeHtml(err.message)}</span></div>`;
     }
   } finally {
     if (button) {
@@ -843,10 +1212,18 @@ async function forceUnlockDeploy() {
     const result = await postJson('force-unlock');
     const target = $('preflightResult');
     if (target) target.textContent = result.unlocked ? '部署锁已解除。' : '当前没有可解除的部署锁。';
+    const projectTarget = preflightTarget(selectedProjectKey || String(result.project_key || ''));
+    if (projectTarget) {
+      projectTarget.innerHTML = `<div class="preflight-item success"><strong>已处理</strong><span>${escapeHtml(result.message || '部署锁已清理')}</span></div>`;
+    }
     await refresh();
   } catch (err) {
     const target = $('preflightResult');
     if (target) target.textContent = `强制解锁失败: ${err.message}`;
+    const projectTarget = preflightTarget(selectedProjectKey || '');
+    if (projectTarget) {
+      projectTarget.innerHTML = `<div class="preflight-item failed"><strong>无法解锁</strong><span>${escapeHtml(err.message)}</span></div>`;
+    }
   }
 }
 
@@ -1123,12 +1500,15 @@ function generateWebhookGuide(project) {
   const key = normalizedProjectKeyFromForm(project);
   const token = project.webhook_secret || '<保存项目后自动生成 Token>';
   return [
-    'Gitee WebHook 配置：',
+    'WebHook 配置（不要把 Token 拼进 URL）：',
     `URL: ${projectWebhookUrl(key)}`,
     '请求方式: POST',
     '触发事件: Push',
     `分支: ${project.branch || 'master'}`,
-    `密码/Token: ${token}`,
+    '',
+    `Gitee 密码/Token: ${token}`,
+    `GitHub Secret: ${token}`,
+    `GitLab Secret token: ${token}`,
   ].join('\n');
 }
 
@@ -1705,9 +2085,18 @@ function containerStateLabel(container) {
 function containerActions(container) {
   const state = String(container.state || '').toLowerCase();
   const name = container.name || container.id || '';
+  const errorDismissed = areNoticeKeysDismissed(containerNoticeKeys(container, 'error'));
+  const visibleKeys = visibleNoticeKeys(containerNoticeKeys(container));
   const actions = [{ action: 'logs', label: '日志' }];
-  if (Number(container.recent_error_count || 0) > 0) {
+  if (Number(container.recent_error_count || 0) > 0 && !errorDismissed) {
     actions.push({ action: 'logs-error', label: `异常 ${container.recent_error_count}`, danger: true });
+  }
+  if (visibleKeys.length) {
+    actions.push({
+      action: 'dismiss-notices',
+      label: '清除异常',
+      noticeKeys: visibleKeys,
+    });
   }
   if (state === 'running') {
     actions.push(
@@ -1729,8 +2118,42 @@ function containerActions(container) {
       type="button"
       data-container-action="${escapeHtml(item.action)}"
       data-container-name="${escapeHtml(name)}"
+      ${item.noticeKeys ? `data-notice-keys="${escapeHtml(item.noticeKeys.map(encodeURIComponent).join(','))}"` : ''}
     >${escapeHtml(item.label)}</button>
   `).join('');
+}
+
+function renderContainerCard(container) {
+  const stateClass = containerStateClass(container);
+  const title = container.name || container.id || '-';
+  const errorCount = Number(container.recent_error_count || 0);
+  const warnCount = Number(container.recent_warn_count || 0);
+  const showErrorCount = errorCount > 0 && !areNoticeKeysDismissed(containerNoticeKeys(container, 'error'));
+  const showWarnCount = warnCount > 0 && !areNoticeKeysDismissed(containerNoticeKeys(container, 'warn'));
+  return `
+    <article class="container-row">
+      <div class="container-title-block">
+        <div class="container-name" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+        <div class="container-image" title="${escapeHtml(container.image || '-')}">${escapeHtml(container.image || '-')}</div>
+      </div>
+      <div class="container-state-block">
+        <div class="container-meta">
+          <span class="badge ${stateClass}">${escapeHtml(containerStateLabel(container))}</span>
+          ${container.service ? `<span class="stat-pill">${escapeHtml(container.service)}</span>` : ''}
+          ${container.memory_usage ? `<span class="stat-pill">${escapeHtml(container.memory_usage)}</span>` : ''}
+          ${container.net_io ? `<span class="stat-pill">${escapeHtml(container.net_io)}</span>` : ''}
+          ${showErrorCount ? `<span class="badge failed">异常 ${errorCount}</span>` : ''}
+          ${showWarnCount ? `<span class="badge running">警告 ${warnCount}</span>` : ''}
+        </div>
+        <div class="container-ports" title="${escapeHtml(container.ports || '-')}">${escapeHtml(container.ports || '-')}</div>
+      </div>
+      <div class="container-meters">
+        ${renderMeter('CPU', container.cpu_percent)}
+        ${renderMeter('MEM', container.memory_percent)}
+        <div class="container-actions">${containerActions(container)}</div>
+      </div>
+    </article>
+  `;
 }
 
 function renderMeter(label, value) {
@@ -1764,46 +2187,211 @@ function formatTrendTime(point) {
   return point?.at || '-';
 }
 
-function trendPointValue(point, key) {
-  const value = Number(point?.[key]);
-  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null;
+function trendPointsPerDay(intervalMinutes) {
+  const minutes = Number(intervalMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 48;
+  return Math.round((24 * 60) / minutes);
 }
 
-function trendPath(points, key, width, height, pad) {
+function trendChartWidth(points, pad) {
+  const usableMin = 320 - pad.left - pad.right;
+  const pointSpan = Math.max(0, (points.length || 1) - 1) * 18;
+  return Math.round(pad.left + pad.right + Math.max(usableMin, pointSpan));
+}
+
+function trendPointX(index, total, width, pad) {
   const usableWidth = width - pad.left - pad.right;
+  if (total <= 1) return pad.left + usableWidth / 2;
+  return pad.left + (index / (total - 1)) * usableWidth;
+}
+
+function trendPointValue(point, key, { percent = true } = {}) {
+  const value = Number(point?.[key]);
+  if (!Number.isFinite(value)) return null;
+  return percent ? Math.max(0, Math.min(100, value)) : Math.max(0, value);
+}
+
+function trendScale(points, key, options = {}) {
+  const values = points
+    .map(point => trendPointValue(point, key, options))
+    .filter(value => value != null);
+  if (!values.length) return null;
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  const spread = max - min;
+  const configuredMinSpan = Number(options.minSpan ?? (options.percent === false ? 1 : 5));
+  const minSpan = Number.isFinite(configuredMinSpan) && configuredMinSpan > 0 ? configuredMinSpan : 5;
+  const padding = Math.max(spread * 0.25, minSpan / 2);
+  if (spread < 0.1) {
+    min -= minSpan / 2;
+    max += minSpan / 2;
+  } else {
+    min -= padding;
+    max += padding;
+  }
+  min = Math.max(0, min);
+  max = options.percent === false ? Math.max(max, min + minSpan) : Math.min(100, max);
+  if (max - min < minSpan) {
+    const center = (max + min) / 2;
+    min = Math.max(0, center - minSpan / 2);
+    max = options.percent === false ? center + minSpan / 2 : Math.min(100, center + minSpan / 2);
+    if (options.percent !== false && max - min < minSpan) {
+      if (max >= 100) min = Math.max(0, 100 - minSpan);
+      if (min <= 0) max = Math.min(100, minSpan);
+    }
+  }
+  if (max <= min) max = options.percent === false ? min + minSpan : Math.min(100, min + minSpan);
+  return { min, max, latest: values[values.length - 1] };
+}
+
+function trendPath(points, key, width, height, pad, scale, options = {}) {
   const usableHeight = height - pad.top - pad.bottom;
+  const range = Math.max(scale.max - scale.min, 1);
   const segments = [];
   let current = [];
   points.forEach((point, index) => {
-    const value = trendPointValue(point, key);
+    const value = trendPointValue(point, key, options);
     if (value == null) {
       if (current.length) segments.push(current);
       current = [];
       return;
     }
-    const x = pad.left + (points.length <= 1 ? usableWidth : (index / (points.length - 1)) * usableWidth);
-    const y = pad.top + (1 - value / 100) * usableHeight;
-    current.push([x, y]);
+    const x = trendPointX(index, points.length, width, pad);
+    const y = pad.top + (1 - ((value - scale.min) / range)) * usableHeight;
+    current.push([x, y, value, point]);
   });
   if (current.length) segments.push(current);
-  return segments.map(segment => segment
-    .map(([x, y], index) => `${index === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`)
-    .join(' ')
-  );
+  return segments.map(trendLinePath);
 }
 
-function trendDots(points, key, className, label, width, height, pad) {
-  const usableWidth = width - pad.left - pad.right;
+function trendLinePath(segment) {
+  if (!segment.length) return '';
+  const [first, ...rest] = segment;
+  return [
+    `M${first[0].toFixed(1)} ${first[1].toFixed(1)}`,
+    ...rest.map(point => `L${point[0].toFixed(1)} ${point[1].toFixed(1)}`),
+  ].join(' ');
+}
+
+function trendDots(points, key, className, label, width, height, pad, scale, options = {}) {
   const usableHeight = height - pad.top - pad.bottom;
+  const range = Math.max(scale.max - scale.min, 1);
+  const formatter = options.formatter || formatPercent;
   return points.map((point, index) => {
-    const value = trendPointValue(point, key);
+    const value = trendPointValue(point, key, options);
     if (value == null) return '';
-    const x = pad.left + (points.length <= 1 ? usableWidth : (index / (points.length - 1)) * usableWidth);
-    const y = pad.top + (1 - value / 100) * usableHeight;
-    return `<circle class="trend-dot ${className}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8">
-      <title>${escapeHtml(formatTrendTime(point))} · ${escapeHtml(label)} ${formatPercent(value)}</title>
-    </circle>`;
+    const x = trendPointX(index, points.length, width, pad);
+    const y = pad.top + (1 - ((value - scale.min) / range)) * usableHeight;
+    const tooltip = typeof options.tooltipFormatter === 'function'
+      ? options.tooltipFormatter(point, value)
+      : `${formatTrendTime(point)} · ${label} ${formatter(value)}`;
+    return `<g class="trend-point" tabindex="0" aria-label="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">
+      <circle class="trend-dot-hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9"></circle>
+      <circle class="trend-dot ${className}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8"></circle>
+    </g>`;
   }).join('');
+}
+
+function trendAxisLabel(value, options = {}) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '-';
+  if (options.percent !== false) return formatPercent(n).replace('%', '');
+  if (Math.abs(n) >= 1000) return `${Math.round(n / 100) / 10}k`;
+  if (Math.abs(n) >= 100) return String(Math.round(n));
+  return String(Math.round(n * 10) / 10);
+}
+
+function trendTooltipElement() {
+  if (trendTooltipEl) return trendTooltipEl;
+  trendTooltipEl = document.createElement('div');
+  trendTooltipEl.className = 'trend-tooltip';
+  trendTooltipEl.setAttribute('role', 'tooltip');
+  trendTooltipEl.hidden = true;
+  document.body.appendChild(trendTooltipEl);
+  return trendTooltipEl;
+}
+
+function positionTrendTooltip(event) {
+  const tooltip = trendTooltipElement();
+  const rect = tooltip.getBoundingClientRect();
+  const margin = 10;
+  let left = event.clientX + 14;
+  let top = event.clientY + 14;
+  if (left + rect.width > window.innerWidth - margin) left = event.clientX - rect.width - 14;
+  if (top + rect.height > window.innerHeight - margin) top = event.clientY - rect.height - 14;
+  tooltip.style.left = `${Math.max(margin, left)}px`;
+  tooltip.style.top = `${Math.max(margin, top)}px`;
+}
+
+function showTrendTooltip(target, event) {
+  const text = target?.dataset?.tooltip || '';
+  if (!text) return;
+  const tooltip = trendTooltipElement();
+  tooltip.textContent = text;
+  tooltip.hidden = false;
+  tooltip.dataset.visible = '1';
+  positionTrendTooltip(event);
+}
+
+function hideTrendTooltip() {
+  if (!trendTooltipEl) return;
+  trendTooltipEl.hidden = true;
+  delete trendTooltipEl.dataset.visible;
+}
+
+function renderTrendCard(points, config) {
+  const { key, className, label, subLabel, formatter = formatPercent } = config;
+  const scale = trendScale(points, key, config);
+  if (!scale) {
+    return `
+      <article class="trend-card ${className}">
+        <div class="trend-card-head">
+          <span>${escapeHtml(label)}</span>
+          <strong>-</strong>
+        </div>
+        <div class="trend-card-empty">暂无有效样本</div>
+      </article>
+    `;
+  }
+  const height = 126;
+  const pad = { top: 12, right: 12, bottom: 20, left: 42 };
+  const width = trendChartWidth(points, pad);
+  const yTop = pad.top;
+  const yMid = pad.top + (height - pad.top - pad.bottom) / 2;
+  const yBottom = height - pad.bottom;
+  const paths = trendPath(points, key, width, height, pad, scale, config)
+    .map(path => `<path class="trend-line ${className}" d="${path}"></path>`)
+    .join('');
+  const dots = trendDots(points, key, className, label, width, height, pad, scale, config);
+  const latestPoint = points[points.length - 1] || {};
+  return `
+    <article class="trend-card ${className}" style="--trend-width:${width}px">
+      <div class="trend-card-head">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(formatter(scale.latest))}</strong>
+      </div>
+      <div class="trend-card-meta">
+        <span>${escapeHtml(subLabel || '')}</span>
+        <span>${escapeHtml(formatter(scale.min))}-${escapeHtml(formatter(scale.max))}</span>
+      </div>
+      <div class="trend-chart-scroll" tabindex="0">
+        <svg class="trend-mini-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
+          <line class="trend-grid-line" x1="${pad.left}" y1="${yTop.toFixed(1)}" x2="${width - pad.right}" y2="${yTop.toFixed(1)}"></line>
+          <line class="trend-grid-line" x1="${pad.left}" y1="${yMid.toFixed(1)}" x2="${width - pad.right}" y2="${yMid.toFixed(1)}"></line>
+          <line class="trend-grid-line" x1="${pad.left}" y1="${yBottom.toFixed(1)}" x2="${width - pad.right}" y2="${yBottom.toFixed(1)}"></line>
+          <text class="trend-axis-label" x="${pad.left - 6}" y="${(yMid + 4).toFixed(1)}">${escapeHtml(trendAxisLabel((scale.max + scale.min) / 2, config))}</text>
+          <text class="trend-axis-label" x="${pad.left - 5}" y="${(yTop + 3).toFixed(1)}">${escapeHtml(trendAxisLabel(scale.max, config))}</text>
+          <text class="trend-axis-label" x="${pad.left - 5}" y="${(yBottom + 3).toFixed(1)}">${escapeHtml(trendAxisLabel(scale.min, config))}</text>
+          ${paths}
+          ${dots}
+        </svg>
+      </div>
+      <div class="trend-card-foot">
+        <span>${escapeHtml(formatTrendTime(points[0]))}</span>
+        <span>${escapeHtml(formatTrendTime(latestPoint))}</span>
+      </div>
+    </article>
+  `;
 }
 
 function renderSystemTrend(system = {}) {
@@ -1817,10 +2405,11 @@ function renderSystemTrend(system = {}) {
   const intervalMinutes = Math.round(Number(system.history_interval_seconds || 1800) / 60);
   const latest = points[points.length - 1] || rawHistory[0] || {};
   const hint = $('systemTrendHint');
+  const pointsPerDay = trendPointsPerDay(intervalMinutes || 30);
   if (hint) {
     hint.textContent = points.length
-      ? `每 ${intervalMinutes || 30} 分钟采样 · 当前范围 ${points.length} 个样本 · 最新 ${formatTrendTime(latest)} · 网络 ${formatNumber(latest.network_total_kbps, 'KB/s')}`
-      : `每 ${intervalMinutes || 30} 分钟采样一次 CPU、内存和网络状态`;
+      ? `每 ${intervalMinutes || 30} 分钟采样 · 1 天 ${pointsPerDay} 点 · 当前范围 ${points.length} 点 · 可左右滑动 · 最新 ${formatTrendTime(latest)}`
+      : `每 ${intervalMinutes || 30} 分钟采样一次 · 1 天约 ${pointsPerDay} 点 · 等待 CPU、内存、网络样本`;
   }
 
   chart.classList.remove('skeleton-block');
@@ -1829,33 +2418,21 @@ function renderSystemTrend(system = {}) {
     return;
   }
 
-  const width = 760;
-  const height = 260;
-  const pad = { top: 22, right: 24, bottom: 34, left: 42 };
-  const grid = [0, 25, 50, 75, 100].map(value => {
-    const y = pad.top + (1 - value / 100) * (height - pad.top - pad.bottom);
-    return `
-      <line class="trend-grid-line" x1="${pad.left}" y1="${y.toFixed(1)}" x2="${width - pad.right}" y2="${y.toFixed(1)}"></line>
-      <text class="trend-axis-label" x="${pad.left - 10}" y="${(y + 4).toFixed(1)}">${value}</text>
-    `;
-  }).join('');
-  const series = [
-    ['cpu_percent', 'cpu', 'CPU'],
-    ['memory_percent', 'memory', '内存'],
-    ['network_percent', 'network', '网络'],
-  ].map(([key, className, label]) => trendPath(points, key, width, height, pad)
-    .map(path => `<path class="trend-line ${className}" d="${path}"></path>`)
-    .join('') + trendDots(points, key, className, label, width, height, pad)
-  ).join('');
-
   chart.innerHTML = `
-    <svg class="trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="CPU 内存 网络趋势曲线">
-      <rect class="trend-plot-bg" x="${pad.left}" y="${pad.top}" width="${width - pad.left - pad.right}" height="${height - pad.top - pad.bottom}" rx="10"></rect>
-      ${grid}
-      ${series}
-      <text class="trend-time-label" x="${pad.left}" y="${height - 8}">${escapeHtml(formatTrendTime(points[0]))}</text>
-      <text class="trend-time-label end" x="${width - pad.right}" y="${height - 8}">${escapeHtml(formatTrendTime(points[points.length - 1]))}</text>
-    </svg>
+    <div class="trend-card-grid">
+      ${renderTrendCard(points, { key: 'cpu_percent', className: 'cpu', label: 'CPU', subLabel: '处理器' })}
+      ${renderTrendCard(points, { key: 'memory_percent', className: 'memory', label: '内存', subLabel: '占用率' })}
+      ${renderTrendCard(points, {
+        key: 'network_total_kbps',
+        className: 'network',
+        label: '网络',
+        subLabel: `RX ${formatNumber(latest.network_rx_kbps, 'KB/s')} / TX ${formatNumber(latest.network_tx_kbps, 'KB/s')}`,
+        percent: false,
+        minSpan: 8,
+        formatter: value => formatNumber(value, 'KB/s'),
+        tooltipFormatter: (point, value) => `${formatTrendTime(point)} · 网络 ${formatNumber(value, 'KB/s')} · RX ${formatNumber(point.network_rx_kbps, 'KB/s')} · TX ${formatNumber(point.network_tx_kbps, 'KB/s')}`,
+      })}
+    </div>
   `;
 }
 
@@ -1863,16 +2440,24 @@ function renderAlerts(alerts = []) {
   const list = $('alertList');
   const badge = $('alertBadge');
   if (!list || !badge) return;
+  lastAlerts = Array.isArray(alerts) ? alerts : [];
   list.classList.remove('skeleton-block');
-  const critical = alerts.filter(item => item.level === 'critical').length;
-  const warning = alerts.filter(item => item.level === 'warning').length;
-  badge.className = `badge ${critical ? 'failed' : warning ? 'running' : 'success'}`;
-  badge.textContent = critical ? `${critical} 个严重` : warning ? `${warning} 个提醒` : '正常';
-  if (!alerts.length) {
-    list.innerHTML = '<div class="project-empty compact-empty">暂无告警</div>';
+  const visibleAlertsAll = lastAlerts.filter(alert => !dismissedNoticeKeys.has(noticeSignature('alert', alert)));
+  const dismissedCount = lastAlerts.length - visibleAlertsAll.length;
+  const critical = visibleAlertsAll.filter(item => item.level === 'critical').length;
+  const warning = visibleAlertsAll.filter(item => item.level === 'warning').length;
+  badge.className = `badge ${critical ? 'failed' : warning ? 'running' : dismissedCount ? 'neutral' : 'success'}`;
+  badge.textContent = critical ? `${critical} 个严重` : warning ? `${warning} 个提醒` : dismissedCount ? '已清除' : '正常';
+  list.classList.toggle('scrollable-list', visibleAlertsAll.length > 20);
+  if (!visibleAlertsAll.length) {
+    list.innerHTML = dismissedCount
+      ? '<div class="project-empty compact-empty">已清除当前告警，新异常会继续显示</div>'
+      : '<div class="project-empty compact-empty">暂无告警</div>';
+    updateClearAlertsButton();
     return;
   }
-  list.innerHTML = alerts.slice(0, 8).map(alert => `
+  const visibleAlerts = activeView === 'events' ? visibleAlertsAll.slice(0, 40) : visibleAlertsAll.slice(0, 8);
+  list.innerHTML = visibleAlerts.map(alert => `
     <div class="alert-item ${severityClass(alert.level)}">
       <div>
         <strong>${escapeHtml(alert.title || '告警')}</strong>
@@ -1881,19 +2466,35 @@ function renderAlerts(alerts = []) {
       ${alert.command ? `<code>${escapeHtml(alert.command)}</code>` : ''}
     </div>
   `).join('');
+  updateClearAlertsButton();
 }
 
 function renderEvents(events = []) {
   const target = $('eventTimeline');
   if (!target) return;
+  lastEvents = Array.isArray(events) ? events : [];
   target.classList.remove('skeleton-block');
   const hint = $('eventTimelineHint');
-  if (hint) hint.textContent = events.length ? `最近 ${events.length} 条关键事件` : '部署、WebHook、容器和资源异常汇总';
-  if (!events.length) {
-    target.innerHTML = '<div class="project-empty compact-empty">暂无事件</div>';
+  const abnormalEvents = lastEvents.filter(isAbnormalEvent);
+  const visibleEventsAll = abnormalEvents.filter(event => !dismissedNoticeKeys.has(noticeSignature('event', event)));
+  const dismissedCount = abnormalEvents.length - visibleEventsAll.length;
+  if (hint) {
+    hint.textContent = visibleEventsAll.length
+      ? `最近 ${visibleEventsAll.length} 条异常事件${dismissedCount ? ` · 已清除 ${dismissedCount} 条` : ''}`
+      : dismissedCount
+        ? `已清除 ${dismissedCount} 条当前异常，新异常会继续显示`
+        : '部署、WebHook、容器和资源异常汇总';
+  }
+  target.classList.toggle('scrollable-list', visibleEventsAll.length > 20);
+  if (!visibleEventsAll.length) {
+    target.innerHTML = dismissedCount
+      ? '<div class="project-empty compact-empty">已清除当前事件，新异常会继续显示</div>'
+      : '<div class="project-empty compact-empty">暂无事件</div>';
+    updateClearAlertsButton();
     return;
   }
-  target.innerHTML = events.slice(0, 16).map(event => `
+  const visibleEvents = activeView === 'events' ? visibleEventsAll.slice(0, 60) : visibleEventsAll.slice(0, 16);
+  target.innerHTML = visibleEvents.map(event => `
     <div class="event-item ${severityClass(event.level)}">
       <span class="event-dot"></span>
       <div>
@@ -1903,6 +2504,7 @@ function renderEvents(events = []) {
       </div>
     </div>
   `).join('');
+  updateClearAlertsButton();
 }
 
 function renderDeployLock(lock = {}) {
@@ -1944,7 +2546,23 @@ function renderChangedFiles(item = {}) {
   `;
 }
 
+function renderDeployDetailInsights(item = {}) {
+  return `
+    <div class="deploy-detail-insights">
+      <section class="deploy-insight-section">
+        <div class="deploy-insight-title">阶段耗时</div>
+        ${renderPhaseDurations(item)}
+      </section>
+      <section class="deploy-insight-section">
+        <div class="deploy-insight-title">变更文件</div>
+        ${renderChangedFiles(item)}
+      </section>
+    </div>
+  `;
+}
+
 function renderSystemStatus(system = {}) {
+  lastSystemPayload = system;
   const server = system.server || {};
   const memory = server.memory || {};
   const disk = server.disk || {};
@@ -1980,41 +2598,21 @@ function renderSystemStatus(system = {}) {
   const list = $('containerList');
   list.classList.remove('skeleton-block');
   if (!docker.available) {
+    lastContainerNoticeKeys = [];
     list.innerHTML = `<div class="project-empty">${escapeHtml(docker.error || 'Docker 不可用')}</div>`;
     return;
   }
   if (!containers.length) {
+    lastContainerNoticeKeys = [];
     list.innerHTML = '<div class="project-empty">暂无容器</div>';
     return;
   }
-  list.innerHTML = containers.map(container => {
-    const stateClass = containerStateClass(container);
-    const title = container.name || container.id || '-';
-    return `
-      <article class="container-row">
-        <div class="container-title-block">
-          <div class="container-name" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-          <div class="container-image" title="${escapeHtml(container.image || '-')}">${escapeHtml(container.image || '-')}</div>
-        </div>
-        <div class="container-state-block">
-          <div class="container-meta">
-            <span class="badge ${stateClass}">${escapeHtml(containerStateLabel(container))}</span>
-            ${container.service ? `<span class="stat-pill">${escapeHtml(container.service)}</span>` : ''}
-            ${container.memory_usage ? `<span class="stat-pill">${escapeHtml(container.memory_usage)}</span>` : ''}
-            ${container.net_io ? `<span class="stat-pill">${escapeHtml(container.net_io)}</span>` : ''}
-            ${Number(container.recent_error_count || 0) ? `<span class="badge failed">异常 ${escapeHtml(container.recent_error_count)}</span>` : ''}
-            ${Number(container.recent_warn_count || 0) ? `<span class="badge running">警告 ${escapeHtml(container.recent_warn_count)}</span>` : ''}
-          </div>
-          <div class="container-ports" title="${escapeHtml(container.ports || '-')}">${escapeHtml(container.ports || '-')}</div>
-        </div>
-        <div class="container-meters">
-          ${renderMeter('CPU', container.cpu_percent)}
-          ${renderMeter('MEM', container.memory_percent)}
-          <div class="container-actions">${containerActions(container)}</div>
-        </div>
-      </article>
-    `;
-  }).join('');
+  lastContainerNoticeKeys = containers.flatMap(container => containerNoticeKeys(container));
+  list.innerHTML = `
+    <div class="container-service-grid">
+      ${containers.map(renderContainerCard).join('')}
+    </div>
+  `;
   list.querySelectorAll('.meter-track[data-resource-value]').forEach(track => {
     updateResourceTrack(track, track.dataset.resourceValue);
   });
@@ -2106,6 +2704,25 @@ function handleContainerAction(event) {
   const container = button.dataset.containerName || '';
   const action = button.dataset.containerAction || '';
   if (!container || !action) return;
+  if (action === 'dismiss-notices') {
+    const keys = (button.dataset.noticeKeys || '')
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean)
+      .map(item => {
+        try {
+          return decodeURIComponent(item);
+        } catch (_) {
+          return item;
+        }
+      });
+    keys.forEach(key => dismissedNoticeKeys.add(key));
+    saveDismissedNoticeKeys();
+    if (lastSystemPayload) renderSystemStatus(lastSystemPayload);
+    renderAlerts(lastAlerts);
+    renderEvents(lastEvents);
+    return;
+  }
   if (action === 'logs') {
     showContainerLogs(container);
     return;
@@ -2130,7 +2747,7 @@ function renderStatus(data) {
   renderEvents(data.events || []);
   renderDeployLock(data.lock || {});
   updateProjectSelect(projects);
-  renderProjectOverview(projects, agent);
+  renderProjectOverview(projects, agent, data.lock || {}, state);
   const current = state.current_deploy;
   const last = state.last_deploy;
   const active = current || last || {};
@@ -2241,7 +2858,7 @@ function renderStatus(data) {
           <div class="stat-identity">
             <div class="stat-icon">CI</div>
             <div class="stat-meta">
-              <span class="stat-pill">Gitee</span>
+              <span class="stat-pill">Git</span>
               <span class="badge neutral">等待中</span>
             </div>
           </div>
@@ -2555,12 +3172,23 @@ async function cancelDeploy() {
   }
 }
 
+setupSecondaryViews();
 $('refreshBtn').addEventListener('click', () => {
   if (activeView === 'server') refreshServerStatus();
+  else if (activeView === 'events') refreshEventsStatus();
+  else if (activeView === 'notify') refreshNotificationConfig();
   else refresh();
 });
 $('deployViewTab').addEventListener('click', () => setView('deploy'));
 $('serverViewTab').addEventListener('click', () => setView('server'));
+$('eventsViewTab')?.addEventListener('click', () => setView('events'));
+$('notifyViewTab')?.addEventListener('click', () => setView('notify'));
+$('clearAlertsBtn')?.addEventListener('click', toggleCurrentNoticeDismissal);
+$('deployStats')?.addEventListener('click', (event) => {
+  const bar = event.target.closest('.history-bar[data-detail-key]');
+  if (!bar) return;
+  focusDeployRecord(bar.dataset.detailKey);
+});
 document.querySelectorAll('[data-server-refresh]').forEach(button => {
   button.addEventListener('click', () => setServerRefreshInterval(button.dataset.serverRefresh));
 });
@@ -2682,7 +3310,7 @@ $('projectSelectButton').addEventListener('click', (event) => {
 $('projectSelectMenu').addEventListener('click', (event) => {
   event.stopPropagation();
 });
-$('preflightResult')?.addEventListener('click', async (event) => {
+document.addEventListener('click', async (event) => {
   const code = event.target.closest('.copy-command');
   if (!code) return;
   try {
@@ -2695,8 +3323,30 @@ document.addEventListener('click', () => {
   closeProjectMenu();
   closeLogSelectMenus();
 });
+document.addEventListener('pointermove', (event) => {
+  const point = event.target?.closest?.('.trend-point');
+  if (!point) return;
+  showTrendTooltip(point, event);
+});
+document.addEventListener('pointerout', (event) => {
+  const point = event.target?.closest?.('.trend-point');
+  if (!point) return;
+  if (event.relatedTarget?.closest?.('.trend-point') === point) return;
+  hideTrendTooltip();
+});
+document.addEventListener('focusin', (event) => {
+  const point = event.target?.closest?.('.trend-point');
+  if (!point) return;
+  const rect = point.getBoundingClientRect();
+  showTrendTooltip(point, { clientX: rect.left + rect.width / 2, clientY: rect.top });
+});
+document.addEventListener('focusout', (event) => {
+  if (event.target?.closest?.('.trend-point')) hideTrendTooltip();
+});
+window.addEventListener('scroll', hideTrendTooltip, true);
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
+    hideTrendTooltip();
     if (closeConfirmDialog(false)) return;
     closeProjectMenu();
     closeLogSelectMenus();
