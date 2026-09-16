@@ -292,7 +292,9 @@ def test_nested_mounts_are_rejected_before_recursive_operations() -> None:
     assert 'assert_no_nested_mounts "$DATA_HOME" "DATA_HOME"' in BACKUP_SCRIPT
     assert "--one-file-system -czf" in BACKUP_SCRIPT
     assert "rsync -a -x --delete" in INSTALLER
-    assert "chown -R --one-file-system" in INSTALLER
+    assert "chown -R --one-file-system" not in INSTALLER
+    assert 'find "$item" -xdev -exec chown -h -- root:root {} +' in INSTALLER
+    assert 'find "$APP_HOME/$name" -xdev -exec chown -h -- root:root {} +' in INSTALLER
 
     backup_mount_check = BACKUP_SCRIPT.rindex('assert_no_nested_mounts "$APP_HOME" "APP_HOME"')
     tar_call = BACKUP_SCRIPT.index('tar -C / --one-file-system -czf')

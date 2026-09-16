@@ -504,8 +504,8 @@ secure_app_release_files() {
     if is_persistent_app_entry "$name"; then
       continue
     fi
-    chown -R --one-file-system root:root "$item"
-    chmod -R go-w "$item"
+    find "$item" -xdev -exec chown -h -- root:root {} +
+    find "$item" -xdev \( -type d -o -type f \) -exec chmod go-w -- {} +
   done
   shopt -u dotglob nullglob
 }
@@ -664,8 +664,8 @@ copy_without_rsync() {
       echo "复制后的发布文件树不安全 / Copied release tree contains a symbolic link or hard link: $APP_HOME/$name" >&2
       return 1
     fi
-    chown -R --one-file-system root:root "$APP_HOME/$name"
-    chmod -R go-w "$APP_HOME/$name"
+    find "$APP_HOME/$name" -xdev -exec chown -h -- root:root {} +
+    find "$APP_HOME/$name" -xdev \( -type d -o -type f \) -exec chmod go-w -- {} +
   done
   shopt -u dotglob nullglob
 }
