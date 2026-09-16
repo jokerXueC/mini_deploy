@@ -47,6 +47,8 @@
 
 ### 修复
 
+- 修复安装器生成的 `WorkingDirectory` 包含字面双引号而导致 systemd `bad-setting`；无空格托管路径按原值输出，`ExecStart` 保留参数引用，并在替换服务文件之前用 `systemd-analyze verify` 校验，失败时保留原文件。
+
 - 修复 Debian 等 GNU coreutils 环境安装时报 `chown: unrecognized option '--one-file-system'`：发布文件权限收紧和无 rsync 的复制路径改用 `find -xdev` 枚举后执行非递归 chown/chmod，保留嵌套挂载点预检查，并新增真实命令回归测试。
 
 - 修复视图切换调用缺失函数的问题，补齐事件轮询、离开页面时停止轮询和通知配置加载；通知表单的未保存内容继续保留。

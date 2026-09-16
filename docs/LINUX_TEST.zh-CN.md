@@ -1,25 +1,87 @@
 # Linux 实测清单
 
-以下以 **Ubuntu 22.04 / 24.04、root 用户、专用测试服务器** 为例。项目仍在公开测试版准备阶段，先用没有生产业务的服务器。面板不需要域名；后面的 `smoke.example.test` 只是本地测试名称，不需要购买或解析。
+以下适用于 **Debian 13 系列 / Ubuntu 22.04、24.04，root 用户，专用测试服务器**。这是一份待实机执行的验收流程，不代表这些发行版都已经完成实测。面板不需要域名；后面的 `smoke.example.test` 只是本地测试名称，不需要购买或解析。
 
-## 1. 安装与登录
+按顺序执行：同步代码 → 检查上次安装状态 → 安装和登录 → 测试后端 → Nginx（本机或 Docker 选一种）→ 证书 → 真实部署 → 清理。第 2 节自动化测试可放到最后。任何命令报错，先停止本节，不要跳过错误继续执行后续命令。后续修复统一从仓库更新，不在服务器上手工修改脚本或服务文件。
 
-普通用户先执行 `sudo -i`，然后：
+## 1. 同步代码、重新安装与登录
+
+### 1.1 确认系统并安装基础工具
+
+下面的服务器命令都在 SSH 终端执行。普通用户先执行 `sudo -i`，已经是 root 则直接开始：
 
 ```bash
+cat /etc/os-release
+ps -p 1 -o comm=
 apt update
 apt install -y git python3 python3-venv curl openssl rsync
 python3 --version
+```
+
+进程 1 应为 `systemd`，Python 必须为 3.10 或更高版本。
+
+### 1.2 拉取最新代码
+
+你已经有 `/root/mini_deploy`，执行这一组。stash 只保留此前可能手动修正的安装脚本，不恢复旧补丁：
+
+```bash
+cd /root/mini_deploy
+git status --short
+git stash push -m "before-installer-fix-update" -- install.sh
+git pull --ff-only
+git log -1 --oneline
+grep -n '^WorkingDirectory=' install.sh
+```
+
+确认 pull 成功；最后一条应显示 `WorkingDirectory=$APP_HOME`，值外面没有双引号，说明已包含 systemd 格式修复。最新版同时包含 chown 修复。如果 pull 冲突或显示其他未处理的本地修改，先停止，不要 `reset --hard`，也不要再 `stash pop` 恢复旧安装脚本。
+
+只有尚未克隆过仓库时，才改用：
+
+```bash
 git clone https://gitee.com/XC1960/mini_deploy.git /root/mini_deploy
+cd /root/mini_deploy
+```
+
+Gitee 不通可把地址换成 `https://github.com/jokerXueC/mini_deploy.git`，不要对已有目录重复 clone。
+
+### 1.3 保留上次首次安装中断的程序目录
+
+**如果已经设置过管理员密码，并已生成 `mini-deploy-agent.service`，只是启动时遇到 `bad-setting`，直接跳到 1.4。** 此时不要移动程序目录或删除配置；新版安装器会备份已有安装、保留密码与项目配置，并重新生成和校验服务文件。
+
+下面针对你遇到的 `chown: unrecognized option '--one-file-system'` 首次安装失败，且使用默认路径的情况。只有不存在安装标记、环境文件和服务文件时，才把半成品程序目录移动到备份位置。**不会删除 `/var/lib/mini-deploy-agent` 中已经创建的项目配置**。正常装好的实例会跳过这段。
+
+```bash
+if [ -d /opt/mini_deploy ] \
+  && [ ! -e /opt/mini_deploy/.mini-deploy-install ] \
+  && [ ! -e /etc/mini-deploy-agent.env ] \
+  && [ ! -e /etc/systemd/system/mini-deploy-agent.service ]; then
+  failed_backup=$(mktemp -d /opt/mini-deploy-failed.XXXXXX)
+  mv -- /opt/mini_deploy "$failed_backup/"
+  printf '已保留旧程序目录：%s\n' "$failed_backup"
+fi
+```
+
+自定义过 `APP_HOME` 等路径的安装不要照搬这段移动命令。若安装器仍提示托管标记或路径异常，先检查提示，不要直接开启旧版接管开关。
+
+### 1.4 运行修复后的安装器
+
+```bash
 cd /root/mini_deploy
 bash install.sh
 ```
 
-Python 必须为 3.10 或更高版本。Gitee 不通可换 GitHub：`https://github.com/jokerXueC/mini_deploy.git`，两条 clone 命令选一条即可。
+安装时按下面填写：
 
-已有代码目录时，用 `cd /root/mini_deploy && git pull --ff-only` 更新，再运行安装器；有本地改动应先核对，不能强制覆盖。旧安装如果提示托管标记或路径不符合要求，不要直接开启兼容开关，先备份并检查提示。
+| 提示 | 本轮选择 |
+| --- | --- |
+| 安装语言 | 回车，默认中文 |
+| 管理员密码 | 设置你自己的密码，重复输入确认；输入时不显示字符是正常现象 |
+| 安装 Docker | 先测本机 Nginx 选“否”；要测第 5 节 Docker 模式则选“是” |
+| 面板域名 | 默认不用填写，先使用 IP:6868 |
 
-安装时选择中文、设置管理员密码。仅测试本机 Nginx 可不安装 Docker；要测试容器模式时，在 Docker 安装询问中选择“是”，并检查 `docker compose version` 是否正常。
+必须看到“安装完成”且健康状态正常，再继续。选择 Docker 模式还要确认 `docker compose version` 成功。
+
+### 1.5 放行端口并登录
 
 在云厂商安全组放行入站 **TCP 6868**，然后打开：
 
@@ -192,9 +254,19 @@ curl --noproxy '*' -I --resolve smoke.example.test:80:127.0.0.1 http://smoke.exa
 
 ## 7. 真正的部署链路
 
-Nginx/证书测试完成后，再接入你自己的测试仓库，确认构建命令、启动命令、端口和健康检查。自动初始化后检查生成的脚本，运行项目体检，手动部署成功后再配置 Git 平台 WebHook 并 push 一个测试提交。
+Nginx/证书测试完成后，再接入你自己的测试仓库。临时 `smoke` 项目没有部署脚本，不能用它验收自动部署。
 
-依次验证手动部署、Webhook 部署、部署日志、取消，以及你的项目实际支持的回滚。临时 `smoke` 项目没有部署脚本，不能用它验收自动部署。
+1. 在网页新建业务项目，填自己的仓库、分支、独立的服务器目录、端口、启动命令和健康检查地址。先不要启用自动部署。
+2. 点击“自动初始化”，确认仓库能拉取；私有仓库按错误提示配置 Deploy Key。检查生成的部署脚本和服务文件是否符合你的业务，不要直接假定模板能运行。
+3. 运行项目体检，解决阻塞项；启用项目和手动部署，保存。
+4. 点击“重新部署”。验收：出现部署记录、日志更新、最终成功，健康检查返回预期结果。失败时先查看该次部署日志，不急着配置 WebHook。
+5. 从网页复制此项目 WebHook URL。在 GitHub/Gitee/GitLab 仓库设置中选择 Push 事件；Token 填平台对应的 Secret/密码字段，不拼到 URL 上。
+6. 在你的业务仓库修改一个可观察的小内容，提交并 push 到配置分支。验收：代码平台投递成功、面板出现该提交的部署记录、业务内容更新。仅“投递成功”不代表部署成功，还要看面板最终状态。
+7. 在测试项目上验证失败和取消：使用可控的失败步骤或耗时步骤，确认失败不会显示成功、取消后进程停止，下一次部署仍可正常执行。不要用数据库操作测试失败。
+8. 只有已提供并验证回滚脚本的业务项目才测试回滚；确认回滚到预期提交并通过健康检查，不支持回滚的项目跳过。
+9. 重启 `mini-deploy-agent`，重新登录，确认项目、Nginx 实例、后端地址和证书记录仍存在。当前队列重启恢复尚未实现，不要在部署进行中用重启模拟无损恢复。
+
+验收记录至少保留：服务器系统版本、代码提交号、Nginx 模式、手动部署结果、Webhook 投递和部署结果、证书增删改结果、失败时的脱敏日志。
 
 ## 8. 排查和清理
 

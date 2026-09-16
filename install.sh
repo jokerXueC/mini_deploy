@@ -52,7 +52,7 @@ if [[ ! "$SERVICE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]*$ ]]; then
   exit 1
 fi
 
-for command in awk dirname find flock grep install mktemp mv python3 readlink sha256sum stat tar; do
+for command in awk dirname find flock grep install mktemp mv python3 readlink sha256sum stat systemd-analyze tar; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "缺少安装依赖 / Missing installer dependency: $command" >&2
     exit 1
@@ -166,7 +166,7 @@ write_systemd_service() {
   if [[ ! -d "$service_parent" ]]; then
     install -d -m 755 "$service_parent"
   fi
-  temporary="$(mktemp "$service_parent/.${SERVICE_NAME}.service.XXXXXX")"
+  temporary="$(mktemp "$service_parent/${SERVICE_NAME}.XXXXXX.service")"
   if [[ -f "$SERVICE_FILE" ]]; then
     backup="${SERVICE_FILE}.$(date -u '+%Y%m%dT%H%M%SZ').$$.bak"
     install -m 600 "$SERVICE_FILE" "$backup"
@@ -184,8 +184,8 @@ User=root
 RuntimeDirectory=mini-deploy-agent
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-WorkingDirectory="$APP_HOME"
-EnvironmentFile="$ENV_FILE"
+WorkingDirectory=$APP_HOME
+EnvironmentFile=$ENV_FILE
 ExecStart="$PYTHON_BIN" "$APP_HOME/agent.py"
 Restart=always
 RestartSec=3
@@ -196,6 +196,11 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+  if ! systemd-analyze verify "$temporary"; then
+    rm -f -- "$temporary"
+    echo "systemd 服务配置校验失败，原服务文件未替换 / Invalid systemd unit; existing service file was preserved." >&2
+    return 1
+  fi
   if ! {
     chown root:root "$temporary" \
       && chmod 644 "$temporary" \
