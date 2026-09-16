@@ -78,8 +78,33 @@ const DashboardMotion = (() => {
         (node.getAttribute('d') || '').replace(/[-+]?\d*\.?\d+/g, '#') === (after[i].getAttribute('d') || '').replace(/[-+]?\d*\.?\d+/g, '#'));
     if (!compatible) {
       cancel(svg);
-      svg.replaceWith(next);
-      show(next);
+      const oldPaths = Array.from(svg.querySelectorAll('path.trend-line'));
+      const newPaths = Array.from(next.querySelectorAll('path.trend-line'));
+      const canTween = svg.getAttribute('viewBox') === next.getAttribute('viewBox') &&
+        oldPaths.length === newPaths.length && !reduced() && !document.hidden;
+      // Sample the displayed geometry, not the source metrics, to bridge growing paths.
+      const transitions = canTween ? oldPaths.map((path, i) => {
+        const target = newPaths[i];
+        const beforeLength = path.getTotalLength(), afterLength = target.getTotalLength();
+        if (!beforeLength || !afterLength) return null;
+        const samples = Array.from({length: 61}, (_, index) => {
+          const fraction = index / 60;
+          const from = path.getPointAtLength(beforeLength * fraction);
+          const to = target.getPointAtLength(afterLength * fraction);
+          return [from.x, from.y, to.x, to.y];
+        });
+        return {target, samples, finalPath: target.getAttribute('d')};
+      }).filter(Boolean) : [];
+      svg.setAttribute('viewBox', next.getAttribute('viewBox'));
+      if (next.hasAttribute('preserveAspectRatio')) svg.setAttribute('preserveAspectRatio', next.getAttribute('preserveAspectRatio'));
+      else svg.removeAttribute('preserveAspectRatio');
+      svg.replaceChildren(...Array.from(next.childNodes));
+      if (transitions.length) value(svg, 1, progress => {
+        transitions.forEach(({target, samples, finalPath}) => {
+          target.setAttribute('d', progress === 1 ? finalPath : curve(samples.map(([x, y, nextX, nextY]) =>
+            [x + (nextX - x) * progress, y + (nextY - y) * progress])));
+        });
+      }, {initial: 0, duration: 850});
       return;
     }
     const attrs = ['d', 'cx', 'cy', 'x1', 'x2', 'y1', 'y2', 'x', 'y'];
@@ -108,7 +133,7 @@ const DashboardMotion = (() => {
       point.setAttribute('aria-label', target.getAttribute('aria-label'));
     });
     cancel(svg);
-    if (changes.length) value(svg, 1, t => changes.forEach(draw => draw(t)), {initial: 0, duration: 1100});
+    if (changes.length) value(svg, 1, t => changes.forEach(draw => draw(t)), {initial: 0, duration: 850});
   }
 
   return {value, cancel, curve, show, morph, reduced};

@@ -167,7 +167,7 @@ async function refreshNginxSettings(discover = false) {
   renderNginxSettings(data);
   if (discover) nginxMessage(data.detected.errors?.join('；') || (data.detected.local || data.detected.containers.length
     ? `发现 ${data.detected.local ? '本机 Nginx，' : ''}${data.detected.containers.length} 个运行中的 Nginx 容器，可在高级接入中确认使用。`
-    : '未发现 Nginx。添加业务项目后，可在配置访问入口时自动安装本机 Nginx。'));
+    : '未发现 Nginx，可直接安装本机 Nginx，项目和域名稍后再配置。'));
   return data;
 }
 
@@ -183,6 +183,20 @@ async function nginxOperation(action) {
       await refreshNginxSettings(true);
       return;
     }
+    if (action === 'install-local') {
+      nginxMessage('正在检查安装环境和 80 端口…');
+      const {plan} = await postJsonBody('nginx-settings', {action: 'plan-install'});
+      if (!await showConfirmDialog({title: plan.installed ? '准备本机 Nginx' : '安装本机 Nginx',
+        message: `${plan.steps.join('；')}。${plan.notice}`, confirmText: '确认执行'})) {
+        nginxMessage('已取消安装。');
+        return;
+      }
+      nginxMessage('正在准备本机 Nginx，首次安装可能需要几分钟…');
+      const result = await postJsonBody('nginx-settings', {action: 'install-local', token: plan.token});
+      renderNginxSettings(result.settings);
+      nginxMessage(result.message);
+      return;
+    }
     if (action === 'remove-site' && !await showConfirmDialog({title: '移除域名入口', message: '该项目通过此 Nginx 的域名访问将停止。业务服务和代码不删除。', confirmText: '移除'})) return;
     const payload = {action, mode: $('nginxMode').value, container: $('nginxContainer').value,
       project: $('nginxProject').value, host: $('nginxUpstream').value.trim()};
@@ -192,7 +206,7 @@ async function nginxOperation(action) {
     if (result.settings) renderNginxSettings(result.settings);
     nginxMessage(action === 'probe' ? '后端连通检查通过。' : action === 'remove-site' ? '域名入口已移除。' : '已检查并保存。');
   } catch (error) {
-    nginxMessage(error.message, true);
+    nginxMessage(`${error.message}${action === 'install-local' ? '。如软件已安装，将保留；处理问题后可重试。' : ''}`, true);
   } finally {
     nginxBusy = false;
     controls.forEach(control => { control.disabled = false; });
@@ -218,6 +232,7 @@ $('nginxMode').addEventListener('change', nginxFields);
 $('nginxContainer').addEventListener('input', nginxFields);
 $('nginxProject').addEventListener('change', nginxProjectFields);
 $('nginxDetect').addEventListener('click', () => nginxOperation('detect'));
+$('nginxInstall').addEventListener('click', () => nginxOperation('install-local'));
 $('nginxProbe').addEventListener('click', () => nginxOperation('probe'));
 $('nginxRemoveSite').addEventListener('click', () => nginxOperation('remove-site'));
 $('nginxSettingsForm').addEventListener('submit', event => { event.preventDefault(); nginxOperation('save'); });

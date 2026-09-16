@@ -71,6 +71,38 @@ def test_changed_plan_cannot_install_or_apply(wizard):
     assert not list(conf.iterdir())
 
 
+def test_standalone_install_needs_no_project_or_domain(wizard, monkeypatch):
+    settings, conf, _, prepared = wizard
+    monkeypatch.setattr(agent, "PROJECTS", {})
+    plan = agent._nginx_install_operation({"action": "plan-install"})["plan"]
+    assert not prepared
+    result = agent._nginx_install_operation({"action": "install-local", "token": plan["token"]})
+    assert result["ok"]
+    assert len(prepared) == 1
+    assert result["settings"]["projects"] == []
+    assert not settings.path.exists()
+    assert not agent.PROJECTS_CONFIG_FILE.exists()
+    assert not list(conf.iterdir())
+
+
+def test_standalone_install_rejects_changed_environment(wizard, monkeypatch):
+    _, _, _, prepared = wizard
+    plan = agent._nginx_install_operation({"action": "plan-install"})["plan"]
+    monkeypatch.setattr(nginx, "local_setup_plan", lambda: {"installed": True, "active": True, "package_manager": ""})
+    with pytest.raises(certificates.CertificateError, match="环境已变化"):
+        agent._nginx_install_operation({"action": "install-local", "token": plan["token"]})
+    assert not prepared
+
+
+def test_standalone_install_does_not_switch_existing_docker_profile(wizard):
+    settings, _, _, _ = wizard
+    settings.save({"mode": "docker", "container": "edge", "network": "bridge"}, {"api": "backend"})
+    before = settings.path.read_bytes()
+    plan = agent._nginx_install_operation({"action": "plan-install"})["plan"]
+    agent._nginx_install_operation({"action": "install-local", "token": plan["token"]})
+    assert settings.path.read_bytes() == before
+
+
 def test_failed_reload_rolls_back_site_project_and_settings(wizard, monkeypatch):
     settings, conf, request, prepared = wizard
     original = dict(agent.PROJECTS)

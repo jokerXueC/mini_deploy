@@ -2547,7 +2547,6 @@ function renderSystemTrend(system = {}) {
   const cards = Array.from(chart.querySelectorAll('.trend-card'));
   if (cards.length !== 3) {
     chart.replaceChildren(template.content);
-    DashboardMotion.show(chart);
     return;
   }
   hideTrendTooltip();
@@ -2564,7 +2563,6 @@ function renderSystemTrend(system = {}) {
     }
     if (!svg || !nextSvg) {
       card.replaceWith(next);
-      DashboardMotion.show(next);
       return;
     }
     const scroll = card.querySelector('.trend-chart-scroll');

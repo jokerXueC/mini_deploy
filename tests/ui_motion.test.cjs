@@ -50,6 +50,35 @@ test('same target does not restart transitions, reduced motion is immediate', ()
   assert.equal(quiet.frames.size, 0);
 });
 
+test('growing chart paths keep their SVG opaque and interpolate without replacing the chart', () => {
+  const e = environment();
+  function path(d, y) {
+    return {tagName: 'path', d, getAttribute(name) {return name === 'd' ? this.d : null;},
+      setAttribute(name, value) {if (name === 'd') this.d = value;},
+      getTotalLength() {return 100;}, getPointAtLength(x) {return {x, y: y + x / 10};}};
+  }
+  function svg(line, count) {
+    const attrs = {viewBox: '0 0 100 100'};
+    return {isConnected: true, line, childNodes: [line],
+      getAttribute: name => attrs[name] ?? null, hasAttribute: name => name in attrs,
+      setAttribute(name, value) {attrs[name] = value;}, removeAttribute(name) {delete attrs[name];},
+      querySelectorAll(query) {return query === 'path.trend-line' ? [this.line] : Array(count).fill(this.line);},
+      replaceChildren(line) {this.line = line;},
+      replaceWith() {assert.fail('must retain the SVG');},
+      animate() {assert.fail('must not fade the chart');}};
+  }
+  const before = svg(path('M0 0 L100 10', 0), 1);
+  const next = svg(path('M0 20 L50 25 L100 30', 20), 2);
+  const target = next.line.d;
+  e.motion.morph(before, next);
+  assert.notEqual(before.line.d, target);
+  e.tick(425);
+  assert.match(before.line.d, /^M0 10 /);
+  assert.ok(!before.line.d.includes('NaN'));
+  e.tick(850);
+  assert.equal(before.line.d, target);
+});
+
 test('hidden pages settle and detached resources stop scheduling frames', () => {
   const e = environment(), el = {isConnected: true};
   let shown;

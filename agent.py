@@ -2186,6 +2186,26 @@ def _nginx_payload(*, discover: bool = False) -> dict[str, Any]:
         return data
 
 
+@_maintenance_shared_operation
+@_nginx_serialized
+def _nginx_install_operation(data: dict[str, Any]) -> dict[str, Any]:
+    local = nginx_runtime.local_setup_plan()
+    steps = []
+    if not local["installed"]:
+        steps.append(f"使用 {local['package_manager']} 安装本机 Nginx")
+    if not local["active"]:
+        steps.append("启动 Nginx 并设置开机启动")
+    steps.append("检查本机 Nginx 配置")
+    token = hashlib.sha256(json.dumps(local, sort_keys=True).encode()).hexdigest()
+    if data.get("action") == "plan-install":
+        return {"plan": {"token": token, "steps": steps, "installed": local["installed"],
+                         "notice": "独立准备本机 Nginx，业务项目与域名可稍后配置。"}}
+    if not _constant_time_equal(str(data.get("token") or ""), token):
+        raise certificates.CertificateError("安装环境已变化，请重新检查后确认")
+    nginx_runtime.prepare_local(local)
+    return {"ok": True, "settings": _nginx_payload(), "message": "本机 Nginx 已安装并运行，可随后添加项目和域名入口。"}
+
+
 def _nginx_site_plan(data: dict[str, Any]) -> tuple[DeployProject, dict[str, Any]]:
     existing = PROJECTS.get(str(data.get("project") or ""))
     if not existing:
@@ -4291,6 +4311,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = _save_nginx_settings(data)
             elif action in ("plan-site", "apply-site"):
                 result = _nginx_site_operation(data)
+            elif action in ("plan-install", "install-local"):
+                result = _nginx_install_operation(data)
             elif action in ("probe", "save-upstream"):
                 result = _nginx_upstream_operation(data)
             elif action == "remove-site":
