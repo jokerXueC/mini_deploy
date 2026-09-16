@@ -60,6 +60,7 @@ node --check ui/nginx.js
 node --test tests/ui_navigation.test.cjs
 node --test tests/ui_motion.test.cjs
 node --test tests/ui_onboarding.test.cjs
+node --test tests/ui_nginx.test.cjs
 bash -n install.sh
 for file in scripts/*.sh; do bash -n "$file"; done
 git diff --check

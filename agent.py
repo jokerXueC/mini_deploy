@@ -34,7 +34,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.message import EmailMessage
 from functools import wraps
 from http import cookies
@@ -433,6 +433,9 @@ _state: dict[str, Any] = {
 _login_failures: dict[str, list[float]] = {}
 _login_failures_lock = threading.Lock()
 _system_status_cache: dict[str, Any] = {"at": 0.0, "payload": {}}
+_realtime_metrics_lock = threading.Lock()
+_realtime_metrics: deque[dict[str, Any]] = deque(maxlen=60)
+_realtime_server: dict[str, Any] = {}
 _system_status_lock = threading.Lock()
 _notifications_lock = threading.Lock()
 _last_cpu_sample: tuple[int, int] | None = None
@@ -2174,10 +2177,102 @@ def _nginx_payload(*, discover: bool = False) -> dict[str, Any]:
     with _config_transaction_lock, _nginx_lock:
         settings = _nginx_settings()
         data = settings.read()
-        data["projects"] = [{"key": p.key, "name": p.name, "port": p.service_port} for p in PROJECTS.values()]
+        runtime = settings.runtime(live=False) if data["profile"].get("mode") != "none" else None
+        data["projects"] = [{"key": p.key, "name": p.name, "port": p.service_port, "domain": p.app_domain,
+                             "site_configured": bool(runtime and (runtime.conf_root / f"mini-deploy-{p.key}.conf").exists())}
+                            for p in PROJECTS.values()]
         if discover:
             data["detected"] = settings.discover()
         return data
+
+
+def _nginx_site_plan(data: dict[str, Any]) -> tuple[DeployProject, dict[str, Any]]:
+    existing = PROJECTS.get(str(data.get("project") or ""))
+    if not existing:
+        raise certificates.CertificateError("请先添加并保存业务项目")
+    domain = str(data.get("domain") or "").strip().lower()
+    port = data.get("port")
+    if not _valid_domain(domain) or not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise certificates.CertificateError("请填写纯域名和 1-65535 之间的业务端口")
+    if any(p.key != existing.key and p.app_domain == domain for p in PROJECTS.values()):
+        raise certificates.CertificateError("此域名已分配给其他项目")
+    settings = _nginx_settings()
+    saved = settings.read()
+    if (STATE_FILE.parent / "certificates" / existing.key).exists():
+        raise certificates.CertificateError("此项目已有上传证书，请在证书页管理；修改入口前请先停用并删除证书")
+    if _nginx_project_has_site(existing) and (domain != existing.app_domain or port != existing.service_port):
+        raise certificates.CertificateError("该项目已有访问入口，请先移除旧入口，再修改域名或端口")
+    project = replace(existing, app_domain=domain, service_port=port)
+    configured = saved["configured"] and saved["profile"].get("mode") != "none"
+    profile = saved["profile"] if configured else {"mode": "local"}
+    local = nginx_runtime.local_setup_plan() if profile["mode"] == "local" else None
+    if configured or (local and local["installed"]):
+        candidate = settings.candidate(profile["mode"], profile.get("container", ""))
+        runtime = nginx_runtime.Runtime(candidate, STATE_FILE.parent)
+    else:
+        runtime = nginx_runtime.Runtime(profile, STATE_FILE.parent, live=False)
+    host = runtime.upstream(data.get("host") or saved["upstreams"].get(project.key))
+    runtime.probe(host, port)
+    path = runtime.conf_root / f"mini-deploy-{project.key}.conf"
+    store = certificates.CertificateStore(STATE_FILE.parent / "certificates", runtime)
+    previous = store.config(path)
+    if previous and not previous.startswith("# mini-deploy-managed: project-http-v1\n"):
+        raise certificates.CertificateError("此入口不是向导托管的 HTTP 配置，请使用原管理方式修改")
+    if configured or (local and local["installed"]):
+        nginx_runtime.check_domain_conflict(runtime, domain, path)
+    steps = []
+    if local and not local["installed"]:
+        steps.append(f"使用 {local['package_manager']} 安装本机 Nginx")
+    if local and not local["active"]:
+        steps.append("启动 Nginx 并设置开机启动")
+    steps.extend([f"保存 {domain} → {host}:{port}", "检查 Nginx 配置并重新加载"])
+    plan = {"project": project.key, "domain": domain, "port": port, "host": host, "mode": profile["mode"],
+            "local_setup": local, "steps": steps, "url": f"http://{domain}",
+            "config": _nginx_http_config_text(domain, host, port),
+            "notice": "域名需解析到本服务器，并在云安全组放行 80 端口。当前入口使用 HTTP，证书可稍后配置。"}
+    fingerprint = [plan, saved, _project_to_config(existing), previous]
+    plan["token"] = hashlib.sha256(json.dumps(fingerprint, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return project, plan
+
+
+@_maintenance_shared_operation
+@_nginx_serialized
+def _nginx_site_operation(data: dict[str, Any]) -> dict[str, Any]:
+    project, plan = _nginx_site_plan(data)
+    if data.get("action") == "plan-site":
+        return {"plan": plan}
+    if not _constant_time_equal(str(data.get("token") or ""), plan["token"]):
+        raise certificates.CertificateError("配置或服务器环境已变化，请重新检查并确认")
+    settings = _nginx_settings()
+    old_settings = settings.read()
+    old_settings_text = settings.path.read_text(encoding="utf-8") if settings.path.exists() else None
+    old_projects = dict(PROJECTS)
+    if plan["local_setup"]:
+        nginx_runtime.prepare_local(plan["local_setup"])
+    try:
+        if not old_settings["configured"] or old_settings["profile"].get("mode") == "none":
+            _save_nginx_settings({"mode": "local"})
+        saved = settings.read()
+        saved["upstreams"][project.key] = plan["host"]
+        settings.save(saved["profile"], saved["upstreams"])
+        projects = dict(PROJECTS)
+        projects[project.key] = project
+        _save_and_reload_projects(projects)
+        runtime = settings.runtime()
+        nginx_runtime.check_domain_conflict(runtime, project.app_domain, _project_nginx_conf_path(project))
+        result = _configure_project_nginx(project, issue_https=False)
+        if not result["ok"]:
+            raise certificates.CertificateError(result["results"][-1]["detail"])
+    except (ValueError, OSError):
+        # Nginx config application rolls itself back; restore its metadata as well.
+        if old_settings_text is None:
+            settings.path.unlink(missing_ok=True)
+        else:
+            certificates.atomic_write(settings.path, old_settings_text)
+        if PROJECTS != old_projects:
+            _save_and_reload_projects(old_projects)
+        raise
+    return {"ok": True, "url": result["url"], "settings": _nginx_payload(), "notice": plan["notice"]}
 
 
 @_maintenance_shared_operation
@@ -2283,6 +2378,10 @@ def _project_nginx_config_text(project: DeployProject) -> str:
     port = project.service_port or 8000
     settings = _nginx_settings()
     upstream = settings.runtime(live=False).upstream(settings.read()["upstreams"].get(project.key))
+    return _nginx_http_config_text(domain, upstream, port)
+
+
+def _nginx_http_config_text(domain: str, upstream: str, port: int) -> str:
     return "\n".join([
         "server {",
         "    listen 80;",
@@ -2764,17 +2863,11 @@ def _system_status_payload() -> dict[str, Any]:
     with _system_status_lock:
         if now - float(_system_status_cache.get("at") or 0) < SYSTEM_STATUS_CACHE_SECONDS:
             return json.loads(json.dumps(_system_status_cache.get("payload") or {}, ensure_ascii=False))
-        server = {
-            "cpu_percent": _cpu_percent(),
-            "load": _load_average(),
-            "memory": _memory_status(),
-            "disk": _disk_status(Path("/")),
-            "network": _network_status(),
-            "sampled_at": _now_text(),
-            "cache_seconds": SYSTEM_STATUS_CACHE_SECONDS,
-        }
+        realtime = _realtime_metrics_payload()
+        server = realtime["server"]
         history = _record_system_metric(server, now)
         payload = {
+            **realtime,
             "server": server,
             "docker": _docker_status(),
             "history": history,
@@ -2786,9 +2879,50 @@ def _system_status_payload() -> dict[str, Any]:
         return json.loads(json.dumps(payload, ensure_ascii=False))
 
 
+def _sample_realtime_metrics() -> None:
+    global _realtime_server
+    # Only this sampler reads the cumulative CPU/network counters.
+    now = time.time()
+    server = {
+        "cpu_percent": _cpu_percent(), "load": _load_average(), "memory": _memory_status(),
+        "disk": _disk_status(Path("/")), "network": _network_status(),
+        "sampled_at": _now_text(), "sampled_ts": now, "cache_seconds": 1,
+    }
+    memory, network = server["memory"], server["network"]
+    entry = {
+        "ts": now, "cpu_percent": server["cpu_percent"], "memory_percent": memory.get("percent"),
+        "network_total_kbps": network.get("total_kbps"), "network_rx_kbps": network.get("rx_kbps"),
+        "network_tx_kbps": network.get("tx_kbps"),
+    }
+    with _realtime_metrics_lock:
+        _realtime_server = server
+        _realtime_metrics.appendleft(entry)
+
+
+def _realtime_metrics_payload() -> dict[str, Any]:
+    with _realtime_metrics_lock:
+        return json.loads(json.dumps({
+            "server": _realtime_server, "realtime_history": list(_realtime_metrics),
+            "realtime_interval_seconds": 1,
+        }, ensure_ascii=False))
+
+
+def _realtime_metric_sampler() -> None:
+    deadline = time.monotonic()
+    while True:
+        try:
+            _sample_realtime_metrics()
+        except Exception as exc:  # noqa: BLE001 - sampling must survive transient OS errors
+            _log(f"realtime metric sample failed: {exc}")
+        deadline += 1
+        now = time.monotonic()
+        if deadline <= now:
+            deadline = now + 1
+        time.sleep(deadline - now)
+
+
 def _system_metric_sampler() -> None:
     """Keep long-range system trends populated independently of UI traffic."""
-    _cpu_percent()
     time.sleep(2)
     while True:
         try:
@@ -3768,6 +3902,7 @@ def _short_sha(value: Any) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "selects.js": "application/javascript; charset=utf-8",
     "motion.js": "application/javascript; charset=utf-8",
     "nginx.js": "application/javascript; charset=utf-8",
     "certificates.js": "application/javascript; charset=utf-8",
@@ -4012,6 +4147,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload["csrf_token"] = self._csrf_token_for_request()
                 self._write_json(200, payload)
             return
+        if path == "/system-metrics":
+            if self._require_auth_json():
+                self._write_json(200, _realtime_metrics_payload())
+            return
         if path == "/logs":
             if self._require_auth_json():
                 self._handle_logs(parse_qs(parsed.query))
@@ -4150,6 +4289,8 @@ class Handler(BaseHTTPRequestHandler):
             action = data.get("action", "")
             if action == "save":
                 result = _save_nginx_settings(data)
+            elif action in ("plan-site", "apply-site"):
+                result = _nginx_site_operation(data)
             elif action in ("probe", "save-upstream"):
                 result = _nginx_upstream_operation(data)
             elif action == "remove-site":
@@ -4967,6 +5108,7 @@ def main() -> None:
     if ALLOW_QUERY_WEBHOOK_TOKEN:
         _log("security warning: query-string webhook tokens are enabled and may leak through access logs")
     threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_realtime_metric_sampler, name="realtime-metric-sampler", daemon=True).start()
     threading.Thread(target=_system_metric_sampler, name="system-metric-sampler", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     _log(f"deploy agent listening on {HOST}:{PORT}, projects={len(PROJECTS)} default={DEFAULT_PROJECT_KEY}")

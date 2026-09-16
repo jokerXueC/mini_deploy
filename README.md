@@ -142,8 +142,11 @@ templates only; they are not imported into the active project configuration.
 
 After that, every `git push` to the configured branch can trigger deployment.
 
-For a business domain, first select and save the Nginx runtime under Nginx Certificates,
-then check/save the project's upstream address and use Configure Domain. Docker mode
+For a business domain, open Domains and Certificates, select the project, enter its
+domain and port, then check the preview and confirm. The wizard can install local
+Nginx using apt-get/dnf/yum when absent, and validates the backend before applying an
+HTTP site. DNS and cloud firewall rules remain manual. Existing Nginx instances can
+be selected under Advanced. Docker mode
 requires a local Docker Unix socket and directory bind mounts for `/etc/nginx/conf.d`
 and `/etc/mini-deploy/certificates`; bridge networks need a reachable backend service
 name or host address, not `127.0.0.1`. Existing containers are never recreated automatically.

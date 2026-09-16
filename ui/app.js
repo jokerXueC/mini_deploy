@@ -12,7 +12,7 @@ let systemStatusRequestId = 0;
 let currentContainerLogName = '';
 let currentContainerLogLineLimit = 200;
 let containerLogKeywordTimer = null;
-let systemTrendRange = '24h';
+let systemTrendRange = 'realtime';
 let notificationDirty = false;
 let projectPreflightResults = new Map();
 const THEME_STORAGE_KEY = 'mini_deploy-theme';
@@ -939,7 +939,7 @@ function setView(view) {
     server: ['服务器健康面板', '查看服务器资源、网络吞吐和 Docker 容器运行状态。'],
     events: ['告警与事件', '集中查看部署、WebHook、容器和资源异常。'],
     notify: ['通知配置', '配置部署结果、服务器和 Docker 异常的推送渠道。'],
-    certificates: ['Nginx 证书', '项目域名、证书有效期与 HTTPS 状态。'],
+    certificates: ['域名与证书', '项目访问入口、证书有效期与 HTTPS 状态。'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
@@ -1317,6 +1317,7 @@ function applyTemplateDefaults(force = false) {
   defaultValue(log, `/var/log/mini_deploy/${key}-deploy.log`);
   defaultValue(serviceName, key);
   defaultValue(servicePort, template === 'java' ? '8003' : template === 'go' ? '8002' : '8001');
+  globalThis.AppSelects?.syncAll();
 }
 
 let projectGuidanceVersion = 0;
@@ -2260,6 +2261,7 @@ function formatTrendTime(point) {
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
+      ...(systemTrendRange === 'realtime' ? {second: '2-digit'} : {}),
       hour12: false,
     });
   }
@@ -2414,23 +2416,46 @@ function hideTrendTooltip() {
   delete trendTooltipEl.dataset.visible;
 }
 
-function renderTrendCard(points, config) {
+function trendAvailability(points, config, timing = {}) {
+  const valid = points.map(point => trendPointValue(point, config.key, config) != null);
+  if (valid.some((value, index) => index > 0 && value && valid[index - 1])) {
+    return { ready: true, message: '' };
+  }
+  const configuredInterval = Number(timing.intervalSeconds);
+  const interval = Number.isFinite(configuredInterval) && configuredInterval > 0 ? configuredInterval : 1800;
+  const now = timing.nowSeconds ?? Date.now() / 1000;
+  const lastTs = Number(timing.lastSampleTs);
+  const remaining = valid.length && valid[valid.length - 1] ? 1 : 2;
+  const minutes = seconds => Math.max(1, Math.ceil(seconds / 60));
+  const duration = seconds => seconds < 60 ? `${Math.max(1, Math.ceil(seconds))} 秒` : `${minutes(seconds)} 分钟`;
+  if (!Number.isFinite(lastTs) || lastTs <= 0) {
+    return { ready: false, message: `等待首次采样；首个有效样本后预计再等 ${duration(interval)}` };
+  }
+  const nextIn = lastTs + interval - now;
+  if (nextIn <= 0) {
+    return { ready: false, message: `等待采样更新；还需 ${remaining} 个连续有效样本（采样间隔 ${duration(interval)}）` };
+  }
+  return { ready: false, message: `预计约 ${duration(nextIn + (remaining - 1) * interval)} 后显示，需连续有效采样` };
+}
+
+function renderTrendCard(points, config, availability = trendAvailability(points, config)) {
   const { key, className, label, subLabel, formatter = formatPercent } = config;
   const scale = trendScale(points, key, config);
-  if (!scale) {
+  if (!availability.ready) {
     return `
       <article class="trend-card ${className}">
         <div class="trend-card-head">
           <span>${escapeHtml(label)}</span>
-          <strong>-</strong>
+          <strong>${scale ? escapeHtml(formatter(scale.latest)) : '-'}</strong>
         </div>
-        <div class="trend-card-empty">暂无有效样本</div>
+        <div class="trend-card-meta"><span>${escapeHtml(subLabel || '')}</span></div>
+        <div class="trend-card-empty"><span>样本不足，暂未生成趋势</span><small>${escapeHtml(availability.message)}</small></div>
       </article>
     `;
   }
   const height = 126;
   const pad = { top: 12, right: 12, bottom: 20, left: 42 };
-  const width = trendChartWidth(points, pad);
+  const width = config.realtime ? 480 : trendChartWidth(points, pad);
   const yTop = pad.top;
   const yMid = pad.top + (height - pad.top - pad.bottom) / 2;
   const yBottom = height - pad.bottom;
@@ -2450,7 +2475,7 @@ function renderTrendCard(points, config) {
         <span>${escapeHtml(formatter(scale.min))}-${escapeHtml(formatter(scale.max))}</span>
       </div>
       <div class="trend-chart-scroll" tabindex="0">
-        <svg class="trend-mini-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
+        <svg class="trend-mini-svg" ${config.realtime ? 'preserveAspectRatio="none"' : ''} viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
           <line class="trend-grid-line" x1="${pad.left}" y1="${yTop.toFixed(1)}" x2="${width - pad.right}" y2="${yTop.toFixed(1)}"></line>
           <line class="trend-grid-line" x1="${pad.left}" y1="${yMid.toFixed(1)}" x2="${width - pad.right}" y2="${yMid.toFixed(1)}"></line>
           <line class="trend-grid-line" x1="${pad.left}" y1="${yBottom.toFixed(1)}" x2="${width - pad.right}" y2="${yBottom.toFixed(1)}"></line>
@@ -2472,12 +2497,18 @@ function renderTrendCard(points, config) {
 function renderSystemTrend(system = {}) {
   const chart = $('systemTrendChart');
   if (!chart) return;
-  const rawHistory = Array.isArray(system.history) ? system.history : [];
+  const realtime = systemTrendRange === 'realtime';
+  const source = realtime ? system.realtime_history : system.history;
+  const rawHistory = Array.isArray(source) ? source : [];
   const cutoff = rangeCutoffSeconds(systemTrendRange);
   const nowTs = Math.floor(Date.now() / 1000);
   const filtered = cutoff ? rawHistory.filter(point => Number(point?.ts) >= nowTs - cutoff) : rawHistory;
   const points = filtered.slice().reverse();
-  const signature = JSON.stringify([systemTrendRange, system.history_interval_seconds, points]);
+  const intervalSeconds = realtime ? 1 : system.history_interval_seconds;
+  const timing = { intervalSeconds, nowSeconds: nowTs, lastSampleTs: rawHistory[0]?.ts };
+  const availability = ['cpu_percent', 'memory_percent', 'network_total_kbps'].map(key =>
+    trendAvailability(points, {key, percent: key !== 'network_total_kbps'}, timing));
+  const signature = JSON.stringify([systemTrendRange, intervalSeconds, points, availability]);
   if (chart.dataset.signature === signature) return;
   chart.dataset.signature = signature;
   const intervalMinutes = Math.round(Number(system.history_interval_seconds || 1800) / 60);
@@ -2485,22 +2516,21 @@ function renderSystemTrend(system = {}) {
   const hint = $('systemTrendHint');
   const pointsPerDay = trendPointsPerDay(intervalMinutes || 30);
   if (hint) {
-    hint.textContent = points.length
+    hint.textContent = realtime
+      ? `每秒采样 · 最近 60 个样本 · 已采集 ${points.length} 个${points.length ? ` · 最新 ${formatTrendTime(latest)}` : ''}`
+      : points.length
       ? `每 ${intervalMinutes || 30} 分钟采样 · 1 天 ${pointsPerDay} 点 · 当前范围 ${points.length} 点 · 可左右滑动 · 最新 ${formatTrendTime(latest)}`
       : `每 ${intervalMinutes || 30} 分钟采样一次 · 1 天约 ${pointsPerDay} 点 · 等待 CPU、内存、网络样本`;
   }
 
   chart.classList.remove('skeleton-block');
-  if (!points.length) {
-    chart.innerHTML = '<div class="trend-empty">等待下一次有效采样后生成趋势曲线</div>';
-    return;
-  }
-
+  chart.classList.toggle('realtime-trend', realtime);
   const markup = `
     <div class="trend-card-grid">
-      ${renderTrendCard(points, { key: 'cpu_percent', className: 'cpu', label: 'CPU', subLabel: '处理器' })}
-      ${renderTrendCard(points, { key: 'memory_percent', className: 'memory', label: '内存', subLabel: '占用率' })}
+      ${renderTrendCard(points, { realtime, key: 'cpu_percent', className: 'cpu', label: 'CPU', subLabel: '处理器' }, availability[0])}
+      ${renderTrendCard(points, { realtime, key: 'memory_percent', className: 'memory', label: '内存', subLabel: '占用率' }, availability[1])}
       ${renderTrendCard(points, {
+        realtime,
         key: 'network_total_kbps',
         className: 'network',
         label: '网络',
@@ -2509,7 +2539,7 @@ function renderSystemTrend(system = {}) {
         minSpan: 8,
         formatter: value => formatNumber(value, 'KB/s'),
         tooltipFormatter: (point, value) => `${formatTrendTime(point)} · 网络 ${formatNumber(value, 'KB/s')} · RX ${formatNumber(point.network_rx_kbps, 'KB/s')} · TX ${formatNumber(point.network_tx_kbps, 'KB/s')}`,
-      })}
+      }, availability[2])}
     </div>
   `;
   const template = document.createElement('template');
@@ -2521,10 +2551,17 @@ function renderSystemTrend(system = {}) {
     return;
   }
   hideTrendTooltip();
+  const nextCards = Array.from(template.content.querySelectorAll('.trend-card'));
   cards.forEach((card, i) => {
-    const next = template.content.querySelectorAll('.trend-card')[i];
+    const next = nextCards[i];
     const svg = card.querySelector('svg');
     const nextSvg = next.querySelector('svg');
+    if (!svg && !nextSvg) {
+      ['.trend-card-head', '.trend-card-meta', '.trend-card-empty'].forEach(selector => {
+        card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
+      });
+      return;
+    }
     if (!svg || !nextSvg) {
       card.replaceWith(next);
       DashboardMotion.show(next);
@@ -2668,6 +2705,9 @@ function renderDeployDetailInsights(item = {}) {
 }
 
 function renderSystemStatus(system = {}) {
+  if (Number(lastSystemPayload?.server?.sampled_ts || 0) > Number(system.server?.sampled_ts || 0)) {
+    system = {...system, server: lastSystemPayload.server, realtime_history: lastSystemPayload.realtime_history};
+  }
   lastSystemPayload = system;
   const server = system.server || {};
   const memory = server.memory || {};
@@ -2730,17 +2770,22 @@ function renderSystemStatus(system = {}) {
     if (!old || old.dataset.signature !== signature) {
       const template = document.createElement('template');
       template.innerHTML = renderContainerCard(container);
-      card = template.content.firstElementChild;
-      card.dataset.signature = signature;
+      const next = template.content.firstElementChild;
       if (old) {
-        const tracks = Array.from(old.querySelectorAll('.meter-track'));
-        card.querySelectorAll('.meter-track').forEach((track, i) => {
-          if (!tracks[i]) return;
-          tracks[i].dataset.resourceValue = track.dataset.resourceValue;
-          track.replaceWith(tracks[i]);
+        // Keep the meter and its label connected so in-flight animations continue.
+        ['.container-title-block', '.container-state-block', '.container-actions'].forEach(selector => {
+          const current = old.querySelector(selector);
+          const replacement = next.querySelector(selector);
+          if (current.innerHTML !== replacement.innerHTML) current.innerHTML = replacement.innerHTML;
         });
-        old.replaceWith(card);
+        const tracks = Array.from(next.querySelectorAll('.meter-track'));
+        old.querySelectorAll('.meter-track').forEach((track, i) => {
+          track.dataset.resourceValue = tracks[i].dataset.resourceValue;
+        });
+      } else {
+        card = next;
       }
+      card.dataset.signature = signature;
     }
     if (grid.children[index] !== card) grid.insertBefore(card, grid.children[index] || null);
   });
@@ -3208,6 +3253,25 @@ async function refreshNotificationConfig() {
 }
 
 let serverRefreshInFlight = false;
+let realtimeRefreshInFlight = false;
+
+async function refreshRealtimeMetrics() {
+  if (activeView !== 'server' || document.hidden || realtimeRefreshInFlight) return;
+  realtimeRefreshInFlight = true;
+  try {
+    const metrics = await fetchJson('system-metrics');
+    if (activeView !== 'server' || document.hidden) return;
+    renderSystemStatus({...lastSystemPayload, ...metrics});
+  } catch (err) {
+    if (activeView === 'server' && systemTrendRange === 'realtime') {
+      $('systemTrendHint').textContent = `实时采样暂不可用，正在重试：${err.message}`;
+    }
+  } finally {
+    realtimeRefreshInFlight = false;
+  }
+}
+
+window.setInterval(refreshRealtimeMetrics, 1000);
 async function refreshServerStatus() {
   if (activeView !== 'server') return;
   if (serverRefreshInFlight || document.hidden) return;

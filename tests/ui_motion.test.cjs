@@ -102,6 +102,84 @@ test('missing metric values split curves and are never rendered as zero', () => 
   assert.ok(!paths[1].includes(' C'));
 });
 
+function trendContext() {
+  const e = environment();
+  const js = fs.readFileSync('ui/app.js', 'utf8');
+  Object.assign(e.context, {escapeHtml: String, formatPercent: n => `${n}%`});
+  for (const name of ['trendPointValue', 'trendAvailability', 'trendScale', 'renderTrendCard']) {
+    const start = js.indexOf(`function ${name}(`);
+    const end = js.indexOf('\n}', start) + 2;
+    vm.runInContext(js.slice(start, end), e.context);
+  }
+  return e.context;
+}
+
+test('a single metric sample renders an empty chart with a decreasing estimate', () => {
+  const ctx = trendContext(), config = {key: 'cpu', label: 'CPU', className: 'cpu'};
+  const points = [{ts: 10000, cpu: 2.3}];
+  const timing = {lastSampleTs: 10000, nowSeconds: 10000, intervalSeconds: 1800};
+  const waiting = ctx.trendAvailability(points, config, timing);
+  assert.equal(waiting.ready, false);
+  assert.match(waiting.message, /30 分钟/);
+  const html = ctx.renderTrendCard(points, config, waiting);
+  assert.ok(!html.includes('<svg'));
+  assert.ok(!html.includes('trend-axis-label'));
+  assert.match(html, /样本不足/);
+  assert.match(html, /2.3%/);
+  assert.match(ctx.trendAvailability(points, config, {...timing, nowSeconds: 10600}).message, /20 分钟/);
+});
+
+test('zero, missing, separated and ready samples are evaluated per metric', () => {
+  const ctx = trendContext(), config = {key: 'cpu'};
+  const timing = {lastSampleTs: 10000, nowSeconds: 10000, intervalSeconds: 1800};
+  assert.match(ctx.trendAvailability([], config).message, /首次采样/);
+  assert.match(ctx.trendAvailability([{cpu: null}], config, timing).message, /60 分钟/);
+  assert.equal(ctx.trendAvailability([{cpu: 0}, {cpu: 0}], config, timing).ready, true);
+  assert.equal(ctx.trendAvailability([{cpu: 2}, {cpu: null}, {cpu: 4}], config, timing).ready, false);
+  const points = [{cpu: 1, network: null}, {cpu: 2, network: 10}];
+  assert.equal(ctx.trendAvailability(points, config, timing).ready, true);
+  assert.equal(ctx.trendAvailability(points, {key: 'network'}, timing).ready, false);
+});
+
+test('overdue samples do not promise an expired countdown, custom intervals are respected', () => {
+  const ctx = trendContext(), config = {key: 'cpu'};
+  const points = [{cpu: 4}];
+  assert.match(ctx.trendAvailability(points, config, {
+    lastSampleTs: 10000, nowSeconds: 12000, intervalSeconds: 1800,
+  }).message, /等待采样更新/);
+  assert.match(ctx.trendAvailability(points, config, {
+    lastSampleTs: 10000, nowSeconds: 10000, intervalSeconds: 300,
+  }).message, /5 分钟/);
+  assert.match(ctx.trendAvailability(points, config, {
+    lastSampleTs: 10000, nowSeconds: 10000, intervalSeconds: 1,
+  }).message, /1 秒/);
+});
+
+test('realtime polling skips hidden pages and overlapping requests', async () => {
+  const js = fs.readFileSync('ui/app.js', 'utf8');
+  const start = js.indexOf('async function refreshRealtimeMetrics(');
+  const end = js.indexOf('\n}', start) + 2;
+  let finish, requests = 0, rendered;
+  const context = vm.createContext({
+    activeView: 'server', document: {hidden: false}, realtimeRefreshInFlight: false,
+    lastSystemPayload: {history: ['old'], docker: {available: true}},
+    fetchJson: path => {assert.equal(path, 'system-metrics'); requests++; return new Promise(resolve => {finish = resolve;});},
+    renderSystemStatus: value => {rendered = value;},
+  });
+  vm.runInContext(js.slice(start, end), context);
+  const pending = context.refreshRealtimeMetrics();
+  await context.refreshRealtimeMetrics();
+  assert.equal(requests, 1);
+  finish({realtime_history: [{cpu_percent: 2}]});
+  await pending;
+  assert.equal(rendered.history[0], 'old');
+  assert.equal(rendered.docker.available, true);
+  assert.equal(rendered.realtime_history[0].cpu_percent, 2);
+  context.document.hidden = true;
+  await context.refreshRealtimeMetrics();
+  assert.equal(requests, 1);
+});
+
 test('server refresh is serialized and ignores superseded status responses', async () => {
   const js = fs.readFileSync('ui/app.js', 'utf8');
   const start = js.indexOf('async function refreshServerStatus(');

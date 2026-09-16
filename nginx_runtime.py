@@ -18,6 +18,68 @@ CONF_DEST = "/etc/nginx/conf.d"
 CERT_DEST = "/etc/mini-deploy/certificates"
 
 
+def local_setup_plan() -> dict[str, Any]:
+    if os.name != "posix" or os.geteuid() != 0 or not shutil.which("systemctl"):
+        raise CertificateError("自动配置需要以 root 运行的 Linux systemd 服务器")
+    installed = bool(shutil.which("nginx"))
+    try:
+        active = run(["systemctl", "is-active", "nginx"], timeout=5).strip() == "active"
+    except CertificateError:
+        active = False
+    manager = ""
+    if not installed:
+        manager = next((name for name in ("apt-get", "dnf", "yum") if shutil.which(name)), "")
+        if not manager:
+            raise CertificateError("此系统暂不支持网页安装 Nginx，请先安装 Nginx，再使用已有实例接入")
+    if not active:
+        # Docker may publish a port using NAT without a host listening socket.
+        if shutil.which("docker"):
+            require_local_docker()
+            ports = run(["docker", "ps", "--format", "{{.Ports}}"], timeout=5)
+            if re.search(r":80->", ports):
+                raise CertificateError("80 端口已由 Docker 容器使用，请在高级接入中选择已有 Nginx，不会停止现有容器")
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                listener.bind(("0.0.0.0", 80))
+        except OSError as exc:
+            raise CertificateError("80 端口已被其他服务占用，请选择已有 Nginx 或由管理员处理端口冲突") from exc
+    if installed:
+        run(["nginx", "-t"])
+    return {"installed": installed, "active": active, "package_manager": manager}
+
+
+def prepare_local(plan: dict[str, Any]) -> None:
+    if local_setup_plan() != plan:
+        raise CertificateError("服务器环境已变化，请重新检查后确认")
+    if not plan["installed"]:
+        manager = plan["package_manager"]
+        if manager == "apt-get":
+            run(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "update"], timeout=180)
+            run(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "nginx"], timeout=300)
+        elif manager in {"dnf", "yum"}:
+            run([manager, "install", "-y", "nginx"], timeout=300)
+        else:
+            raise CertificateError("不支持的包管理器，请重新检查环境")
+    run(["nginx", "-t"])
+    if not plan["active"]:
+        run(["systemctl", "enable", "--now", "nginx"], timeout=30)
+
+
+def check_domain_conflict(runtime: Runtime, domain: str, own_path: Path) -> None:
+    dump = run(runtime.command("dump"))
+    sections = re.split(r"(?m)^# configuration file (.+):\s*$", dump)
+    chunks = [("", sections[0]), *zip(sections[1::2], sections[2::2])]
+    own = own_path.as_posix() if runtime.mode == "local" else f"{CONF_DEST}/{own_path.name}"
+    for current_file, content in chunks:
+        if current_file == own:
+            continue
+        content = re.sub(r"(?m)#.*$", "", content)
+        for match in re.finditer(r"\bserver_name\s+([^;]+);", content):
+            names = [name.strip("\"'").lower() for name in match.group(1).split()]
+            if domain in names:
+                raise CertificateError("此域名已存在于其他 Nginx 站点，请先核对已有配置，避免覆盖或访问到错误项目")
+
+
 def require_local_docker() -> None:
     endpoint = os.environ.get("DOCKER_HOST", "")
     if endpoint and not endpoint.startswith("unix:///"):

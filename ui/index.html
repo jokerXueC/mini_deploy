@@ -64,13 +64,42 @@
       <button id="serverViewTab" class="view-tab" type="button" data-view="server">服务器状态</button>
       <button id="eventsViewTab" class="view-tab" type="button" data-view="events">告警事件</button>
       <button id="notifyViewTab" class="view-tab" type="button" data-view="notify">通知配置</button>
-      <button id="certificatesViewTab" class="view-tab" type="button" data-view="certificates">Nginx 证书</button>
+      <button id="certificatesViewTab" class="view-tab" type="button" data-view="certificates">域名与证书</button>
     </nav>
 
     <div id="certificatesView" class="dashboard-view">
-      <section class="panel certificate-panel nginx-setup">
-        <div class="panel-head"><h2>Nginx 接入</h2><button id="nginxDetect" class="ghost-button" type="button">检测运行环境</button></div>
+      <div class="gateway-toolbar">
+        <div class="gateway-tabs" role="tablist" aria-label="域名管理">
+          <button id="gatewaySitesTab" class="gateway-tab active" type="button" role="tab" aria-selected="true" aria-controls="gatewaySites">访问入口</button>
+          <button id="gatewayCertificatesTab" class="gateway-tab" type="button" role="tab" aria-selected="false" aria-controls="gatewayCertificates">HTTPS 证书</button>
+        </div>
+        <span id="nginxCurrent" class="badge neutral">尚未接入</span>
+      </div>
+      <section id="gatewaySites" class="certificate-panel nginx-setup gateway-section" role="tabpanel" aria-labelledby="gatewaySitesTab">
+        <div class="panel-head"><div><h2>项目访问入口</h2><p class="gateway-caption">域名与业务服务</p></div><button id="nginxDetect" class="ghost-button compact-action" type="button">立即检测</button></div>
+        <div id="nginxSiteList" class="gateway-site-list"></div>
         <div id="nginxFeedback" role="status" aria-live="polite"></div>
+        <form id="nginxQuickForm" class="gateway-quick-form">
+          <div class="gateway-section-title"><span class="gateway-step">01</span><h3>配置访问入口</h3></div>
+          <div class="gateway-form-grid">
+            <label class="field"><span>业务项目</span><select id="nginxQuickProject" required><option value="">请先添加项目</option></select></label>
+            <label class="field"><span>业务域名</span><input id="nginxQuickDomain" placeholder="api.example.com" maxlength="253" required></label>
+            <label class="field"><span>业务端口</span><input id="nginxQuickPort" type="number" min="1" max="65535" required placeholder="8001"></label>
+          </div>
+          <label id="nginxQuickHostField" class="field" hidden><span>业务服务地址</span><input id="nginxQuickHost" maxlength="253" placeholder="业务容器服务名或可访问的主机地址"></label>
+          <p id="nginxQuickHint" class="gateway-caption">使用本机 Nginx，后端地址默认为 127.0.0.1。</p>
+          <div class="certificate-actions"><button id="nginxQuickCheck" class="danger-button compact-action" type="submit">检查并预览</button></div>
+          <div id="nginxQuickPlan" class="gateway-plan" hidden>
+            <div class="gateway-section-title"><span class="gateway-step">02</span><h3>确认配置</h3></div>
+            <ol id="nginxQuickSteps"></ol>
+            <p id="nginxQuickNotice" class="gateway-caption"></p>
+            <details><summary>查看 Nginx 配置</summary><pre id="nginxQuickConfig" class="command-output"></pre></details>
+            <button id="nginxQuickApply" class="danger-button compact-action" type="button">确认并配置</button>
+          </div>
+          <div id="nginxQuickResult" role="status" aria-live="polite"></div>
+        </form>
+        <details id="nginxAdvanced" class="gateway-advanced">
+          <summary>高级接入 <span>已有 Nginx / Docker / 自定义后端</span></summary>
         <form id="nginxSettingsForm" class="certificate-layout">
           <div>
             <label class="field"><span>运行方式</span><select id="nginxMode"><option value="none">暂不配置</option><option value="local">服务器本机</option><option value="docker">Docker 容器</option></select></label>
@@ -78,8 +107,7 @@
             <dl id="nginxDetectedDetails" class="detail-list certificate-details"></dl>
           </div>
           <div>
-            <div id="nginxCurrent" class="muted">尚未接入</div>
-            <div id="nginxMountHelp" hidden><p>容器需要以下目录挂载；修改 Compose 后需重建容器。</p><pre id="nginxMountExample" class="command-output"></pre><p>证书目录只能单独挂载，不能把整个 Agent 数据目录交给容器。</p></div>
+            <div id="nginxMountHelp" hidden><p>仅接入挂载条件齐全的容器。缺少挂载需要维护原 Compose 并重建，不会自动停止或重建容器。</p><details><summary>查看挂载要求</summary><pre id="nginxMountExample" class="command-output"></pre></details></div>
             <div class="certificate-actions"><button id="nginxSave" class="danger-button" type="submit">检查并保存</button></div>
           </div>
         </form>
@@ -90,8 +118,9 @@
           <div class="certificate-actions"><button id="nginxProbe" class="ghost-button" type="button">检查连通</button><button id="nginxSaveUpstream" class="ghost-button" type="submit">检查并保存后端</button><button id="nginxRemoveSite" class="ghost-button danger-text" type="button">移除域名入口</button></div>
           <p id="nginxNetworkHint" class="muted"></p>
         </form>
+        </details>
       </section>
-      <section class="panel certificate-panel">
+      <section id="gatewayCertificates" class="certificate-panel gateway-section" role="tabpanel" aria-labelledby="gatewayCertificatesTab" hidden>
         <div class="panel-head"><h2>域名证书</h2><span id="certificateEnvironment" class="muted"></span></div>
         <div id="certificateFeedback" role="status" aria-live="polite"></div>
         <div class="certificate-layout">
@@ -106,8 +135,12 @@
           </div>
           <form id="certificateForm" autocomplete="off">
             <label class="field"><span>证书名称</span><input id="certificateLabel" maxlength="80" required placeholder="例如：API 正式证书"></label>
-            <label class="field"><span>完整证书链（PEM）</span><input id="certificateFile" type="file" accept=".pem,.crt,.cer"><textarea id="certificatePem" rows="5" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
-            <label class="field"><span>未加密私钥（PEM）</span><input id="certificateKeyFile" type="file" accept=".pem,.key"><textarea id="certificatePrivateKey" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+            <label class="field"><span>完整证书链（PEM）</span><input id="certificateFile" type="file" accept=".pem,.crt,.cer"></label>
+            <label class="field"><span>未加密私钥（PEM）</span><input id="certificateKeyFile" type="file" accept=".pem,.key"></label>
+            <details class="gateway-pem"><summary>直接粘贴 PEM 内容</summary>
+              <label class="field"><span>证书链</span><textarea id="certificatePem" rows="5" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+              <label class="field"><span>私钥</span><textarea id="certificatePrivateKey" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+            </details>
             <div class="certificate-actions">
               <button id="certificateUpload" class="danger-button" type="submit" disabled>保存证书</button>
               <button id="certificateRename" class="ghost-button" type="button" disabled>修改名称</button>
@@ -419,7 +452,8 @@
           </div>
           <div class="trend-head-actions">
             <div class="trend-range-controls" aria-label="趋势范围">
-              <button class="trend-range active" type="button" data-trend-range="24h">24h</button>
+              <button class="trend-range active" type="button" data-trend-range="realtime">实时</button>
+              <button class="trend-range" type="button" data-trend-range="24h">24h</button>
               <button class="trend-range" type="button" data-trend-range="6h">6h</button>
               <button class="trend-range" type="button" data-trend-range="7d">7d</button>
               <button class="trend-range" type="button" data-trend-range="all">全部</button>
@@ -642,6 +676,7 @@
   </main>
 
   <script src="ui/motion.js"></script>
+  <script src="ui/selects.js"></script>
   <script src="ui/app.js"></script>
   <script src="ui/certificates.js"></script>
   <script src="ui/nginx.js"></script>

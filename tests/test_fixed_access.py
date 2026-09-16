@@ -42,6 +42,10 @@ def test_root_http_login_and_assets_without_nginx(monkeypatch):
         response = connection.getresponse()
         assert response.status == 200
         assert b'password' in response.read()
+        connection.request("GET", "/system-metrics")
+        response = connection.getresponse()
+        assert response.status == 401
+        response.read()
         connection.request("POST", "/login", body=urlencode({"password": "Test-only-password-6868"}),
                            headers={"Content-Type": "application/x-www-form-urlencoded"})
         response = connection.getresponse()
@@ -54,7 +58,11 @@ def test_root_http_login_and_assets_without_nginx(monkeypatch):
         response = connection.getresponse()
         assert response.status == 200
         assert b'certificatesViewTab' in response.read()
-        for asset in ("app.js", "certificates.js", "style.css"):
+        connection.request("GET", "/system-metrics", headers={"Cookie": cookie.split(";", 1)[0]})
+        response = connection.getresponse()
+        assert response.status == 200
+        assert b'realtime_history' in response.read()
+        for asset in ("app.js", "certificates.js", "selects.js", "style.css"):
             connection.request("GET", f"/ui/{asset}")
             response = connection.getresponse()
             assert response.status == 200

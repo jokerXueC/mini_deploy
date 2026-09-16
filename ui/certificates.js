@@ -24,6 +24,7 @@ function certificateControls() {
   $('certificateDelete').disabled = certificateBusy || !cert || cert.active;
   $('certificateRename').disabled = certificateBusy || !cert;
   $('certificateUpload').textContent = cert?.active ? '替换并应用证书' : cert ? '替换证书' : '保存证书';
+  window.AppSelects?.syncAll();
 }
 
 function renderCertificateDetails(resetForm = false) {
@@ -64,7 +65,7 @@ function renderCertificates(payload, resetForm = false) {
 }
 
 async function refreshCertificates() {
-  if (certificateBusy) return;
+  if (certificateBusy || nginxBusy) return;
   const request = ++certificateRequest;
   try {
     await refreshNginxSettings();
@@ -81,7 +82,7 @@ async function refreshCertificates() {
 async function certificateAction(action) {
   if (certificateBusy || nginxBusy) return;
   if (!nginxSettings?.configured || nginxSettings.profile.mode === 'none') {
-    certificateMessage('请先在上方检测并保存 Nginx 运行环境。', true);
+    certificateMessage('请先在“访问入口”配置项目域名，或在高级接入中保存已有 Nginx。', true);
     return;
   }
   const item = certificateSelection();
