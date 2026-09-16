@@ -158,6 +158,46 @@ def test_docker_domain_config_uses_saved_upstream_and_no_host_certbot(docker_set
     assert not agent._project_nginx_conf_path(project).exists()
 
 
+def test_custom_http_mapping_is_reflected_in_access_url(docker_setup, monkeypatch):
+    settings, item, _ = docker_setup
+    item["ports"]["80/tcp"][0]["HostPort"] = "8080"
+    profile = settings.candidate("docker", "edge")
+    assert profile["http_port"] == 8080
+    settings.save(profile, {"api": "backend"})
+    project = agent._project_from_config({"key": "api", "app_domain": "api.example.test", "service_port": 8000}, "api")
+    monkeypatch.setattr(agent, "_nginx_settings", lambda: settings)
+    monkeypatch.setattr(agent, "STATE_FILE", settings.data_home / "state.json")
+    monkeypatch.setattr(certificates, "run", nginx.run)
+    result = agent._configure_project_nginx(project, issue_https=False)
+    assert result["url"] == "http://api.example.test:8080"
+    assert "listen 80;" in agent._project_nginx_conf_path(project).read_text()
+
+
+def test_https_activation_explains_missing_docker_port(docker_setup, monkeypatch):
+    settings, _, _ = docker_setup
+    settings.save(settings.candidate("docker", "edge"), {"api": "backend"})
+    project = agent._project_from_config({"key": "api", "app_domain": "api.example.test", "service_port": 8000}, "api")
+    monkeypatch.setattr(agent, "_nginx_settings", lambda: settings)
+    monkeypatch.setattr(agent, "STATE_FILE", settings.data_home / "state.json")
+    monkeypatch.setattr(agent, "PROJECTS", {"api": project})
+    with pytest.raises(certificates.CertificateError, match="尚未发布 HTTPS 443"):
+        agent._certificate_operation({"project": "api", "action": "enable"})
+
+
+def test_invalid_settings_returns_configuration_failure(docker_setup, monkeypatch):
+    settings, _, _ = docker_setup
+    project = agent._project_from_config({"key": "api", "app_domain": "api.example.test", "service_port": 8000}, "api")
+    monkeypatch.setattr(agent, "_nginx_settings", lambda: settings)
+
+    def broken():
+        raise certificates.CertificateError("invalid settings")
+
+    monkeypatch.setattr(settings, "read", broken)
+    result = agent._configure_project_nginx(project, issue_https=False)
+    assert not result["ok"]
+    assert "invalid settings" in result["results"][0]["detail"]
+
+
 def test_none_and_invalid_modes_are_explicit(docker_setup):
     settings, _, _ = docker_setup
     settings.save(settings.candidate("none"), {})

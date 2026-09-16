@@ -3061,6 +3061,12 @@ html[data-theme="light"] .theme-toggle-icon {
 .gateway-site-row span:not(.badge) { color: var(--muted); display: block; margin-top: 5px; font-size: 12px; }
 .gateway-site-row code { color: var(--muted); font-size: 12px; }
 .gateway-empty { color: var(--muted); padding: 18px 0; font-size: 13px; }
+.gateway-install { display: grid; gap: 16px; padding: 20px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+.gateway-install .gateway-section-title { flex-wrap: wrap; }
+.gateway-install-check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.gateway-section .gateway-install-check input { width: 16px; height: 16px; flex: 0 0 16px; }
+#nginxInstallResult { font-size: 13px; overflow-wrap: anywhere; }
+#nginxInstallResult a { color: var(--blue); }
 .gateway-quick-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; max-width: 1020px; }
 .gateway-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(100px, .6fr); gap: 16px; }
 .gateway-section .field { display: grid; gap: 8px; min-width: 0; color: var(--muted); font-size: 12px; font-weight: 700; }

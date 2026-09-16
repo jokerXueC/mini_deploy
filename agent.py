@@ -46,6 +46,7 @@ from urllib.request import Request, urlopen
 
 import certificates
 import nginx_runtime
+import nginx_install
 import project_guidance
 
 try:
@@ -2186,9 +2187,44 @@ def _nginx_payload(*, discover: bool = False) -> dict[str, Any]:
         return data
 
 
+def _nginx_http_url(domain: str, profile: dict[str, Any]) -> str:
+    port = profile.get("http_port", 80)
+    return f"http://{domain}" + (f":{port}" if port != 80 else "")
+
+
 @_maintenance_shared_operation
 @_nginx_serialized
 def _nginx_install_operation(data: dict[str, Any]) -> dict[str, Any]:
+    mode = data.get("mode", "local")
+    port = data.get("port", 80)
+    if mode == "docker":
+        settings = _nginx_settings().read()
+        docker = nginx_install.docker_plan(STATE_FILE.parent, data.get("container", "mini-deploy-nginx"),
+                                           port, data.get("reserve_https", False))
+        token = nginx_install.plan_token(docker)
+        if data.get("action") == "plan-install":
+            steps = [f"下载镜像 {docker['image']}", f"创建容器 {docker['container']}，HTTP {port} → 80",
+                     "自动准备配置和独立证书目录挂载", "启动容器并检查 HTTP 测试页面"]
+            if docker["reserve_https"]:
+                steps.insert(2, "预留 HTTPS 443 端口，暂不启用 TLS")
+            return {"plan": {"token": token, "mode": mode, "port": port, "installed": False,
+                             "steps": steps, "notice": "无需项目、域名或证书。请在云安全组放行 HTTP 端口。"}}
+        if not _constant_time_equal(str(data.get("token") or ""), token):
+            raise certificates.CertificateError("安装参数或环境已变化，请重新检查后确认")
+        result = nginx_install.install_docker(STATE_FILE.parent, docker)
+        message = "Docker Nginx 已启动，HTTP 测试通过。"
+        if not settings["configured"] or settings["profile"].get("mode") == "none":
+            try:
+                _save_nginx_settings({"mode": "docker", "container": result["container"]})
+                message += "已接入面板，可随后配置业务入口。"
+            except (ValueError, OSError) as exc:
+                message += f"自动接入未完成：{exc}。可在高级接入中选择该容器。"
+        else:
+            message += "已保留原有接入实例，新容器可在高级接入中选择。"
+        return {"ok": True, "settings": _nginx_payload(), "message": message,
+                "access_port": port, "http_status": result["http_status"]}
+    if mode != "local" or not isinstance(port, int) or isinstance(port, bool) or port != 80:
+        raise certificates.CertificateError("本机安装使用默认 HTTP 80 端口；需要自选映射端口请使用 Docker 安装")
     local = nginx_runtime.local_setup_plan()
     steps = []
     if not local["installed"]:
@@ -2203,7 +2239,9 @@ def _nginx_install_operation(data: dict[str, Any]) -> dict[str, Any]:
     if not _constant_time_equal(str(data.get("token") or ""), token):
         raise certificates.CertificateError("安装环境已变化，请重新检查后确认")
     nginx_runtime.prepare_local(local)
-    return {"ok": True, "settings": _nginx_payload(), "message": "本机 Nginx 已安装并运行，可随后添加项目和域名入口。"}
+    status = nginx_install.check_http(80)
+    return {"ok": True, "settings": _nginx_payload(), "message": "本机 Nginx 已安装并运行，HTTP 检查通过，可随后添加项目和域名入口。",
+            "access_port": 80, "http_status": status}
 
 
 def _nginx_site_plan(data: dict[str, Any]) -> tuple[DeployProject, dict[str, Any]]:
@@ -2247,9 +2285,9 @@ def _nginx_site_plan(data: dict[str, Any]) -> tuple[DeployProject, dict[str, Any
         steps.append("启动 Nginx 并设置开机启动")
     steps.extend([f"保存 {domain} → {host}:{port}", "检查 Nginx 配置并重新加载"])
     plan = {"project": project.key, "domain": domain, "port": port, "host": host, "mode": profile["mode"],
-            "local_setup": local, "steps": steps, "url": f"http://{domain}",
+            "local_setup": local, "steps": steps, "url": _nginx_http_url(domain, profile),
             "config": _nginx_http_config_text(domain, host, port),
-            "notice": "域名需解析到本服务器，并在云安全组放行 80 端口。当前入口使用 HTTP，证书可稍后配置。"}
+            "notice": f"域名需解析到本服务器，并在云安全组放行 {profile.get('http_port', 80)} 端口。当前入口使用 HTTP，证书可稍后配置。"}
     fingerprint = [plan, saved, _project_to_config(existing), previous]
     plan["token"] = hashlib.sha256(json.dumps(fingerprint, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return project, plan
@@ -2384,6 +2422,11 @@ def _certificate_operation(data: dict[str, Any]) -> None:
         runtime = settings.runtime()
         store = certificates.CertificateStore(STATE_FILE.parent / "certificates", runtime)
         if data.get("action") == "enable":
+            if runtime.mode == "docker" and runtime.profile.get("network") != "host":
+                item = nginx_runtime.inspect_container(runtime.profile.get("container", ""))
+                bindings = item.get("ports", {}).get("443/tcp") or []
+                if not any(binding.get("HostPort") == "443" for binding in bindings):
+                    raise certificates.CertificateError("此容器尚未发布 HTTPS 443 端口。可先使用 HTTP；启用 HTTPS 前需维护容器端口映射，面板不会自动重建容器")
             runtime.probe(settings.read()["upstreams"].get(key), project.service_port)
         store.operate(project, data.get("action"), data,
                                      _project_nginx_conf_path(project), _project_nginx_config_text(project))
@@ -2430,9 +2473,12 @@ def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None
     domain = _normalize_domain(project.app_domain)
     https_requested = project.app_https if issue_https is None else bool(issue_https)
     results: list[dict[str, Any]] = []
+    profile: dict[str, Any] = {}
     try:
         settings = _nginx_settings()
-        if not settings.read()["configured"]:
+        saved = settings.read()
+        profile = saved["profile"]
+        if not saved["configured"]:
             raise certificates.CertificateError("请先在 Nginx 证书页检测并保存运行环境")
         if not _valid_domain(domain) or not 1 <= int(project.service_port or 0) <= 65535:
             raise certificates.CertificateError("请先填写有效的业务域名和服务端口")
@@ -2467,7 +2513,7 @@ def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None
     return {
         "ok": http_ready and (not https_requested or https_ok), "http_ready": http_ready,
         "https_ok": https_ok, "project": project.key, "domain": domain,
-        "url": f"{'https' if https_ok else 'http'}://{domain}", "results": results,
+        "url": f"https://{domain}" if https_ok else _nginx_http_url(domain, profile), "results": results,
     }
 
 
@@ -4311,7 +4357,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = _save_nginx_settings(data)
             elif action in ("plan-site", "apply-site"):
                 result = _nginx_site_operation(data)
-            elif action in ("plan-install", "install-local"):
+            elif action in ("plan-install", "install-local", "install-nginx"):
                 result = _nginx_install_operation(data)
             elif action in ("probe", "save-upstream"):
                 result = _nginx_upstream_operation(data)

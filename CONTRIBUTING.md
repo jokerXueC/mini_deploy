@@ -50,9 +50,9 @@ python3 -m pip install -r requirements-dev.txt
 提交前至少运行与改动相关的检查：
 
 ```bash
-python3 -m py_compile agent.py certificates.py nginx_runtime.py scripts/verify_backup.py
+python3 -m py_compile agent.py certificates.py nginx_runtime.py nginx_install.py scripts/verify_backup.py
 python3 -m pytest
-python3 -m ruff check agent.py certificates.py nginx_runtime.py project_guidance.py scripts/verify_backup.py tests
+python3 -m ruff check agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py scripts/verify_backup.py tests
 node --check ui/app.js
 node --check ui/motion.js
 node --check ui/certificates.js

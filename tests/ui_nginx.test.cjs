@@ -16,7 +16,7 @@ function setup() {
     },
   };
   vm.createContext(context);
-  for (const name of ['gatewayTab', 'invalidateNginxPlan', 'nginxQuickFields', 'nginxQuickPayload']) {
+  for (const name of ['gatewayTab', 'invalidateNginxPlan', 'nginxQuickFields', 'nginxQuickPayload', 'nginxInstallFields', 'nginxInstallPayload', 'toggleNginxInstall']) {
     const start = source.indexOf(`function ${name}(`);
     const end = source.indexOf('\n}', start) + 2;
     vm.runInContext(source.slice(start, end), context);
@@ -74,4 +74,28 @@ test('gateway tabs expose only the chosen workspace', () => {
   ctx.gatewayTab('Sites');
   assert.equal(ctx.$('gatewaySites').hidden, false);
   assert.equal(ctx.$('gatewayCertificates').hidden, true);
+});
+
+test('installation mode does not require projects, domains or certificates', () => {
+  const ctx = setup();
+  ctx.nginxSettings.projects = [];
+  ctx.$('nginxInstallMode').value = 'local';
+  ctx.toggleNginxInstall(true);
+  assert.equal(ctx.$('nginxInstallForm').hidden, false);
+  assert.equal(ctx.$('nginxInstallPort').readOnly, true);
+  assert.equal(ctx.$('nginxInstallPort').value, 80);
+  assert.equal(ctx.$('nginxInstallDockerOptions').hidden, true);
+  ctx.$('nginxInstallMode').value = 'docker';
+  ctx.nginxInstallFields();
+  assert.equal(ctx.$('nginxInstallPort').readOnly, false);
+  assert.equal(ctx.$('nginxInstallContainer').required, true);
+  assert.equal(ctx.$('nginxInstallDockerOptions').hidden, false);
+  ctx.$('nginxInstallPort').value = '8080';
+  ctx.$('nginxInstallContainer').value = 'edge';
+  ctx.$('nginxInstallHttps').checked = false;
+  const payload = ctx.nginxInstallPayload();
+  assert.equal(payload.port, 8080);
+  assert.equal(payload.container, 'edge');
+  assert.equal(payload.reserve_https, false);
+  assert.ok(!('project' in payload) && !('domain' in payload) && !('certificate' in payload));
 });

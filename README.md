@@ -145,7 +145,11 @@ After that, every `git push` to the configured branch can trigger deployment.
 For a business domain, open Domains and Certificates, select the project, enter its
 domain and port, then check the preview and confirm. The wizard can install local
 Nginx using apt-get/dnf/yum when absent, and validates the backend before applying an
-HTTP site. DNS and cloud firewall rules remain manual. Existing Nginx instances can
+HTTP site. The independent Install Nginx form also supports creating a Docker
+container with an HTTP port, automatic directory mounts and optional port 443
+reservation. No project, domain or certificate is required to start HTTP; Docker
+must already be available. Existing containers are never overwritten or recreated.
+DNS and cloud firewall rules remain manual. Existing Nginx instances can
 be selected under Advanced. Docker mode
 requires a local Docker Unix socket and directory bind mounts for `/etc/nginx/conf.d`
 and `/etc/mini-deploy/certificates`; bridge networks need a reachable backend service

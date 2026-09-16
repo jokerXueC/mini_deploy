@@ -78,7 +78,7 @@ for path in "$ENV_FILE" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   fi
 done
 
-for required in agent.py certificates.py nginx_runtime.py project_guidance.py env.example examples/projects.empty.json systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
+for required in agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py env.example examples/projects.empty.json systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
   if [[ ! -f "$SOURCE_DIR/$required" ]]; then
     echo "安装包不完整 / Incomplete installation package: $required" >&2
     exit 1

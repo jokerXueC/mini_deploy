@@ -242,6 +242,9 @@ class Settings:
             mode = data["profile"].get("mode")
             if not isinstance(mode, str) or mode not in {"local", "docker", "none"}:
                 raise ValueError("invalid mode")
+            port = data["profile"].get("http_port", 80)
+            if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+                raise ValueError("invalid HTTP port")
             for key, value in data["upstreams"].items():
                 if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", key):
                     raise ValueError("invalid project key")
@@ -279,7 +282,13 @@ class Settings:
         dump = run(["docker", "exec", item["id"], "nginx", "-T"])
         if not re.search(r"include\s+/etc/nginx/conf\.d/\*\.conf\s*;", dump):
             raise CertificateError("容器 nginx.conf 必须包含 include /etc/nginx/conf.d/*.conf;")
-        return {"mode": "docker", "container": name, "conf_root": str(root), "network": item["network"]}
+        profile = {"mode": "docker", "container": name, "conf_root": str(root), "network": item["network"]}
+        bindings = (item.get("ports") or {}).get("80/tcp") or []
+        if item["network"] != "host" and bindings:
+            port = str(bindings[0].get("HostPort", ""))
+            if port.isdigit() and 1 <= int(port) <= 65535 and int(port) != 80:
+                profile["http_port"] = int(port)
+        return profile
 
     def discover(self) -> dict[str, Any]:
         result: dict[str, Any] = {"local": bool(shutil.which("nginx")), "containers": [], "errors": []}

@@ -27,6 +27,7 @@ def wizard(tmp_path, monkeypatch):
     monkeypatch.setattr(nginx, "local_setup_plan", lambda: {"installed": False, "active": False, "package_manager": "apt-get"})
     prepared = []
     monkeypatch.setattr(nginx, "prepare_local", prepared.append)
+    monkeypatch.setattr(agent.nginx_install, "check_http", lambda port: 200)
     monkeypatch.setattr(settings, "candidate", lambda mode, name="": {"mode": mode})
 
     def runtime_init(self, profile, data_home, *, live=True):

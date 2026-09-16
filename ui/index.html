@@ -76,9 +76,24 @@
         <span id="nginxCurrent" class="badge neutral">尚未接入</span>
       </div>
       <section id="gatewaySites" class="certificate-panel nginx-setup gateway-section" role="tabpanel" aria-labelledby="gatewaySitesTab">
-        <div class="panel-head"><div><h2>项目访问入口</h2><p class="gateway-caption">域名与业务服务</p></div><div class="certificate-actions"><button id="nginxDetect" class="ghost-button compact-action" type="button">立即检测</button><button id="nginxInstall" class="ghost-button compact-action" type="button">安装本机 Nginx</button></div></div>
+        <div class="panel-head"><div><h2>项目访问入口</h2><p class="gateway-caption">域名与业务服务</p></div><div class="certificate-actions"><button id="nginxDetect" class="ghost-button compact-action" type="button">立即检测</button><button id="nginxInstall" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="nginxInstallForm">安装 Nginx</button></div></div>
         <div id="nginxSiteList" class="gateway-site-list"></div>
         <div id="nginxFeedback" role="status" aria-live="polite"></div>
+        <form id="nginxInstallForm" class="gateway-install" hidden>
+          <div class="gateway-section-title"><h3>先启动 HTTP 服务</h3><span class="badge neutral">无需项目、域名或证书</span></div>
+          <div class="gateway-form-grid">
+            <label class="field"><span>安装方式</span><select id="nginxInstallMode"><option value="local">服务器本机</option><option value="docker">Docker 容器</option></select></label>
+            <label class="field"><span>HTTP 访问端口</span><input id="nginxInstallPort" type="number" min="1" max="65535" value="80" required readonly></label>
+            <label id="nginxInstallContainerField" class="field" hidden><span>新容器名称</span><input id="nginxInstallContainer" value="mini-deploy-nginx" maxlength="64" pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,63}"></label>
+          </div>
+          <div id="nginxInstallDockerOptions" hidden>
+            <label class="gateway-install-check"><input id="nginxInstallHttps" type="checkbox"> 预留 HTTPS 443 端口（可选，无需提供证书）</label>
+            <p class="gateway-caption">配置目录和证书目录自动挂载。未预留 443 时，今后启用 HTTPS 需调整容器端口映射。</p>
+          </div>
+          <p id="nginxInstallHint" class="gateway-caption">使用系统包管理器安装，保留已有站点；本机安装默认使用 80 端口。</p>
+          <div class="certificate-actions"><button id="nginxInstallStart" class="danger-button compact-action" type="submit">检查安装计划</button><button id="nginxInstallCancel" class="ghost-button compact-action" type="button">收起</button></div>
+          <div id="nginxInstallResult" role="status" aria-live="polite"></div>
+        </form>
         <form id="nginxQuickForm" class="gateway-quick-form">
           <div class="gateway-section-title"><span class="gateway-step">01</span><h3>配置访问入口</h3></div>
           <div class="gateway-form-grid">
