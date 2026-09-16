@@ -78,7 +78,7 @@ for path in "$ENV_FILE" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   fi
 done
 
-for required in agent.py certificates.py nginx_runtime.py env.example systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
+for required in agent.py certificates.py nginx_runtime.py project_guidance.py env.example examples/projects.empty.json systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
   if [[ ! -f "$SOURCE_DIR/$required" ]]; then
     echo "安装包不完整 / Incomplete installation package: $required" >&2
     exit 1
@@ -824,8 +824,8 @@ try:
 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
     raise SystemExit(f"projects config is invalid JSON: {path}: {exc}") from exc
 projects = raw.get("projects") if isinstance(raw, dict) else raw
-if not isinstance(projects, list) or not projects:
-    raise SystemExit(f"projects config must contain a non-empty projects list: {path}")
+if not isinstance(projects, list):
+    raise SystemExit(f"projects config must contain a projects list: {path}")
 if any(not isinstance(project, dict) for project in projects):
     raise SystemExit(f"every projects config entry must be an object: {path}")
 PY
@@ -929,7 +929,7 @@ EOF
   if [[ "$EXISTING_INSTALLATION" != "true" \
     && ! -f "$legacy_projects_file" \
     && ! -f "$data_projects_file" ]]; then
-    validate_projects_json_structure "$SOURCE_DIR/examples/projects.example.json" "release"
+    validate_projects_json_structure "$SOURCE_DIR/examples/projects.empty.json" "release"
   fi
 }
 
@@ -1067,9 +1067,9 @@ migrate_projects_config() {
     fi
     echo "已将 projects.json 原子迁移到数据目录，旧副本继续保留 / Atomically migrated projects.json to DATA_HOME and preserved the legacy copy."
   else
-    atomic_copy_projects_file "$SOURCE_DIR/examples/projects.example.json" "$data_projects_file" "release"
-    if ! projects_files_are_identical "$SOURCE_DIR/examples/projects.example.json" "$data_projects_file" "release"; then
-      echo "数据目录中的 projects.json 与示例源文件字节不一致，拒绝继续 / Published projects.json does not match its example source byte-for-byte." >&2
+    atomic_copy_projects_file "$SOURCE_DIR/examples/projects.empty.json" "$data_projects_file" "release"
+    if ! projects_files_are_identical "$SOURCE_DIR/examples/projects.empty.json" "$data_projects_file" "release"; then
+      echo "数据目录中的 projects.json 与空配置源文件字节不一致，拒绝继续 / Published projects.json does not match its empty configuration source byte-for-byte." >&2
       return 1
     fi
     echo "已在数据目录创建 projects.json / Created projects.json in DATA_HOME."

@@ -32,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from email.message import EmailMessage
@@ -45,6 +46,7 @@ from urllib.request import Request, urlopen
 
 import certificates
 import nginx_runtime
+import project_guidance
 
 try:
     import fcntl
@@ -378,8 +380,8 @@ def _load_projects() -> dict[str, DeployProject]:
         try:
             raw = json.loads(config_payload.decode("utf-8"))
             items = raw.get("projects") if isinstance(raw, dict) else raw
-            if not isinstance(items, list) or not items:
-                raise ValueError("projects must be a non-empty list")
+            if not isinstance(items, list):
+                raise ValueError("projects must be a list")
             projects = {}
             for index, item in enumerate(items):
                 if not isinstance(item, dict):
@@ -816,7 +818,7 @@ def _project_for_webhook(payload: dict[str, Any], query: dict[str, list[str]]) -
         if _project_matches_repo(project, candidates):
             return project
     if len(PROJECTS) == 1:
-        return PROJECTS[DEFAULT_PROJECT_KEY]
+        return PROJECTS.get(DEFAULT_PROJECT_KEY)
     return None
 
 
@@ -1145,11 +1147,9 @@ def _write_projects_config(projects: dict[str, DeployProject], notifications: di
 
 def _replace_projects(projects: dict[str, DeployProject]) -> None:
     global PROJECTS, DEFAULT_PROJECT_KEY
-    if not projects:
-        raise ValueError("at_least_one_project_required")
     with _projects_lock:
         PROJECTS = dict(projects)
-        DEFAULT_PROJECT_KEY = next(iter(PROJECTS))
+        DEFAULT_PROJECT_KEY = next(iter(PROJECTS), "")
 
 
 def _save_and_reload_projects(projects: dict[str, DeployProject]) -> None:
@@ -1182,10 +1182,6 @@ class _ProjectNotFoundError(ValueError):
     pass
 
 
-class _LastProjectError(ValueError):
-    pass
-
-
 class _ProjectRunningError(ValueError):
     pass
 
@@ -1215,8 +1211,6 @@ def _delete_project_transaction(key: str) -> None:
         projects = dict(PROJECTS)
         if key not in projects:
             raise _ProjectNotFoundError(key)
-        if len(projects) <= 1:
-            raise _LastProjectError(key)
         if (STATE_FILE.parent / "certificates" / key).exists():
             raise certificates.CertificateError("请先在证书管理中停用并删除该项目的证书")
         if _nginx_project_has_site(projects[key]):
@@ -1228,6 +1222,8 @@ def _delete_project_transaction(key: str) -> None:
             and (current.get("project_key") or "default") == key
             and current.get("status") == "running"
         ):
+            raise _ProjectRunningError(key)
+        if any(job.get("project_key") == key for job in _queued_jobs_snapshot()):
             raise _ProjectRunningError(key)
         projects.pop(key)
         _save_and_reload_projects(projects)
@@ -1556,7 +1552,9 @@ def _append_history(entry: dict[str, Any]) -> None:
 
 
 def _run_git(args: list[str], project: DeployProject | None = None) -> str:
-    target = project or PROJECTS[DEFAULT_PROJECT_KEY]
+    target = project or PROJECTS.get(DEFAULT_PROJECT_KEY)
+    if target is None:
+        return ""
     try:
         proc = subprocess.run(
             ["git", *args],
@@ -1909,11 +1907,11 @@ def _template_deploy_steps(project: DeployProject) -> list[str]:
         ]
     if template == "java":
         return [
-            "if [ -x ./gradlew ]; then ./gradlew clean build -x test; else mvn clean package -DskipTests; fi",
+            "if [ -f ./gradlew ]; then bash ./gradlew clean build -x test; jar_dir=build/libs; elif [ -f ./mvnw ]; then bash ./mvnw clean package -DskipTests; jar_dir=target; else mvn clean package -DskipTests; jar_dir=target; fi",
             "mkdir -p target/deploy",
-            "jar_file=$(find target -maxdepth 1 -name '*.jar' ! -name '*sources.jar' ! -name '*javadoc.jar' | head -n 1)",
-            'if [ -z "${jar_file:-}" ]; then echo "未找到 target/*.jar"; exit 1; fi',
-            "cp \"$jar_file\" target/deploy/app.jar",
+            "mapfile -t jars < <(find \"$jar_dir\" -maxdepth 1 -type f -name '*.jar' ! -name '*sources.jar' ! -name '*javadoc.jar' ! -name '*-plain.jar')",
+            'if [ "${#jars[@]}" -ne 1 ]; then echo "需要唯一的可执行 JAR，请检查构建产物"; exit 1; fi',
+            'cp "${jars[0]}" target/deploy/app.jar',
             f"systemctl restart {shlex.quote(service)}",
             *health_line,
         ]
@@ -2014,7 +2012,34 @@ def _ssh_public_keys() -> list[str]:
 
 
 def _bootstrap_result(step: str, ok: bool, detail: str, output: str = "") -> dict[str, Any]:
-    return {"step": step, "ok": ok, "detail": detail, "output": output}
+    return {"step": step, "ok": ok, "detail": detail, "output": output,
+            "diagnosis": [] if ok else project_guidance.diagnose(output or detail)}
+
+
+def _project_preview(project: DeployProject) -> dict[str, Any]:
+    if project.template not in {"docker", "python", "go", "java", "node", "static", "custom"}:
+        raise ValueError("请选择支持的项目类型")
+    if not 1 <= project.service_port <= 65535:
+        raise ValueError("业务端口必须在 1 到 65535 之间")
+    if not project.workdir.is_absolute():
+        raise ValueError("服务器目录必须是绝对路径")
+    files = []
+    paths = [("deploy.sh", _project_script_path(project), _deploy_script_text(project))]
+    if project.template in {"python", "go", "java"}:
+        paths.append(("systemd", Path("/etc/systemd/system") / f"{project.service_name}.service",
+                      _systemd_service_text(project)))
+    for kind, path, generated in paths:
+        if path.is_symlink():
+            raise ValueError(f"文件是符号链接，请人工核对：{path}")
+        exists = path.exists()
+        if exists:
+            if not path.is_file() or path.stat().st_size > 128 * 1024:
+                raise ValueError(f"文件不是普通小型配置文件，请人工核对：{path}")
+            content = path.read_text(encoding="utf-8", errors="replace")
+        else:
+            content = generated
+        files.append({"kind": kind, "path": str(path), "exists": exists, "content": content})
+    return {"files": files}
 
 
 def _run_bootstrap_command(command: list[str], *, step: str, timeout: float = 60.0) -> dict[str, Any]:
@@ -2027,6 +2052,12 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True) ->
     results: list[dict[str, Any]] = []
     service_written = False
     script_path = _project_script_path(project)
+    try:
+        project_guidance.validate_repository(project.repo, project.branch)
+        _project_preview(project)
+    except (ValueError, OSError) as exc:
+        return {"ok": False, "project": project.key,
+                "results": [_bootstrap_result("configuration", False, str(exc))]}
 
     if not project.repo:
         return {
@@ -2052,24 +2083,32 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True) ->
             "project": project.key,
             "results": results,
             "ssh_public_keys": _ssh_public_keys(),
-            "message": "服务器无法访问仓库，请先把 SSH 公钥添加到代码平台 Deploy Key / SSH Key。",
+            "message": "服务器无法访问仓库，请查看下方原因和建议。",
         }
 
     try:
         project.workdir.parent.mkdir(parents=True, exist_ok=True)
         if (project.workdir / ".git").is_dir():
-            results.append(_run_bootstrap_command(["git", "-C", str(project.workdir), "fetch", "origin", project.branch], step="git_fetch", timeout=60.0))
-            results.append(_run_bootstrap_command(["git", "-C", str(project.workdir), "checkout", project.branch], step="git_checkout", timeout=30.0))
-            results.append(_run_bootstrap_command(["git", "-C", str(project.workdir), "pull", "--ff-only", "origin", project.branch], step="git_pull", timeout=60.0))
+            for step, args in (("git_fetch", ["fetch", "origin", project.branch]),
+                               ("git_checkout", ["checkout", project.branch]),
+                               ("git_pull", ["pull", "--ff-only", "origin", project.branch])):
+                result = _run_bootstrap_command(["git", "-C", str(project.workdir), *args], step=step, timeout=60.0)
+                results.append(result)
+                if not result["ok"]:
+                    break
         else:
             results.append(_run_bootstrap_command(["git", "clone", "--branch", project.branch, project.repo, str(project.workdir)], step="git_clone", timeout=180.0))
         if not all(item["ok"] for item in results):
             return {"ok": False, "project": project.key, "results": results, "ssh_public_keys": _ssh_public_keys()}
 
         script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(_deploy_script_text(project), encoding="utf-8")
-        os.chmod(script_path, 0o755)
-        results.append(_bootstrap_result("deploy_script", True, f"已写入 {script_path}"))
+        try:
+            with script_path.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(_deploy_script_text(project))
+            os.chmod(script_path, 0o755)
+            results.append(_bootstrap_result("deploy_script", True, f"已写入 {script_path}"))
+        except FileExistsError:
+            results.append(_bootstrap_result("deploy_script", True, f"保留已有文件：{script_path}"))
 
         project.deploy_log_file.parent.mkdir(parents=True, exist_ok=True)
         project.deploy_log_file.touch(exist_ok=True)
@@ -2077,12 +2116,18 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True) ->
 
         if write_service and project.template in {"python", "go", "java"}:
             service_path = Path("/etc/systemd/system") / f"{project.service_name}.service"
-            service_path.write_text(_systemd_service_text(project), encoding="utf-8")
-            os.chmod(service_path, 0o644)
-            service_written = True
-            results.append(_bootstrap_result("systemd_service", True, f"已写入 {service_path}"))
-            results.append(_run_bootstrap_command(["systemctl", "daemon-reload"], step="systemd_daemon_reload", timeout=30.0))
-            results.append(_run_bootstrap_command(["systemctl", "enable", project.service_name], step="systemd_enable", timeout=30.0))
+            try:
+                with service_path.open("x", encoding="utf-8", newline="\n") as stream:
+                    stream.write(_systemd_service_text(project))
+                os.chmod(service_path, 0o644)
+                service_written = True
+                results.append(_bootstrap_result("systemd_service", True, f"已写入 {service_path}"))
+                reload_result = _run_bootstrap_command(["systemctl", "daemon-reload"], step="systemd_daemon_reload", timeout=30.0)
+                results.append(reload_result)
+                if reload_result["ok"]:
+                    results.append(_run_bootstrap_command(["systemctl", "enable", project.service_name], step="systemd_enable", timeout=30.0))
+            except FileExistsError:
+                results.append(_bootstrap_result("systemd_service", True, f"保留已有服务：{service_path}"))
     except Exception as exc:  # noqa: BLE001 - return actionable bootstrap failure to UI
         results.append(_bootstrap_result("bootstrap", False, str(exc)))
 
@@ -2404,6 +2449,9 @@ def _read_process_output(proc: subprocess.Popen[str], stop_event: threading.Even
     try:
         for line in proc.stdout:
             clean_line = line.rstrip()
+            diagnostic_tail = getattr(proc, "_mini_deploy_diagnostic_tail", None)
+            if diagnostic_tail is not None:
+                diagnostic_tail.append(clean_line[-1024:])
             if clean_line:
                 _log(f"deploy: {clean_line}")
                 phase = _phase_from_deploy_line(clean_line)
@@ -3238,10 +3286,13 @@ def _status_payload() -> dict[str, Any]:
             current["duration_seconds"] = round(max(time.time() - float(started_ts), 0), 1)
         if current.get("phase"):
             current["phase_label"] = _phase_label(current.get("phase"))
-    default_project = PROJECTS[DEFAULT_PROJECT_KEY]
+    with _projects_lock:
+        projects = dict(PROJECTS)
+        default_key = DEFAULT_PROJECT_KEY
+    default_project = projects.get(default_key)
     queued_jobs = _queued_jobs_snapshot()
     project_payloads = []
-    for project in PROJECTS.values():
+    for project in projects.values():
         runtime = _project_runtime_status(state, project, queued_jobs)
         project_payloads.append({
             "key": project.key,
@@ -3263,23 +3314,23 @@ def _status_payload() -> dict[str, Any]:
     return {
         "agent": {
             "status": "ok",
-            "branch": default_project.branch,
+            "branch": default_project.branch if default_project else "",
             "host": HOST,
             "port": PORT,
-            "project_dir": str(default_project.workdir),
-            "deploy_script": default_project.script,
-            "project_count": len(PROJECTS),
+            "project_dir": str(default_project.workdir) if default_project else "",
+            "deploy_script": default_project.script if default_project else "",
+            "project_count": len(projects),
             "projects_config_file": str(PROJECTS_CONFIG_FILE),
             "projects_config_exists": PROJECTS_CONFIG_FILE.exists(),
             "ui_auth_configured": bool(UI_PASSWORD_HASH and UI_SESSION_SECRET),
         },
         "git": {
-            "head": _run_git(["rev-parse", "HEAD"], default_project),
-            "short_head": _run_git(["rev-parse", "--short", "HEAD"], default_project),
-            "branch": _run_git(["branch", "--show-current"], default_project),
+            "head": _run_git(["rev-parse", "HEAD"], default_project) if default_project else "",
+            "short_head": _run_git(["rev-parse", "--short", "HEAD"], default_project) if default_project else "",
+            "branch": _run_git(["branch", "--show-current"], default_project) if default_project else "",
         },
         "projects": project_payloads,
-        "default_project": DEFAULT_PROJECT_KEY,
+        "default_project": default_key,
         "system": system_payload,
         "alerts": alerts,
         "events": events,
@@ -3565,6 +3616,8 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
     proc: subprocess.Popen[str] | None = None
     output_stop = threading.Event()
     output_reader: threading.Thread | None = None
+    diagnostic_tail: deque[str] = deque(maxlen=64)
+    diagnostic_error = ""
 
     try:
         env = _deploy_subprocess_environment(project, action, script_path, job)
@@ -3588,6 +3641,7 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
             stderr=subprocess.STDOUT,
             **popen_kwargs,
         )
+        proc._mini_deploy_diagnostic_tail = diagnostic_tail
         with _deploy_process_lock:
             _deploy_process = proc
             _cancel_requested = None
@@ -3641,6 +3695,7 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
         _log(f"deploy finished project={project.key} action={action} code={exit_code} after={env['DEPLOY_AFTER']}")
     except Exception as exc:  # noqa: BLE001 - top-level worker guard
         exit_code = 1
+        diagnostic_error = str(exc)
         if proc is not None and proc.poll() is None:
             _terminate_process(proc)
             try:
@@ -3650,9 +3705,9 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
                 proc.wait(timeout=10)
         _log(f"deploy failed: {exc}")
     finally:
-        output_stop.set()
         if output_reader is not None:
             output_reader.join(timeout=2)
+        output_stop.set()
         finished_ts = time.time()
         current_snapshot = dict(current)
         with _state_lock:
@@ -3669,6 +3724,10 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
             "duration_seconds": round(finished_ts - started_ts, 1),
             "exit_code": exit_code,
         }
+        if entry["status"] == "failed":
+            entry["diagnosis"] = project_guidance.diagnose(
+                "\n".join([*list(diagnostic_tail), diagnostic_error]), exit_code=exit_code,
+            )
         _append_history(entry)
         _notify_deploy_finished(entry)
         _release_deploy_worker_lifecycle()
@@ -3709,6 +3768,7 @@ def _short_sha(value: Any) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "motion.js": "application/javascript; charset=utf-8",
     "nginx.js": "application/javascript; charset=utf-8",
     "certificates.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
@@ -4055,6 +4115,10 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._handle_projects_config_bootstrap()
             return
+        if path in {"/projects-config/inspect", "/projects-config/preview"}:
+            if self._require_auth_json():
+                self._handle_project_guidance(path.rsplit("/", 1)[-1])
+            return
         if path == "/projects-config/nginx":
             if self._require_auth_json():
                 self._handle_projects_config_nginx()
@@ -4193,6 +4257,26 @@ class Handler(BaseHTTPRequestHandler):
         _audit_event("projects_config_save", actor=self.client_address[0], target=project.key, success=True, detail={"original_key": original_key})
         self._write_json(200, _projects_config_payload(include_secret=True))
 
+    def _handle_project_guidance(self, action: str) -> None:
+        try:
+            data = _read_json_body(self, max_bytes=128 * 1024)
+            raw = data.get("project")
+            if not isinstance(raw, dict):
+                raise ValueError("请填写项目配置")
+            if action == "inspect":
+                environment = {key: value for key, value in os.environ.items()
+                               if key not in _DEPLOY_CONTROL_SECRET_ENV_NAMES}
+                result = project_guidance.inspect_repository(
+                    str(raw.get("repo") or "").strip(), str(raw.get("branch") or "main").strip(), env=environment,
+                )
+            else:
+                result = _project_preview(_project_from_form(raw))
+        except (ValueError, OSError) as exc:
+            self._write_json(400, {"error": "project_guidance_failed", "detail": str(exc)})
+            return
+        _audit_event(f"project_{action}", actor=self.client_address[0], success=result.get("ok", True))
+        self._write_json(200, result)
+
     def _handle_projects_config_bootstrap(self) -> None:
         try:
             data = _read_json_body(self, max_bytes=128 * 1024)
@@ -4203,6 +4287,12 @@ class Handler(BaseHTTPRequestHandler):
         raw_project = data.get("project", data)
         if not isinstance(raw_project, dict):
             self._write_json(400, {"error": "invalid_project"})
+            return
+        try:
+            project_guidance.validate_repository(str(raw_project.get("repo") or ""), str(raw_project.get("branch") or "main"))
+            _project_preview(_project_from_form(raw_project))
+        except (ValueError, OSError) as exc:
+            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
             return
         original_key_raw = data.get("original_key") or raw_project.get("original_key") or ""
         original_key = _safe_project_key(str(original_key_raw)) if original_key_raw else ""
@@ -4293,9 +4383,6 @@ class Handler(BaseHTTPRequestHandler):
             _delete_project_transaction(key)
         except _ProjectNotFoundError:
             self._write_json(404, {"error": "project_not_found"})
-            return
-        except _LastProjectError:
-            self._write_json(400, {"error": "at_least_one_project_required"})
             return
         except _ProjectRunningError:
             self._write_json(409, {"error": "project_is_running"})
@@ -4789,7 +4876,7 @@ def _script_is_executable(path: Path) -> bool:
 def _validate_projects_runtime_config() -> list[DeployProject]:
     if _RUNTIME_CONFIG_ERROR is not None:
         raise SystemExit(str(_RUNTIME_CONFIG_ERROR))
-    if not PROJECTS or not DEFAULT_PROJECT_KEY or DEFAULT_PROJECT_KEY not in PROJECTS:
+    if PROJECTS and (not DEFAULT_PROJECT_KEY or DEFAULT_PROJECT_KEY not in PROJECTS):
         raise SystemExit("projects config did not load a valid default project")
 
     enabled_projects = [project for project in PROJECTS.values() if project.enabled]

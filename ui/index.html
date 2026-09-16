@@ -210,6 +210,85 @@
       <div id="projectOverview" class="project-list skeleton-block"></div>
     </section>
 
+    <section class="panel-grid deploy-main-grid">
+      <article class="panel wide">
+        <div class="panel-head">
+          <div>
+            <h2>最近部署</h2>
+            <p>按时间从新到旧，横向滑动查看</p>
+          </div>
+          <span id="lastBadge" class="badge">-</span>
+        </div>
+        <div id="deployStats" class="deploy-stats skeleton-block"></div>
+      </article>
+      <details class="panel runtime-details"><summary>运行详情</summary>
+        <dl class="detail-list">
+          <div><dt>目标分支</dt><dd id="targetBranch">-</dd></div>
+          <div><dt>项目目录</dt><dd id="projectDir">-</dd></div>
+          <div><dt>部署脚本</dt><dd id="deployScript">-</dd></div>
+          <div><dt>最近 WebHook</dt><dd id="lastWebhook">-</dd></div>
+        </dl>
+      </details>
+    </section>
+
+    <details class="panel deploy-diagnostics">
+      <summary>部署体检与锁状态</summary>
+
+      <div class="ops-panel">
+        <div class="panel-head">
+          <div>
+            <h2>部署体检</h2>
+            <p id="preflightHint">部署前检查 Git、脚本、Docker、磁盘和日志目录</p>
+          </div>
+          <button id="preflightBtn" class="ghost-button compact-action" type="button">运行体检</button>
+        </div>
+        <div id="deployLockStatus" class="lock-status">锁状态加载中...</div>
+        <div id="preflightResult" class="preflight-result">点击运行体检后显示结果和修复命令。</div>
+      </div>
+    </details>
+
+    <section class="panel logs-panel">
+      <div class="panel-head">
+        <div>
+          <h2>部署日志</h2>
+          <p id="logHint">部署脚本原始输出</p>
+        </div>
+      </div>
+      <div class="log-actions">
+          <button id="deployLogBtn" class="log-tab active" type="button">部署日志</button>
+          <button id="agentLogBtn" class="log-tab" type="button">Agent 日志</button>
+          <label class="log-control">预览
+            <select id="logLineSelect">
+              <option value="100">100 行</option>
+              <option value="200" selected>200 行</option>
+              <option value="500">500 行</option>
+              <option value="1000">1000 行</option>
+              <option value="2000">2000 行</option>
+              <option value="5000">5000 行</option>
+              <option value="custom">自定义</option>
+            </select>
+            <input id="logLineCustomInput" class="log-line-input" type="number" min="1" step="1" value="200" inputmode="numeric" aria-label="自定义预览行数" hidden>
+          </label>
+          <label class="log-control">下载
+            <select id="logDownloadSelect">
+              <option value="current">当前行数</option>
+              <option value="500">500 行</option>
+              <option value="1000">1000 行</option>
+              <option value="5000">5000 行</option>
+              <option value="custom">自定义</option>
+              <option value="all">全部</option>
+            </select>
+            <input id="logDownloadCustomInput" class="log-line-input" type="number" min="1" step="1" value="5000" inputmode="numeric" aria-label="自定义下载行数" hidden>
+          </label>
+          <button id="downloadLogBtn" class="log-tab log-download" type="button">下载日志</button>
+          <span id="logCount" class="badge neutral">0 行</span>
+      </div>
+      <pre id="logs" class="logs" aria-live="polite">加载中...</pre>
+    </section>
+
+    </div>
+
+    <div id="notifyView" class="dashboard-view">
     <section class="panel notification-panel">
       <div class="panel-head">
         <div>
@@ -268,8 +347,8 @@
       </div>
       <div id="notificationResult" class="notification-result">保存后，部署成功或失败都会按启用渠道推送。</div>
     </section>
-
-    <section class="panel-grid ops-panel-grid">
+    </div>
+    <div id="eventsView" class="dashboard-view">
       <article class="panel ops-panel">
         <div class="panel-head">
           <div>
@@ -281,88 +360,11 @@
             <button id="clearAlertsBtn" class="ghost-button compact-action" type="button" disabled>清除当前</button>
           </div>
         </div>
+        <div class="events-layout">
         <div id="alertList" class="alert-list skeleton-block"></div>
         <div id="eventTimeline" class="event-timeline skeleton-block"></div>
+        </div>
       </article>
-      <article class="panel ops-panel">
-        <div class="panel-head">
-          <div>
-            <h2>部署体检</h2>
-            <p id="preflightHint">部署前检查 Git、脚本、Docker、磁盘和日志目录</p>
-          </div>
-          <button id="preflightBtn" class="ghost-button compact-action" type="button">运行体检</button>
-        </div>
-        <div id="deployLockStatus" class="lock-status">锁状态加载中...</div>
-        <div id="preflightResult" class="preflight-result">点击运行体检后显示结果和修复命令。</div>
-      </article>
-    </section>
-
-    <section class="panel-grid">
-      <article class="panel wide">
-        <div class="panel-head">
-          <div>
-            <h2>最近部署</h2>
-            <p>按时间从新到旧，横向滑动查看</p>
-          </div>
-          <span id="lastBadge" class="badge">-</span>
-        </div>
-        <div id="deployStats" class="deploy-stats skeleton-block"></div>
-      </article>
-      <article class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>运行详情</h2>
-            <p>当前任务与配置</p>
-          </div>
-        </div>
-        <dl class="detail-list">
-          <div><dt>目标分支</dt><dd id="targetBranch">-</dd></div>
-          <div><dt>项目目录</dt><dd id="projectDir">-</dd></div>
-          <div><dt>部署脚本</dt><dd id="deployScript">-</dd></div>
-          <div><dt>最近 WebHook</dt><dd id="lastWebhook">-</dd></div>
-        </dl>
-      </article>
-    </section>
-
-    <section class="panel logs-panel">
-      <div class="panel-head">
-        <div>
-          <h2>部署日志</h2>
-          <p id="logHint">部署脚本原始输出</p>
-        </div>
-        <div class="log-actions">
-          <button id="deployLogBtn" class="log-tab active" type="button">部署日志</button>
-          <button id="agentLogBtn" class="log-tab" type="button">Agent 日志</button>
-          <label class="log-control">预览
-            <select id="logLineSelect">
-              <option value="100">100 行</option>
-              <option value="200" selected>200 行</option>
-              <option value="500">500 行</option>
-              <option value="1000">1000 行</option>
-              <option value="2000">2000 行</option>
-              <option value="5000">5000 行</option>
-              <option value="custom">自定义</option>
-            </select>
-            <input id="logLineCustomInput" class="log-line-input" type="number" min="1" step="1" value="200" inputmode="numeric" aria-label="自定义预览行数" hidden>
-          </label>
-          <label class="log-control">下载
-            <select id="logDownloadSelect">
-              <option value="current">当前行数</option>
-              <option value="500">500 行</option>
-              <option value="1000">1000 行</option>
-              <option value="5000">5000 行</option>
-              <option value="custom">自定义</option>
-              <option value="all">全部</option>
-            </select>
-            <input id="logDownloadCustomInput" class="log-line-input" type="number" min="1" step="1" value="5000" inputmode="numeric" aria-label="自定义下载行数" hidden>
-          </label>
-          <button id="downloadLogBtn" class="log-tab log-download" type="button">下载日志</button>
-          <span id="logCount" class="badge neutral">0 行</span>
-        </div>
-      </div>
-      <pre id="logs" class="logs" aria-live="polite">加载中...</pre>
-    </section>
-
     </div>
 
     <div id="serverView" class="dashboard-view">
@@ -421,11 +423,6 @@
               <button class="trend-range" type="button" data-trend-range="6h">6h</button>
               <button class="trend-range" type="button" data-trend-range="7d">7d</button>
               <button class="trend-range" type="button" data-trend-range="all">全部</button>
-            </div>
-            <div class="trend-legend" aria-label="资源曲线图例">
-              <span class="trend-legend-item cpu">CPU</span>
-              <span class="trend-legend-item memory">内存</span>
-              <span class="trend-legend-item network">网络</span>
             </div>
           </div>
         </div>
@@ -525,6 +522,7 @@
         <form id="projectForm" class="project-form">
           <input id="projectOriginalKey" type="hidden">
           <div class="form-grid">
+            <h3 class="wide-field onboarding-heading">1. 连接仓库</h3>
             <label>项目标识<input id="projectKeyInput" name="key" placeholder="example-node" required></label>
             <label>显示名称<input id="projectNameInput" name="name" placeholder="Example Node"></label>
             <label>项目类型
@@ -540,6 +538,12 @@
             </label>
             <label class="wide-field">仓库地址<input id="projectRepoInput" name="repo" placeholder="git@gitee.com:org/repo.git"></label>
             <label>部署分支<input id="projectBranchInput" name="branch" placeholder="master"></label>
+            <div class="wide-field onboarding-tools">
+              <button id="inspectProjectBtn" class="ghost-button compact-action" type="button">识别仓库</button>
+              <span id="projectInspectStatus" role="status"></span>
+            </div>
+            <div id="projectDetectionResult" class="wide-field" hidden></div>
+            <h3 class="wide-field onboarding-heading">2. 确认部署配置</h3>
             <label>超时时间<input id="projectTimeoutInput" name="timeout_seconds" type="number" min="30" step="30" placeholder="900"></label>
             <label class="wide-field">服务器目录<input id="projectWorkdirInput" name="workdir" placeholder="/root/example-node"></label>
             <label class="wide-field">部署脚本<input id="projectScriptInput" name="script" placeholder="/root/example-node/deploy/deploy.sh"></label>
@@ -548,7 +552,7 @@
             <label class="wide-field">启动命令<input id="projectStartCommandInput" name="start_command" placeholder="留空则按项目类型生成初版"></label>
             <label class="wide-field">业务域名<input id="projectAppDomainInput" name="app_domain" placeholder="api.example.com，可留空"></label>
             <label class="wide-field">回滚脚本<input id="projectRollbackInput" name="rollback_script" placeholder="可留空"></label>
-            <label class="wide-field">健康检查<input id="projectHealthInput" name="health_url" placeholder="https://example.com/health"></label>
+            <label class="wide-field">健康检查<input id="projectHealthInput" name="health_url" placeholder="http://127.0.0.1:8001/health，可留空"></label>
             <label class="wide-field">日志文件<input id="projectLogInput" name="deploy_log_file" placeholder="/var/log/example-node-deploy.log"></label>
             <label class="wide-field">Webhook Token<input id="projectSecretInput" name="webhook_secret" placeholder="保存时自动生成"></label>
           </div>
@@ -557,6 +561,14 @@
             <label><input id="projectManualInput" type="checkbox"> 允许手动部署/回滚</label>
             <label><input id="projectAppHttpsInput" type="checkbox"> 业务域名申请 HTTPS</label>
           </div>
+          <section class="onboarding-preview" aria-labelledby="projectPreviewHeading">
+            <div class="command-head">
+              <h3 id="projectPreviewHeading" class="onboarding-heading">3. 预览并初始化</h3>
+              <button id="previewProjectBtn" class="ghost-button compact-action" type="button">预览部署文件</button>
+            </div>
+            <div id="projectFilePreview" aria-live="polite"></div>
+            <label class="onboarding-confirm"><input id="projectConfigConfirmed" type="checkbox" disabled> 已核对启动命令、端口和部署文件</label>
+          </section>
           <div class="webhook-box">
             <div>
               <div class="webhook-label">WebHook POST 地址</div>
@@ -575,7 +587,6 @@
             <div class="command-head">
               <div>
                 <div class="webhook-label">接入体检</div>
-                <p>保存项目后点击体检，检查服务器目录、仓库、脚本、运行环境和健康检查。</p>
               </div>
               <button id="bootstrapProjectBtn" class="danger-button compact-action" type="button">自动初始化</button>
               <button id="configureNginxBtn" class="ghost-button compact-action" type="button">配置业务域名</button>
@@ -583,16 +594,16 @@
             </div>
             <div id="projectDoctorResult" class="doctor-result">保存项目后可以检查。</div>
           </div>
-          <div class="command-box">
+          <details class="command-box">
+            <summary>手动接入指令（可选）</summary>
             <div class="command-head">
               <div>
                 <div class="webhook-label">服务器执行指令</div>
-                <p>复制到目标服务器执行。执行完再配置 WebHook；脚本中的 TODO 必须替换成真实构建/重启命令。</p>
               </div>
               <button id="copyProjectCommandsBtn" class="ghost-button compact-action" type="button">复制指令</button>
             </div>
             <pre id="projectSetupCommands" class="command-output">填写项目后生成。</pre>
-          </div>
+          </details>
           <div class="command-box">
             <div class="command-head">
               <div>
@@ -630,6 +641,7 @@
     </div>
   </main>
 
+  <script src="ui/motion.js"></script>
   <script src="ui/app.js"></script>
   <script src="ui/certificates.js"></script>
   <script src="ui/nginx.js"></script>

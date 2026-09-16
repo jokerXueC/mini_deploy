@@ -129,13 +129,16 @@ Use HTTPS for public access when DNS is ready.
 In the web panel:
 
 1. Add a project.
-2. Fill repository URL, branch, server directory, deploy script path, and health URL.
-3. Click “Auto Initialize” to prepare the server directory, starter `deploy.sh`, and optional systemd service.
-4. Review the generated `deploy.sh` and service file if one was created.
-5. Click “Check Project”.
+2. Fill the project key, repository URL and branch. Use “识别仓库” to detect common project templates, then confirm the port and startup command.
+3. Use “预览部署文件” to review the script and optional systemd service, and check the confirmation box.
+4. Click “Auto Initialize” to clone the code and create missing files. Existing scripts and service files are preserved; initialization does not start the application.
+5. Click “Check Project”, install missing business runtimes, then enable the project and try a manual deployment. Failure details include suggested troubleshooting steps.
 6. Configure the URL in your Git platform, then put the project Token in Gitee's
    password/Token field, GitLab's Secret token field, or GitHub's Secret field.
 7. Enable the project.
+
+New installations start with no projects. The files under `examples/` are reference
+templates only; they are not imported into the active project configuration.
 
 After that, every `git push` to the configured branch can trigger deployment.
 

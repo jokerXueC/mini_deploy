@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mini_deploy Login</title>
+  <script>
+    (() => {
+      let stored = '';
+      try { stored = localStorage.getItem('mini_deploy-theme') || ''; } catch (_) {}
+      const hour = new Date().getHours();
+      document.documentElement.dataset.theme = stored === 'light' || stored === 'dark'
+        ? stored : hour >= 7 && hour < 19 ? 'light' : 'dark';
+    })();
+  </script>
   <link rel="stylesheet" href="ui/style.css">
 </head>
 <body class="login-body">

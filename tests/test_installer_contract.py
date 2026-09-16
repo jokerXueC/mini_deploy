@@ -111,7 +111,8 @@ def test_existing_install_never_replaces_missing_projects_with_example() -> None
     assert "refusing to create an example" in plan
     assert "refusing to silently replace it with an example" in plan
     assert '"$EXISTING_INSTALLATION" != "true"' in plan
-    assert 'validate_projects_json_structure "$SOURCE_DIR/examples/projects.example.json" "release"' in plan
+    assert 'validate_projects_json_structure "$SOURCE_DIR/examples/projects.empty.json" "release"' in plan
+    assert 'atomic_copy_projects_file "$SOURCE_DIR/examples/projects.empty.json" "$data_projects_file" "release"' in INSTALLER
 
 
 def test_project_config_structure_is_checked_before_backup_and_after_copy() -> None:
@@ -122,7 +123,7 @@ def test_project_config_structure_is_checked_before_backup_and_after_copy() -> N
     migration = INSTALLER.index("\nmigrate_projects_config\n", backup)
 
     assert "json.loads(payload.decode" in validator
-    assert "not isinstance(projects, list) or not projects" in validator
+    assert "not isinstance(projects, list)" in validator
     assert "any(not isinstance(project, dict)" in validator
     assert preflight < backup < migration
     assert 'validate_projects_json_structure "$data_projects_file" "private"' in INSTALLER

@@ -52,11 +52,14 @@ python3 -m pip install -r requirements-dev.txt
 ```bash
 python3 -m py_compile agent.py certificates.py nginx_runtime.py scripts/verify_backup.py
 python3 -m pytest
-python3 -m ruff check agent.py certificates.py nginx_runtime.py scripts/verify_backup.py tests
+python3 -m ruff check agent.py certificates.py nginx_runtime.py project_guidance.py scripts/verify_backup.py tests
 node --check ui/app.js
+node --check ui/motion.js
 node --check ui/certificates.js
 node --check ui/nginx.js
 node --test tests/ui_navigation.test.cjs
+node --test tests/ui_motion.test.cjs
+node --test tests/ui_onboarding.test.cjs
 bash -n install.sh
 for file in scripts/*.sh; do bash -n "$file"; done
 git diff --check

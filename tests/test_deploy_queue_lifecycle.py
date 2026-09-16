@@ -117,6 +117,20 @@ def test_successful_deploy_records_history_and_cleans_runtime_state(
     assert released_locks == [91]
 
 
+def test_failure_advice_persists_with_its_deployment(monkeypatch, deploy_runtime):
+    project, _ = deploy_runtime
+    process = FakeProcess(returncode=1)
+    monkeypatch.setattr(agent.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(agent, "_read_process_output", lambda proc, stop: proc._mini_deploy_diagnostic_tail.append("Address already in use"))
+    agent._run_deploy({"project_key": project.key, "source": "manual", "after": "failed-commit"})
+    assert agent._state["last_deploy"]["diagnosis"][0]["code"] == "port"
+    assert agent._state["history"][0]["after"] == "failed-commit"
+    process.returncode = 0
+    agent._run_deploy({"project_key": project.key, "source": "manual", "after": "next-commit"})
+    assert "diagnosis" not in agent._state["last_deploy"]
+    assert not agent._running_lock.locked()
+
+
 def test_canceled_deploy_returns_130_and_terminates_process(
     monkeypatch: pytest.MonkeyPatch,
     deploy_runtime: tuple[agent.DeployProject, list[int | None]],

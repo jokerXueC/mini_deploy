@@ -256,7 +256,7 @@ def test_validate_config_cli_accepts_valid_config_without_ui_credentials(tmp_pat
     ("payload", "expected_error"),
     [
         ("{not-json", "projects config is invalid"),
-        ('{"projects": []}', "projects must be a non-empty list"),
+        ('{"projects": "invalid"}', "projects must be a list"),
         (
             json.dumps({
                 "projects": [{
@@ -473,8 +473,8 @@ def test_load_projects_parses_supported_aliases(monkeypatch: pytest.MonkeyPatch,
     assert project.service_port == 8081
 
 
-@pytest.mark.parametrize("content", ["{not-json", '{"projects": []}', '{"projects": [null]}'])
-def test_load_projects_fails_closed_for_invalid_or_empty_existing_config(
+@pytest.mark.parametrize("content", ["{not-json", '{"projects": [null]}'])
+def test_load_projects_fails_closed_for_invalid_existing_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     content: str,
@@ -486,6 +486,14 @@ def test_load_projects_fails_closed_for_invalid_or_empty_existing_config(
 
     with pytest.raises(RuntimeError, match="projects config is invalid"):
         agent._load_projects()
+
+
+def test_load_projects_accepts_empty_existing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_file = tmp_path / "projects.json"
+    config_file.write_text('{"projects": []}', encoding="utf-8")
+    monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", config_file)
+    monkeypatch.setattr(agent, "LEGACY_PROJECTS_CONFIG_FILE", None)
+    assert agent._load_projects() == {}
 
 
 def test_project_config_does_not_fall_back_to_global_webhook_secret(monkeypatch: pytest.MonkeyPatch) -> None:

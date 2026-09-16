@@ -8,6 +8,7 @@ let csrfToken = '';
 let serverRefreshSeconds = 30;
 let serverRefreshTimer = null;
 let eventsRefreshTimer = null;
+let systemStatusRequestId = 0;
 let currentContainerLogName = '';
 let currentContainerLogLineLimit = 200;
 let containerLogKeywordTimer = null;
@@ -583,17 +584,17 @@ function renderProjectOverview(projects = [], agent = {}, lock = {}, state = {})
   const list = $('projectOverview');
   if (modeBadge) {
     modeBadge.className = `badge ${multi ? 'success' : 'neutral'}`;
-    modeBadge.textContent = multi ? `多项目模式 · ${count} 个` : '单项目模式';
+    modeBadge.textContent = count ? (multi ? `多项目模式 · ${count} 个` : '单项目模式') : '暂无项目';
   }
   if (modeHint) {
     modeHint.textContent = multi
       ? `已接入 ${count} 个项目，Webhook 会按仓库和分支匹配到对应部署脚本。`
-      : '当前只加载默认项目；点击“初始化配置”后可直接在网页添加和管理多个仓库。';
+      : projects.length ? '已接入 1 个项目。' : '尚未接入项目。';
   }
   if (!list) return;
   list.classList.remove('skeleton-block');
   if (!projects.length) {
-    list.innerHTML = '<div class="project-empty">暂无项目配置。点击“初始化配置”，再通过“添加仓库”录入项目。</div>';
+    list.innerHTML = '<div class="project-empty">暂无项目</div>';
     return;
   }
   list.innerHTML = projects.map(project => {
@@ -654,7 +655,7 @@ function updateProjectActionHint(activeProject, projects = []) {
   if (!activeProject) {
     hint.textContent = projects.length > 1
       ? '选择具体项目后可重新部署或回滚；全部项目用于总览。'
-      : '项目配置加载中。';
+      : '尚未接入项目。';
     return;
   }
   if (!activeProject.enabled) {
@@ -871,38 +872,40 @@ function measuredTrackWidth(el) {
   return Math.max(ownWidth, parentWidth);
 }
 
-function resourceBarCount(el) {
-  const width = measuredTrackWidth(el);
-  const barWidth = 4.75;
-  const gap = 2;
-  if (!Number.isFinite(width) || width < 48) {
-    return Number(el.dataset.barCount) || (el.classList.contains('meter-track') ? 30 : 60);
-  }
-  return Math.max(1, Math.floor((width + gap) / (barWidth + gap)));
+function resourceBarCount() {
+  return 60;
 }
 
 function updateResourceTrack(el, value) {
   if (!el) return;
+  const count = resourceBarCount();
   el.dataset.resourceValue = value ?? '';
-  const count = resourceBarCount(el);
-  el.dataset.barCount = String(count);
   if (el.children.length !== count) {
+    DashboardMotion.cancel(el);
     el.innerHTML = resourceBars(null, count);
   }
-  const n = Number(value);
-  const percent = Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
-  const active = Math.round((percent / 100) * count);
-  const level = resourceLevel(percent);
-  window.requestAnimationFrame(() => {
-    Array.from(el.children).forEach((bar, index) => {
-      bar.className = `resource-bar ${index < active ? `active ${level}` : 'empty'}`;
-      bar.style.setProperty('--bar-index', index);
+  const n = value == null || value === '' ? NaN : Number(value);
+  const valid = Number.isFinite(n);
+  if (!valid) DashboardMotion.cancel(el);
+  const percent = valid ? Math.max(0, Math.min(100, n)) : 0;
+  el.dataset.level = resourceLevel(percent);
+  el.setAttribute('role', 'meter');
+  el.setAttribute('aria-valuemin', '0');
+  el.setAttribute('aria-valuemax', '100');
+  el.setAttribute('aria-label', el.id || el.closest('.meter-line')?.firstElementChild?.textContent || '资源占用');
+  if (valid) el.setAttribute('aria-valuenow', String(percent));
+  else el.removeAttribute('aria-valuenow');
+  el.setAttribute('aria-valuetext', valid ? formatPercent(percent) : '暂无数据');
+  const bars = Array.from(el.children);
+  DashboardMotion.value(el, percent, current => {
+    el.dataset.displayValue = String(current);
+    bars.forEach((bar, index) => {
+      const fill = Math.max(0, Math.min(1, current / 100 * count - index));
+      bar.style.setProperty('--fill', fill.toFixed(3));
     });
-    window.requestAnimationFrame(() => {
-      const nextCount = resourceBarCount(el);
-      if (nextCount !== count) updateResourceTrack(el, value);
-    });
-  });
+    const label = el.closest('.meter-line')?.querySelector('strong');
+    if (label) label.textContent = valid ? formatPercent(current) : '-';
+  }, {initial: 0});
 }
 
 function setResourceBar(id, value) {
@@ -912,31 +915,17 @@ function setResourceBar(id, value) {
 function animateNumberText(id, value, formatter) {
   const el = $(id);
   if (!el) return;
-  const next = Number(value);
+  const next = value == null || value === '' ? NaN : Number(value);
   if (!Number.isFinite(next)) {
+    DashboardMotion.cancel(el);
     el.dataset.value = '';
-    el.textContent = formatter(value);
+    el.textContent = '-';
     return;
   }
-  const previous = Number(el.dataset.value);
-  const start = Number.isFinite(previous) ? previous : 0;
   el.dataset.value = String(next);
-  if (Math.abs(start - next) < 0.05) {
-    el.textContent = formatter(next);
-    return;
-  }
-  const startedAt = performance.now();
-  const duration = 520;
-  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
-  const step = (now) => {
-    if (el.dataset.value !== String(next)) return;
-    const progress = Math.min(1, (now - startedAt) / duration);
-    const current = start + (next - start) * easeOut(progress);
+  DashboardMotion.value(el, next, current => {
     el.textContent = formatter(current);
-    if (progress < 1) window.requestAnimationFrame(step);
-    else el.textContent = formatter(next);
-  };
-  window.requestAnimationFrame(step);
+  }, {initial: 0});
 }
 
 function setView(view) {
@@ -965,28 +954,6 @@ function setView(view) {
   else refresh();
 }
 
-function setupSecondaryViews() {
-  const deploy = $('deployView');
-  if (!deploy || $('notifyView') || $('eventsView')) return;
-
-  const notification = deploy.querySelector('.notification-panel');
-  const opsGrid = deploy.querySelector('.ops-panel-grid');
-  const eventPanel = opsGrid?.querySelector('.ops-panel');
-  if (!notification || !eventPanel) return;
-
-  const notifyView = document.createElement('div');
-  notifyView.id = 'notifyView';
-  notifyView.className = 'dashboard-view';
-  deploy.insertAdjacentElement('afterend', notifyView);
-  notifyView.appendChild(notification);
-
-  const eventsView = document.createElement('div');
-  eventsView.id = 'eventsView';
-  eventsView.className = 'dashboard-view';
-  notifyView.insertAdjacentElement('afterend', eventsView);
-  eventPanel.classList.add('standalone-panel');
-  eventsView.appendChild(eventPanel);
-}
 
 function renderDeployCard(item, index, historyItems, refreshSeconds, closedDetailKeys) {
   const summary = successSummary(historyItems);
@@ -1060,7 +1027,7 @@ function renderDeployCard(item, index, historyItems, refreshSeconds, closedDetai
       </div>
       <div class="stat-history">
         <div class="history-head">
-          <span>History (${Math.max(60, historyItems.length)}pts)</span>
+          <span>History (${historyItems.filter(Boolean).length}pts)</span>
           <span class="history-next">Next update in ${refreshSeconds}s</span>
         </div>
         <div class="history-bars">
@@ -1299,17 +1266,18 @@ function deployStepsForTemplate(template, project) {
       ...healthLine,
     ],
     java: [
-      'if [ -x ./gradlew ]; then ./gradlew clean build -x test; else mvn clean package -DskipTests; fi',
+      'if [ -f ./gradlew ]; then bash ./gradlew clean build -x test; jar_dir=build/libs; elif [ -f ./mvnw ]; then bash ./mvnw clean package -DskipTests; jar_dir=target; else mvn clean package -DskipTests; jar_dir=target; fi',
       'mkdir -p target/deploy',
-      'jar_file=$(find target -maxdepth 1 -name \'*.jar\' ! -name \'*sources.jar\' ! -name \'*javadoc.jar\' | head -n 1)',
-      'if [ -z "${jar_file:-}" ]; then echo "未找到 target/*.jar"; exit 1; fi',
-      'cp "$jar_file" target/deploy/app.jar',
+      'mapfile -t jars < <(find "$jar_dir" -maxdepth 1 -type f -name \'*.jar\' ! -name \'*sources.jar\' ! -name \'*javadoc.jar\' ! -name \'*-plain.jar\')',
+      'if [ "${#jars[@]}" -ne 1 ]; then echo "需要唯一的可执行 JAR，请检查构建产物"; exit 1; fi',
+      'cp "${jars[0]}" target/deploy/app.jar',
       `# 确认 /etc/systemd/system/${service}.service 已按你的 Java 项目配置好`,
       `systemctl restart ${shellQuote(service)}`,
       ...healthLine,
     ],
     go: [
-      'go build -o app ./cmd/server',
+      'mkdir -p bin',
+      'if [ -d cmd/server ]; then go build -o bin/app ./cmd/server; else go build -o bin/app .; fi',
       `# 确认 /etc/systemd/system/${service}.service 已按你的 Go 项目配置好`,
       `systemctl restart ${shellQuote(service)}`,
       ...healthLine,
@@ -1336,34 +1304,125 @@ function applyTemplateDefaults(force = false) {
   const workdir = $('projectWorkdirInput');
   const script = $('projectScriptInput');
   const log = $('projectLogInput');
-  const health = $('projectHealthInput');
   const serviceName = $('projectServiceNameInput');
   const servicePort = $('projectServicePortInput');
-  const startCommand = $('projectStartCommandInput');
-  const appDomain = $('projectAppDomainInput');
-  if (force || !workdir.value || workdir.value === '/root/' || workdir.value.includes('/root/example')) {
-    workdir.value = `/srv/${key}`;
+  const defaultValue = (field, value) => {
+    if (field && (force || !field.value || field.value === field.dataset.autoValue)) {
+      field.value = value;
+      field.dataset.autoValue = value;
+    }
+  };
+  defaultValue(workdir, `/srv/${key}`);
+  defaultValue(script, `${workdir.value}/deploy/deploy.sh`);
+  defaultValue(log, `/var/log/mini_deploy/${key}-deploy.log`);
+  defaultValue(serviceName, key);
+  defaultValue(servicePort, template === 'java' ? '8003' : template === 'go' ? '8002' : '8001');
+}
+
+let projectGuidanceVersion = 0;
+let projectPreviewSignature = '';
+
+function invalidateProjectPreview() {
+  projectPreviewSignature = '';
+  $('projectConfigConfirmed').checked = false;
+  $('projectConfigConfirmed').disabled = true;
+  $('projectFilePreview').replaceChildren();
+}
+
+function renderFailureAdvice(items = []) {
+  if (!items.length) return '';
+  return `<div class="failure-advice"><strong>可能原因与排查建议</strong>${items.map(item =>
+    `<p><b>${escapeHtml(item.title || '')}</b><br>${escapeHtml(item.advice || '')}</p>`).join('')}</div>`;
+}
+
+async function inspectCurrentProject() {
+  const project = collectProjectForm();
+  if (!project.repo.trim()) {
+    setProjectFormError('请先填写仓库地址和部署分支。');
+    return;
   }
-  if (force || !script.value || script.value.includes('/root/example')) {
-    script.value = `/srv/${key}/deploy/deploy.sh`;
+  setProjectFormError('');
+  const version = ++projectGuidanceVersion;
+  $('previewProjectBtn').disabled = false;
+  const button = $('inspectProjectBtn');
+  button.disabled = true;
+  $('projectInspectStatus').textContent = '正在识别，最长约 60 秒…';
+  const target = $('projectDetectionResult');
+  target.hidden = false;
+  target.replaceChildren();
+  try {
+    const result = await postJsonBody('projects-config/inspect', {project});
+    if (version !== projectGuidanceVersion || $('projectModal').hidden) return;
+    const current = collectProjectForm();
+    if (current.repo !== project.repo || current.branch !== project.branch) {
+      $('projectInspectStatus').textContent = '仓库或分支已更改，请重新识别。';
+      return;
+    }
+    $('projectInspectStatus').textContent = result.ok ? '识别完成' : '无法读取仓库';
+    if (!result.ok) {
+      target.innerHTML = renderFailureAdvice(result.diagnosis);
+      return;
+    }
+    const candidates = result.candidates || [];
+    target.innerHTML = `${candidates.length ? `
+      <label>检测到的部署方式<select id="projectDetectedTemplate">${candidates.map((item, index) =>
+        `<option value="${index}">${escapeHtml(item.label)} (${escapeHtml(item.evidence.join(', '))})</option>`).join('')}</select></label>
+      <button id="applyProjectDetectionBtn" class="ghost-button compact-action" type="button">采用此配置</button>` : ''}
+      ${(result.warnings || []).map(text => `<p class="onboarding-note">${escapeHtml(text)}</p>`).join('')}`;
+    $('applyProjectDetectionBtn')?.addEventListener('click', () => {
+      if (collectProjectForm().repo !== project.repo || collectProjectForm().branch !== project.branch) {
+        setProjectFormError('仓库或分支已更改，请重新识别。');
+        return;
+      }
+      const candidate = candidates[Number($('projectDetectedTemplate').value)];
+      $('projectTemplateInput').value = candidate.template;
+      applyTemplateDefaults(false);
+      if (!$('projectStartCommandInput').value && candidate.template === 'python' && candidate.entry) {
+        $('projectStartCommandInput').value = `${$('projectWorkdirInput').value}/.venv/bin/uvicorn ${candidate.entry} --host 127.0.0.1 --port ${$('projectServicePortInput').value}`;
+      }
+      if (result.existing_script) {
+        const script = $('projectScriptInput');
+        if (!script.value || script.value === script.dataset.autoValue) {
+          script.value = `${$('projectWorkdirInput').value}/${result.existing_script}`;
+          delete script.dataset.autoValue;
+        }
+      }
+      invalidateProjectPreview();
+      updateWebhookPreview();
+      $('projectInspectStatus').textContent = '已采用，请核对部署配置。';
+    });
+  } catch (err) {
+    if (version === projectGuidanceVersion) $('projectInspectStatus').textContent = err.message;
+  } finally {
+    if (version === projectGuidanceVersion) button.disabled = false;
   }
-  if (force || !log.value || log.value.includes('example-deploy')) {
-    log.value = `/var/log/mini_deploy/${key}-deploy.log`;
-  }
-  if (serviceName && (force || !serviceName.value)) {
-    serviceName.value = key;
-  }
-  if (servicePort && (force || !servicePort.value)) {
-    servicePort.value = template === 'java' ? '8003' : template === 'go' ? '8002' : '8001';
-  }
-  if (startCommand && force) {
-    startCommand.value = '';
-  }
-  if (appDomain && force) {
-    appDomain.value = '';
-  }
-  if ((force || !health.value) && template !== 'custom') {
-    health.value = health.value || `https://${key}.example.com/health`;
+}
+
+async function previewCurrentProject() {
+  if (!$('projectForm').reportValidity()) return;
+  const project = collectProjectForm();
+  const signature = JSON.stringify(project);
+  const version = projectGuidanceVersion;
+  const button = $('previewProjectBtn');
+  button.disabled = true;
+  invalidateProjectPreview();
+  $('projectFilePreview').textContent = '正在生成预览…';
+  try {
+    const result = await postJsonBody('projects-config/preview', {project});
+    if (version !== projectGuidanceVersion || $('projectModal').hidden) return;
+    if (JSON.stringify(collectProjectForm()) !== signature) {
+      $('projectFilePreview').textContent = '配置已更改，请重新预览。';
+      return;
+    }
+    $('projectFilePreview').innerHTML = '<p class="onboarding-note">以下为服务器当前文件或初版模板。拉取代码后如出现同名文件，将保留仓库版本；初始化后可再次预览核对。</p>' + (result.files || []).map(file => `
+      <details open class="onboarding-file"><summary>${escapeHtml(file.path)} · ${file.exists ? '保留现有文件' : '将生成'}</summary>
+        <pre class="command-output">${escapeHtml(file.content)}</pre></details>`).join('');
+    projectPreviewSignature = signature;
+    $('projectConfigConfirmed').disabled = false;
+  } catch (err) {
+    if (version === projectGuidanceVersion) $('projectFilePreview').textContent = err.message;
+  } finally {
+    if (version === projectGuidanceVersion) button.disabled = false;
   }
 }
 
@@ -1595,6 +1654,8 @@ function renderBootstrapResult(payload) {
         <div>
           <strong>${escapeHtml(item.step || '-')}</strong>
           <span>${escapeHtml(item.detail || item.output || '')}</span>
+          ${renderFailureAdvice(item.diagnosis)}
+          ${item.output ? `<details><summary>原始输出</summary><pre class="command-output">${escapeHtml(item.output)}</pre></details>` : ''}
         </div>
       </div>
     `).join('')}
@@ -1642,11 +1703,17 @@ function renderNginxResult(payload) {
 
 async function bootstrapCurrentProject() {
   const project = collectProjectForm();
+  if (!$('projectForm').reportValidity()) return;
+  if (!$('projectConfigConfirmed').checked || projectPreviewSignature !== JSON.stringify(project)) {
+    setProjectFormError('请先预览部署文件，并勾选确认。配置变更后需要重新预览。');
+    return;
+  }
+  setProjectFormError('');
   const key = normalizedProjectKeyFromForm(project);
   if (!key) return;
   const confirmed = await showConfirmDialog({
     title: '自动初始化服务器',
-    message: `将保存项目配置，并在服务器上准备目录、拉取代码、写入 deploy.sh${['python', 'go', 'java'].includes(project.template) ? ' 和 systemd 初版 service' : ''}。确认继续？`,
+    message: `将保存配置、拉取代码，并补齐缺少的 deploy.sh${['python', 'go', 'java'].includes(project.template) ? ' 和 systemd 服务文件' : ''}。已有文件会保留；初始化不会启动业务。确认继续？`,
     confirmText: '开始初始化',
     danger: false,
   });
@@ -1764,12 +1831,20 @@ async function doctorCurrentProject() {
 }
 
 function openProjectModal(project = null) {
+  projectGuidanceVersion += 1;
+  invalidateProjectPreview();
+  $('projectDetectionResult').replaceChildren();
+  $('projectDetectionResult').hidden = true;
+  $('projectInspectStatus').textContent = '';
+  $('inspectProjectBtn').disabled = false;
+  $('previewProjectBtn').disabled = false;
+  $('projectForm').querySelectorAll('[data-auto-value]').forEach(input => delete input.dataset.autoValue);
   editingProjectKey = project ? project.key : '';
   setProjectFormError('');
   $('projectModalTitle').textContent = project ? '编辑仓库' : '添加仓库';
   $('projectModalHint').textContent = project
-    ? '修改会写入项目配置并立即热加载。脚本路径变更后请先执行下方服务器指令。'
-    : '填写仓库与部署脚本。先执行下方服务器指令，再保存并配置 WebHook。';
+    ? '配置保存后立即生效。已有部署脚本和服务文件会保留。'
+    : '仓库凭据使用服务器上的 Git 配置。业务域名和 HTTPS 可稍后配置。';
   $('projectOriginalKey').value = project ? project.key : '';
   $('projectKeyInput').value = project ? project.key : '';
   $('projectNameInput').value = project ? project.name : '';
@@ -1801,6 +1876,7 @@ function openProjectModal(project = null) {
 }
 
 function closeProjectModal() {
+  projectGuidanceVersion += 1;
   $('projectModal').hidden = true;
   editingProjectKey = '';
 }
@@ -2134,7 +2210,7 @@ function renderContainerCard(container) {
   const showErrorCount = errorCount > 0 && !areNoticeKeysDismissed(containerNoticeKeys(container, 'error'));
   const showWarnCount = warnCount > 0 && !areNoticeKeysDismissed(containerNoticeKeys(container, 'warn'));
   return `
-    <article class="container-row">
+    <article class="container-row" data-container-key="${escapeHtml(title)}">
       <div class="container-title-block">
         <div class="container-name" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
         <div class="container-image" title="${escapeHtml(container.image || '-')}">${escapeHtml(container.image || '-')}</div>
@@ -2209,6 +2285,7 @@ function trendPointX(index, total, width, pad) {
 }
 
 function trendPointValue(point, key, { percent = true } = {}) {
+  if (point?.[key] == null || point[key] === '') return null;
   const value = Number(point?.[key]);
   if (!Number.isFinite(value)) return null;
   return percent ? Math.max(0, Math.min(100, value)) : Math.max(0, value);
@@ -2268,12 +2345,7 @@ function trendPath(points, key, width, height, pad, scale, options = {}) {
 }
 
 function trendLinePath(segment) {
-  if (!segment.length) return '';
-  const [first, ...rest] = segment;
-  return [
-    `M${first[0].toFixed(1)} ${first[1].toFixed(1)}`,
-    ...rest.map(point => `L${point[0].toFixed(1)} ${point[1].toFixed(1)}`),
-  ].join(' ');
+  return DashboardMotion.curve(segment);
 }
 
 function trendDots(points, key, className, label, width, height, pad, scale, options = {}) {
@@ -2290,7 +2362,7 @@ function trendDots(points, key, className, label, width, height, pad, scale, opt
       : `${formatTrendTime(point)} · ${label} ${formatter(value)}`;
     return `<g class="trend-point" tabindex="0" aria-label="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">
       <circle class="trend-dot-hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9"></circle>
-      <circle class="trend-dot ${className}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8"></circle>
+      <circle class="trend-dot ${className}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2"></circle>
     </g>`;
   }).join('');
 }
@@ -2368,7 +2440,7 @@ function renderTrendCard(points, config) {
   const dots = trendDots(points, key, className, label, width, height, pad, scale, config);
   const latestPoint = points[points.length - 1] || {};
   return `
-    <article class="trend-card ${className}" style="--trend-width:${width}px">
+    <article class="trend-card ${className}" data-trend-key="${key}" style="--trend-width:${width}px">
       <div class="trend-card-head">
         <span>${escapeHtml(label)}</span>
         <strong>${escapeHtml(formatter(scale.latest))}</strong>
@@ -2405,6 +2477,9 @@ function renderSystemTrend(system = {}) {
   const nowTs = Math.floor(Date.now() / 1000);
   const filtered = cutoff ? rawHistory.filter(point => Number(point?.ts) >= nowTs - cutoff) : rawHistory;
   const points = filtered.slice().reverse();
+  const signature = JSON.stringify([systemTrendRange, system.history_interval_seconds, points]);
+  if (chart.dataset.signature === signature) return;
+  chart.dataset.signature = signature;
   const intervalMinutes = Math.round(Number(system.history_interval_seconds || 1800) / 60);
   const latest = points[points.length - 1] || rawHistory[0] || {};
   const hint = $('systemTrendHint');
@@ -2421,7 +2496,7 @@ function renderSystemTrend(system = {}) {
     return;
   }
 
-  chart.innerHTML = `
+  const markup = `
     <div class="trend-card-grid">
       ${renderTrendCard(points, { key: 'cpu_percent', className: 'cpu', label: 'CPU', subLabel: '处理器' })}
       ${renderTrendCard(points, { key: 'memory_percent', className: 'memory', label: '内存', subLabel: '占用率' })}
@@ -2437,6 +2512,33 @@ function renderSystemTrend(system = {}) {
       })}
     </div>
   `;
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  const cards = Array.from(chart.querySelectorAll('.trend-card'));
+  if (cards.length !== 3) {
+    chart.replaceChildren(template.content);
+    DashboardMotion.show(chart);
+    return;
+  }
+  hideTrendTooltip();
+  cards.forEach((card, i) => {
+    const next = template.content.querySelectorAll('.trend-card')[i];
+    const svg = card.querySelector('svg');
+    const nextSvg = next.querySelector('svg');
+    if (!svg || !nextSvg) {
+      card.replaceWith(next);
+      DashboardMotion.show(next);
+      return;
+    }
+    const scroll = card.querySelector('.trend-chart-scroll');
+    const atEnd = scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft < 8;
+    card.style.cssText = next.style.cssText;
+    ['.trend-card-head', '.trend-card-meta', '.trend-card-foot'].forEach(selector => {
+      card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
+    });
+    DashboardMotion.morph(svg, nextSvg);
+    if (atEnd) scroll.scrollLeft = scroll.scrollWidth;
+  });
 }
 
 function renderAlerts(alerts = []) {
@@ -2551,6 +2653,7 @@ function renderChangedFiles(item = {}) {
 
 function renderDeployDetailInsights(item = {}) {
   return `
+    ${item.status === 'failed' ? renderFailureAdvice(item.diagnosis || [{title: '该历史记录暂无诊断', advice: '请打开部署日志查看具体错误。'}]) : ''}
     <div class="deploy-detail-insights">
       <section class="deploy-insight-section">
         <div class="deploy-insight-title">阶段耗时</div>
@@ -2611,11 +2714,37 @@ function renderSystemStatus(system = {}) {
     return;
   }
   lastContainerNoticeKeys = containers.flatMap(container => containerNoticeKeys(container));
-  list.innerHTML = `
-    <div class="container-service-grid">
-      ${containers.map(renderContainerCard).join('')}
-    </div>
-  `;
+  let grid = list.querySelector('.container-service-grid');
+  if (!grid) {
+    grid = document.createElement('div');
+    grid.className = 'container-service-grid';
+    list.replaceChildren(grid);
+  }
+  const existing = new Map(Array.from(grid.children).map(card => [card.dataset.containerKey, card]));
+  containers.forEach((container, index) => {
+    const key = container.name || container.id || '-';
+    const old = existing.get(key);
+    existing.delete(key);
+    const signature = JSON.stringify([container, containerNoticeKeys(container).map(k => dismissedNoticeKeys.has(k))]);
+    let card = old;
+    if (!old || old.dataset.signature !== signature) {
+      const template = document.createElement('template');
+      template.innerHTML = renderContainerCard(container);
+      card = template.content.firstElementChild;
+      card.dataset.signature = signature;
+      if (old) {
+        const tracks = Array.from(old.querySelectorAll('.meter-track'));
+        card.querySelectorAll('.meter-track').forEach((track, i) => {
+          if (!tracks[i]) return;
+          tracks[i].dataset.resourceValue = track.dataset.resourceValue;
+          track.replaceWith(tracks[i]);
+        });
+        old.replaceWith(card);
+      }
+    }
+    if (grid.children[index] !== card) grid.insertBefore(card, grid.children[index] || null);
+  });
+  existing.forEach(card => card.remove());
   list.querySelectorAll('.meter-track[data-resource-value]').forEach(track => {
     updateResourceTrack(track, track.dataset.resourceValue);
   });
@@ -2991,6 +3120,7 @@ function downloadCurrentLog() {
 }
 
 async function refresh() {
+  const requestId = ++systemStatusRequestId;
   try {
     const [status, logs, config] = await Promise.all([
       fetchJson('status'),
@@ -3001,7 +3131,7 @@ async function refresh() {
     lastConfig = config;
     lastProjects = config.projects || [];
     renderNotificationConfig(config.notifications || {});
-    renderStatus(status);
+    if (requestId === systemStatusRequestId) renderStatus(status);
     renderLogs(logs);
     scheduleRefresh(status.state && status.state.running ? 3000 : 30000);
   } catch (err) {
@@ -3039,7 +3169,7 @@ function clearServerRefresh() {
 
 function scheduleServerRefresh() {
   clearServerRefresh();
-  if (activeView !== 'server') return;
+  if (activeView !== 'server' || document.hidden) return;
   serverRefreshTimer = window.setTimeout(refreshServerStatus, serverRefreshSeconds * 1000);
 }
 
@@ -3077,11 +3207,16 @@ async function refreshNotificationConfig() {
   }
 }
 
+let serverRefreshInFlight = false;
 async function refreshServerStatus() {
   if (activeView !== 'server') return;
+  if (serverRefreshInFlight || document.hidden) return;
+  serverRefreshInFlight = true;
+  const requestId = ++systemStatusRequestId;
   clearServerRefresh();
   try {
     const status = await fetchJson('status');
+    if (activeView !== 'server' || document.hidden || requestId !== systemStatusRequestId) return;
     renderSystemStatus(status.system || {});
     renderAlerts(status.alerts || []);
     renderEvents(status.events || []);
@@ -3090,6 +3225,7 @@ async function refreshServerStatus() {
   } catch (err) {
     $('dockerHint').textContent = `服务器状态刷新失败: ${err.message}`;
   } finally {
+    serverRefreshInFlight = false;
     scheduleServerRefresh();
   }
 }
@@ -3112,6 +3248,11 @@ function refreshResourceTracks() {
 window.addEventListener('resize', () => {
   if (resourceResizeTimer) window.clearTimeout(resourceResizeTimer);
   resourceResizeTimer = window.setTimeout(refreshResourceTracks, 120);
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearServerRefresh();
+  else if (activeView === 'server') refreshServerStatus();
 });
 
 async function ensurePreflightBeforeDeploy() {
@@ -3209,7 +3350,6 @@ async function cancelDeploy() {
   }
 }
 
-setupSecondaryViews();
 $('refreshBtn').addEventListener('click', () => {
   if (activeView === 'server') refreshServerStatus();
   else if (activeView === 'events') refreshEventsStatus();
@@ -3289,6 +3429,11 @@ $('closeContainerLogsBtn').addEventListener('click', closeContainerLogsModal);
 $('deleteProjectBtn').addEventListener('click', deleteCurrentProject);
 $('resetSecretBtn').addEventListener('click', resetCurrentSecret);
 $('bootstrapProjectBtn')?.addEventListener('click', bootstrapCurrentProject);
+$('inspectProjectBtn')?.addEventListener('click', inspectCurrentProject);
+$('previewProjectBtn')?.addEventListener('click', previewCurrentProject);
+$('projectForm').addEventListener('input', event => {
+  if (event.target.id !== 'projectConfigConfirmed') invalidateProjectPreview();
+});
 $('configureNginxBtn')?.addEventListener('click', configureProjectNginx);
 $('doctorProjectBtn').addEventListener('click', doctorCurrentProject);
 $('copyWebhookBtn').addEventListener('click', () => copyFromElement('projectWebhookUrl', 'copyWebhookBtn'));
@@ -3314,7 +3459,8 @@ $('copyWebhookTokenBtn').addEventListener('click', () => copyFromElement('projec
   if (input) input.addEventListener('input', updateWebhookPreview);
 });
 $('projectTemplateInput').addEventListener('change', () => {
-  applyTemplateDefaults(true);
+  applyTemplateDefaults(false);
+  invalidateProjectPreview();
   updateWebhookPreview();
 });
 ['projectKeyInput', 'projectNameInput'].forEach(id => {
