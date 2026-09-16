@@ -17,8 +17,8 @@ mini_deploy 会接收来自公网的 WebHook，并在 Linux 服务器上执行�
 
 部署 mini_deploy 前，请确认以下边界：
 
-- Agent 端口 `9010` 应只监听本机或受信任网络，不应直接暴露到互联网。
-- 公网访问应经过配置 HTTPS 的反向代理。
+- Agent 固定监听 `0.0.0.0:6868`，默认支持公网 IP 加端口直接访问。安装器会尝试放行系统防火墙中的 TCP 6868，云安全组需要单独配置。
+- 默认入口使用 HTTP，不提供传输加密；需要加密时可配置额外的域名 HTTPS 入口，也可在安全组限制访问来源。
 - 默认安装器当前明确以 `root` 运行 Agent。被授权的部署脚本也可以修改服务、Nginx 配置和项目目录；权限拆分完成前，只应在受控的专用测试服务器使用，并把部署脚本视为受信任的服务器代码。
 - mini_deploy 不负责证明业务项目的 `deploy.sh`、依赖安装命令、数据库迁移或第三方镜像是安全的。
 - 每个项目应使用独立的 WebHook Secret；UI 密码、Session Secret 和通知凭据不应复用。
@@ -31,7 +31,7 @@ mini_deploy 会接收来自公网的 WebHook，并在 Linux 服务器上执行�
 - WebHook URL 只应包含项目标识。`?token=` 和 `?secret=` 鉴权默认拒绝；Gitee/GitLab 使用平台原生 Token 字段，GitHub 使用 Secret 生成的 HMAC-SHA256 签名。
 - 每个启用项目的 WebHook Secret 至少需要 32 位。留空保存时面板会生成 64 位十六进制随机 Token；示例占位值和过短值不会被启用。
 - `DEPLOY_ALLOW_QUERY_TOKEN=true` 仅用于无法立即迁移的旧集成。URL 凭据仍可能进入外部负载均衡、CDN 或监控系统，因此应尽快关闭并轮换相关 Token。
-- `DEPLOY_TRUST_LOOPBACK_PROXY_HEADERS=false` 默认忽略 `X-Real-IP`，登录限流和 WebHook 日志使用 TCP 对端地址。只有当 Agent 保持监听 loopback、所有请求都由受信任的本机反向代理转发且代理会覆盖该请求头时，才应显式设为 `true`；即使开启，非 loopback 对端发送的转发头仍不会被信任。
+- `DEPLOY_TRUST_LOOPBACK_PROXY_HEADERS=false` 默认忽略 `X-Real-IP`，登录限流和 WebHook 日志使用 TCP 对端地址。使用会覆盖该请求头的受信任本机反向代理时，可以显式设为 `true`；即使开启，公网直连等非 loopback 对端发送的转发头仍不会被信任。
 - 管理员凭据必须在服务器终端或安装阶段初始化，网页不提供初始化入口。`DEPLOY_UI_SESSION_SECRET` 必须独立设置，不能复用 WebHook Secret。
 - 管理员密码变更和 Session 撤销在重启 Agent 后生效；两种操作都会使旧 Session 失效。
 - 部署脚本默认不会继承管理员密码、Session Secret 或全局 WebHook Secret。业务部署所需凭据仍应通过项目自己的受限环境文件或 Secret 管理方式提供。
@@ -91,7 +91,7 @@ mini_deploy 会接收来自公网的 WebHook，并在 Linux 服务器上执行�
 以下情况通常不作为安全漏洞处理：
 
 - 已获服务器管理员授权的恶意或错误 `deploy.sh` 所造成的行为。
-- 在明确违反部署文档的情况下直接将 Agent 端口暴露到公网。
+- 服务器网络或云安全组配置导致的访问不可达。
 - 仅缺少某个安全响应头，但无法证明实际安全影响。
 - 只影响不再支持的旧版本，且在最新版本中无法复现。
 - 第三方 Git 平台、Nginx、Docker、操作系统或业务项目自身的漏洞。

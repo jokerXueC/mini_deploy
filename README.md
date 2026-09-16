@@ -5,6 +5,7 @@ Lightweight self-hosted deploy panel for small servers.
 mini_deploy receives Git webhooks, runs your project deploy script, and shows deploy history, logs, server status, and Docker status in a simple web panel.
 
 - 中文快速上手：[docs/QUICKSTART.zh-CN.md](docs/QUICKSTART.zh-CN.md)
+- Linux 实测清单：[docs/LINUX_TEST.zh-CN.md](docs/LINUX_TEST.zh-CN.md)
 - 开源开发路线图：[docs/ROADMAP.zh-CN.md](docs/ROADMAP.zh-CN.md)
 - 安全策略：[SECURITY.md](SECURITY.md)
 - 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
@@ -18,6 +19,8 @@ mini_deploy receives Git webhooks, runs your project deploy script, and shows de
 - Provides manual deploy, rollback, cancel, logs, and history
 - Shows CPU, memory, disk, network, and Docker container status
 - Generates per-project Nginx reverse proxy config for business domains
+- Manages uploaded PEM certificates for project domains from the UI: expiry, replacement, HTTPS activation and removal
+- Detects local and Docker Nginx, saves a shared runtime selection and checks each project's upstream connectivity
 - Uses a password-protected web UI
 - Requires no database
 
@@ -58,6 +61,17 @@ cd /root/mini_deploy
 bash install.sh
 ```
 
+After installation, open `http://<server-public-ip>:6868` and sign in with the
+password you set during installation. No domain, Nginx, or certificate is required.
+The Agent always listens on `0.0.0.0:6868`; the port cannot be overridden. The
+installer updates old host/port settings and its existing Nginx upstreams on upgrade.
+It opens TCP 6868 in active UFW/firewalld installations; allow this port in your
+cloud security group as well. If public-IP detection fails, use the IP shown in
+your cloud console, or set `DEPLOY_PUBLIC_IP` for the printed address.
+
+Domain/HTTPS access remains optional: provide `DEPLOY_DOMAIN=deploy.example.com`
+when installing to configure the additional Nginx entry point.
+
 `scripts/bootstrap_server.sh` is an equivalent server-oriented entry point. Copy
 `server.env.example` to `server.env` first if you want to preconfigure the
 installer's location, domain, language, or Docker/Nginx choices.
@@ -94,8 +108,8 @@ install -m 600 /dev/null /root/.mini-deploy-password
 read -r -s -p "Administrator password: " MINI_DEPLOY_PASSWORD; echo
 printf '%s\n' "$MINI_DEPLOY_PASSWORD" > /root/.mini-deploy-password
 unset MINI_DEPLOY_PASSWORD
-DEPLOY_UI_PASSWORD_FILE=/root/.mini-deploy-password DEPLOY_DOMAIN=deploy.example.com \
-  INSTALL_LANG=en SETUP_NGINX=yes SETUP_HTTPS=no SETUP_DOCKER=no bash install.sh
+DEPLOY_UI_PASSWORD_FILE=/root/.mini-deploy-password \
+  INSTALL_LANG=en SETUP_NGINX=false SETUP_HTTPS=no SETUP_DOCKER=no bash install.sh
 rm -f /root/.mini-deploy-password
 ```
 
@@ -105,7 +119,7 @@ also configure HTTPS or Docker.
 HTTP works without HTTPS:
 
 ```text
-http://deploy.example.com/deploy/ui
+http://<server-public-ip>:6868
 ```
 
 Use HTTPS for public access when DNS is ready.
@@ -125,7 +139,12 @@ In the web panel:
 
 After that, every `git push` to the configured branch can trigger deployment.
 
-If a project has a business domain, use Configure Domain in the project panel to generate its Nginx reverse proxy config.
+For a business domain, first select and save the Nginx runtime under Nginx Certificates,
+then check/save the project's upstream address and use Configure Domain. Docker mode
+requires a local Docker Unix socket and directory bind mounts for `/etc/nginx/conf.d`
+and `/etc/mini-deploy/certificates`; bridge networks need a reachable backend service
+name or host address, not `127.0.0.1`. Existing containers are never recreated automatically.
+See [the quickstart](docs/QUICKSTART.zh-CN.md) and [new-container example](examples/nginx.compose.yml).
 
 ## Important Boundary
 
@@ -152,7 +171,7 @@ name.
 ```bash
 systemctl status mini-deploy-agent
 journalctl -u mini-deploy-agent -f
-curl http://127.0.0.1:9010/health
+curl http://127.0.0.1:6868/health
 bash /opt/mini_deploy/scripts/doctor.sh
 python3 /opt/mini_deploy/agent.py admin set-password
 python3 /opt/mini_deploy/agent.py admin reset-session
@@ -240,16 +259,15 @@ disabled by default.
 
 ## Security
 
-- Do not expose port `9010` directly to the internet.
-- Use HTTPS for public access.
+- The default entry point is HTTP on TCP 6868. Restrict allowed sources where practical;
+  optional domain/HTTPS access provides transport encryption.
 - Use a strong UI password.
 - Use a different webhook token for every project.
 - Never append a WebHook Token to the URL. Query-string authentication is disabled
   by default because URLs leak through proxies, browser history, and logs.
 - Forwarded client-IP headers are ignored by default. Set
   `DEPLOY_TRUST_LOOPBACK_PROXY_HEADERS=true` in the Agent environment, then restart
-  the service, only when the Agent remains bound to loopback and every connection
-  comes through a trusted local reverse proxy that overwrites `X-Real-IP`; headers
+  the service, only when local reverse proxies are trusted and overwrite `X-Real-IP`; headers
   from non-loopback peers are never trusted. Nginx configuration generated by the
   installer satisfies those conditions and enables the option automatically.
 - Keep `DEPLOY_UI_SESSION_SECRET` independent from every WebHook Secret.

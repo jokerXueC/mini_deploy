@@ -1,0 +1,18 @@
+# Starter for a NEW instance only; do not overwrite an existing Compose project.
+# Before starting (root):
+#   install -d -m 755 ./nginx-conf
+#   install -d -m 700 /var/lib/mini-deploy-agent/certificates
+#   docker compose -f nginx.compose.yml up -d
+# Then select mini-deploy-nginx in the panel's Nginx discovery wizard.
+# Connect backend containers to the same network, or use a reachable host address.
+services:
+  nginx:
+    image: nginx:stable-alpine
+    container_name: mini-deploy-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-conf:/etc/nginx/conf.d:ro
+      - ${MINI_DEPLOY_CERTIFICATES_DIR:-/var/lib/mini-deploy-agent/certificates}:/etc/mini-deploy/certificates:ro

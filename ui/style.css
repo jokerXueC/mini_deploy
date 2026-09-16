@@ -2365,6 +2365,37 @@ html[data-theme="dark"] .log-line-input:hover {
   background-size: 200% 100%;
   animation: shimmer 1.4s infinite;
 }
+.certificate-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
+.certificate-layout > * { min-width: 0; }
+.certificate-layout form { display: grid; gap: 16px; align-content: start; }
+.certificate-layout .field { display: grid; gap: 8px; min-width: 0; color: var(--muted); font-size: 13px; font-weight: 700; }
+.certificate-layout input,
+.certificate-layout select,
+.certificate-layout textarea { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card-strong); color: var(--fg); font: inherit; }
+.certificate-layout input:focus-visible,
+.certificate-layout select:focus-visible,
+.certificate-layout textarea:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.certificate-layout input[type="file"] { padding: 6px; font-size: 12px; }
+.certificate-layout input::file-selector-button { border: 0; border-radius: 4px; padding: 6px 10px; margin-right: 8px; background: var(--line); color: var(--fg); cursor: pointer; }
+.certificate-panel button:disabled { opacity: .45; cursor: not-allowed; }
+.certificate-layout textarea { width: 100%; min-width: 0; resize: vertical; box-sizing: border-box; font-family: monospace; font-size: 12px; }
+.certificate-layout input[type="file"] { width: 100%; min-width: 0; }
+.certificate-details { margin-top: 20px; }
+.certificate-details dd { overflow-wrap: anywhere; }
+.certificate-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.certificate-feedback { margin-bottom: 16px; overflow-wrap: anywhere; }
+.certificate-feedback.failed { color: var(--red); }
+.nginx-setup { margin-bottom: 20px; }
+.nginx-setup [hidden] { display: none; }
+.nginx-setup .field + .field { margin-top: 14px; }
+.nginx-upstream { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 20px; display: grid; gap: 12px; }
+.nginx-upstream .field { display: grid; gap: 8px; min-width: 0; }
+.nginx-upstream input, .nginx-upstream select { width: 100%; min-width: 0; padding: 10px; background: var(--card-strong); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; }
+@media (max-width: 760px) {
+  .certificate-layout { grid-template-columns: 1fr; }
+  .view-tabs { max-width: 100%; overflow-x: auto; flex-wrap: nowrap; }
+  .view-tabs .view-tab { flex: 0 0 auto; white-space: nowrap; }
+}
 @keyframes shimmer { to { background-position-x: -200%; } }
 @keyframes pulse { 50% { opacity: .35; } }
 @keyframes breathe {

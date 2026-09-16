@@ -23,6 +23,7 @@ SERVICE_NAME="${SERVICE_NAME:-mini-deploy-agent}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 NGINX_CONF_FILE="${NGINX_CONF_FILE:-/etc/nginx/conf.d/mini-deploy.conf}"
 DEPLOY_DOMAIN="${DEPLOY_DOMAIN:-}"
+DEPLOY_PUBLIC_IP="${DEPLOY_PUBLIC_IP:-}"
 SETUP_NGINX="${SETUP_NGINX:-auto}"
 SETUP_HTTPS="${SETUP_HTTPS:-ask}"
 SETUP_DOCKER="${SETUP_DOCKER:-ask}"
@@ -77,7 +78,7 @@ for path in "$ENV_FILE" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   fi
 done
 
-for required in agent.py env.example systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
+for required in agent.py certificates.py nginx_runtime.py env.example systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
   if [[ ! -f "$SOURCE_DIR/$required" ]]; then
     echo "安装包不完整 / Incomplete installation package: $required" >&2
     exit 1
@@ -482,7 +483,7 @@ validate_managed_nginx_file() {
   fi
   if legacy_adoption_enabled \
     && grep -Fq -- 'location = /deploy/webhook {' "$NGINX_CONF_FILE" \
-    && grep -Fq -- 'proxy_pass http://127.0.0.1:9010/webhook;' "$NGINX_CONF_FILE"; then
+    && grep -Eq -- 'proxy_pass http://127\.0\.0\.1:(9010|6868)/webhook;' "$NGINX_CONF_FILE"; then
     echo "检测到旧版无标记 Nginx 配置；已按显式授权接管 / Adopting an unmarked legacy Nginx config by explicit authorization."
     return 0
   fi
@@ -1314,7 +1315,7 @@ server {
         # \$uri deliberately excludes the query string, so compatibility
         # tokens can never enter the Nginx access log.
         access_log /var/log/nginx/mini-deploy-webhook.access.log mini_deploy_no_query;
-        proxy_pass http://127.0.0.1:9010/webhook;
+        proxy_pass http://127.0.0.1:6868/webhook;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1326,7 +1327,7 @@ server {
     }
 
     location /deploy/ui/ {
-        proxy_pass http://127.0.0.1:9010/ui/;
+        proxy_pass http://127.0.0.1:6868/ui/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1334,7 +1335,7 @@ server {
     }
 
     location /deploy/ {
-        proxy_pass http://127.0.0.1:9010/;
+        proxy_pass http://127.0.0.1:6868/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1510,7 +1511,7 @@ setup_nginx() {
   fi
   write_nginx_config "$domain"
   nginx -t
-  # This generated proxy is loopback-only and overwrites X-Real-IP, so the
+  # This generated proxy connects over loopback and overwrites X-Real-IP, so the
   # Agent can safely apply login limits to the real client instead of 127.0.0.1.
   upsert_env_assignment "DEPLOY_TRUST_LOOPBACK_PROXY_HEADERS" "true"
   systemctl restart "$SERVICE_NAME"
@@ -1535,6 +1536,77 @@ setup_nginx() {
       echo "  certbot --nginx -d $domain"
     fi
   fi
+}
+
+dashboard_public_address() {
+  local address="$DEPLOY_PUBLIC_IP"
+  if [[ -z "$address" ]] && command -v curl >/dev/null 2>&1; then
+    address="$(curl -4 -fsS --connect-timeout 2 --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if python3 - "$address" <<'PY'
+import ipaddress
+import sys
+try:
+    address = ipaddress.IPv4Address(sys.argv[1])
+    raise SystemExit(0 if address.is_global else 1)
+except ValueError:
+    raise SystemExit(1)
+PY
+  then
+    printf '%s\n' "$address"
+  elif is_en; then
+    printf '%s\n' '<server-public-ip>'
+  else
+    printf '%s\n' '<服务器公网IP>'
+  fi
+}
+
+check_dashboard_port() {
+  python3 - <<'PY'
+import socket
+import sys
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("0.0.0.0", 6868))
+except OSError:
+    sys.exit("6868 端口被占用或无法监听，请释放端口后重试 / Cannot bind TCP 6868; release the port before installing.")
+PY
+}
+
+open_dashboard_firewall() {
+  local failed="false"
+  if command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw allow 6868/tcp || failed="true"
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port=6868/tcp || failed="true"
+    firewall-cmd --add-port=6868/tcp || failed="true"
+  fi
+  if [[ "$failed" == "true" ]]; then
+    echo "自动放行失败，请在系统防火墙中放行 TCP 6868 / Allow inbound TCP 6868 in your system firewall." >&2
+  fi
+}
+
+migrate_nginx_dashboard_port() {
+  [[ -f "$NGINX_CONF_FILE" ]] || return 0
+  grep -Fq 'http://127.0.0.1:9010/' "$NGINX_CONF_FILE" || return 0
+  local backup replacement
+  backup="$(mktemp "${NGINX_CONF_FILE}.port-backup.XXXXXX")"
+  replacement="$(mktemp "${NGINX_CONF_FILE}.port-new.XXXXXX")"
+  cp -p -- "$NGINX_CONF_FILE" "$backup"
+  sed 's@http://127\.0\.0\.1:9010/@http://127.0.0.1:6868/@g' "$NGINX_CONF_FILE" >"$replacement"
+  chmod --reference="$NGINX_CONF_FILE" "$replacement"
+  mv -f -- "$replacement" "$NGINX_CONF_FILE"
+  if command -v nginx >/dev/null 2>&1; then
+    if ! nginx -t || { systemctl is-active --quiet nginx && ! systemctl reload nginx; }; then
+      mv -f -- "$backup" "$NGINX_CONF_FILE"
+      nginx -t && systemctl reload nginx || true
+      echo "旧 Nginx 入口端口迁移失败，已写回原配置 / Nginx port migration failed; original config restored." >&2
+      return 1
+    fi
+  fi
+  rm -f -- "$backup"
 }
 
 acquire_maintenance_lock
@@ -1579,7 +1651,7 @@ done
 
 choose_language
 
-if [[ -z "$DEPLOY_DOMAIN" ]] && nginx_setup_enabled; then
+if [[ -z "$DEPLOY_DOMAIN" ]] && nginx_install_is_preapproved; then
   if is_en; then
     DEPLOY_DOMAIN="$(ask "Enter dashboard domain, for example deploy.example.com; press Enter to skip Nginx auto config" "")"
   else
@@ -1912,6 +1984,9 @@ else
 fi
 chmod 600 "$ENV_FILE"
 upsert_env_assignment "MINI_DEPLOY_HOME" "$APP_HOME"
+upsert_env_assignment "DEPLOY_AGENT_HOST" "0.0.0.0"
+upsert_env_assignment "DEPLOY_AGENT_PORT" "6868"
+upsert_env_assignment "DEPLOY_COOKIE_SECURE" "auto"
 upsert_env_assignment "DEPLOY_AGENT_ENV_FILE" "$ENV_FILE"
 upsert_env_assignment "DEPLOY_AGENT_SERVICE_NAME" "$SERVICE_NAME"
 upsert_env_assignment "DEPLOY_PROJECTS_FILE" "$DATA_HOME/projects.json"
@@ -1942,6 +2017,7 @@ chmod 644 "$marker"
 
 initialize_admin_credentials
 
+check_dashboard_port
 write_systemd_service
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
@@ -1952,13 +2028,16 @@ if ! systemctl is-active --quiet "$SERVICE_NAME"; then
 fi
 disarm_upgrade_service_failsafe
 
+open_dashboard_firewall
+migrate_nginx_dashboard_port
+
 if nginx_setup_enabled; then
   setup_nginx "$DEPLOY_DOMAIN"
 fi
 
 install_docker_if_requested
 
-if curl -fsS --max-time 5 http://127.0.0.1:9010/health >/dev/null 2>&1; then
+if curl -fsS --max-time 5 http://127.0.0.1:6868/health >/dev/null 2>&1; then
   if is_en; then
     HEALTH_RESULT="ok"
   else
@@ -1972,10 +2051,8 @@ else
   fi
 fi
 
-DASHBOARD_URL="http://127.0.0.1:9010/ui"
-if [[ -n "$DEPLOY_DOMAIN" ]]; then
-  DASHBOARD_URL="http://$DEPLOY_DOMAIN/deploy/ui"
-fi
+PUBLIC_ADDRESS="$(dashboard_public_address)"
+DASHBOARD_URL="http://$PUBLIC_ADDRESS:6868"
 
 if is_en; then
   cat <<EOF
@@ -1989,7 +2066,11 @@ Open the dashboard and sign in:
    $DASHBOARD_URL
 
 Local fallback URL:
-   http://127.0.0.1:9010/ui
+   http://127.0.0.1:6868
+
+Cloud firewall/security group: allow inbound TCP 6868.
+The port is fixed; DEPLOY_AGENT_HOST/DEPLOY_AGENT_PORT no longer override it.
+Optional domain: $DEPLOY_DOMAIN
 
 Useful commands:
    systemctl status $SERVICE_NAME
@@ -2018,7 +2099,7 @@ validate the exact configuration, and restart the Agent:
    systemctl restart $SERVICE_NAME
 
 Health check:
-   curl http://127.0.0.1:9010/health
+   curl http://127.0.0.1:6868/health
 
 EOF
 else
@@ -2033,7 +2114,11 @@ Agent 状态：$HEALTH_RESULT
    $DASHBOARD_URL
 
 本机备用访问地址：
-   http://127.0.0.1:9010/ui
+   http://127.0.0.1:6868
+
+请在云厂商安全组中放行入站 TCP 6868。
+端口固定，DEPLOY_AGENT_HOST / DEPLOY_AGENT_PORT 不再支持覆盖监听地址。
+可选域名：$DEPLOY_DOMAIN
 
 常用命令：
    systemctl status $SERVICE_NAME
@@ -2061,7 +2146,7 @@ Agent 状态：$HEALTH_RESULT
    systemctl restart $SERVICE_NAME
 
 健康检查：
-   curl http://127.0.0.1:9010/health
+   curl http://127.0.0.1:6868/health
 
 EOF
 fi

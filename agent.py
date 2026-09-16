@@ -43,6 +43,9 @@ from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote_plus, urlparse
 from urllib.request import Request, urlopen
 
+import certificates
+import nginx_runtime
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Linux is the production target
@@ -78,8 +81,9 @@ def _projects_config_paths(
 
 
 APP_HOME = Path(os.getenv("MINI_DEPLOY_HOME", os.getenv("VIBEPILOT_HOME", "/opt/mini_deploy")))
-HOST = os.getenv("DEPLOY_AGENT_HOST", "127.0.0.1")
-PORT = int(os.getenv("DEPLOY_AGENT_PORT", "9010"))
+# The dashboard has one fixed public entry point, including on upgrades.
+HOST = "0.0.0.0"
+PORT = 6868
 WEBHOOK_SECRET = os.getenv("DEPLOY_WEBHOOK_SECRET", "")
 ALLOW_QUERY_WEBHOOK_TOKEN = os.getenv("DEPLOY_ALLOW_QUERY_TOKEN", "").strip().lower() in {
     "1", "true", "yes", "on", "enabled",
@@ -1191,6 +1195,12 @@ def _save_project_transaction(raw_project: dict[str, Any], original_key: str = "
         projects = dict(PROJECTS)
         existing = projects.get(original_key) if original_key else None
         project = _project_from_form(raw_project, existing=existing)
+        if existing and (STATE_FILE.parent / "certificates" / existing.key).exists():
+            if (project.key, project.app_domain, project.service_port) != (existing.key, existing.app_domain, existing.service_port):
+                raise ValueError("请先在证书管理中停用并删除证书，再修改项目标识、域名或端口")
+        if existing and (project.key, project.app_domain, project.service_port) != (existing.key, existing.app_domain, existing.service_port):
+            if _nginx_project_has_site(existing):
+                raise ValueError("请先在 Nginx 接入中移除域名入口，再修改项目标识、域名或端口")
         if original_key and original_key != project.key:
             projects.pop(original_key, None)
         if project.key in projects and original_key != project.key:
@@ -1207,6 +1217,10 @@ def _delete_project_transaction(key: str) -> None:
             raise _ProjectNotFoundError(key)
         if len(projects) <= 1:
             raise _LastProjectError(key)
+        if (STATE_FILE.parent / "certificates" / key).exists():
+            raise certificates.CertificateError("请先在证书管理中停用并删除该项目的证书")
+        if _nginx_project_has_site(projects[key]):
+            raise certificates.CertificateError("请先在 Nginx 接入中移除该项目的域名入口")
         with _state_lock:
             current = _state.get("current_deploy")
         if (
@@ -2085,13 +2099,145 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True) ->
     }
 
 
+_nginx_lock = threading.RLock()
+
+
+def _nginx_serialized(function: Any) -> Any:
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with _config_transaction_lock, _nginx_lock:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def _certificate_store() -> certificates.CertificateStore:
+    return certificates.CertificateStore(STATE_FILE.parent / "certificates", _nginx_settings().runtime(live=False))
+
+
+def _nginx_settings() -> nginx_runtime.Settings:
+    return nginx_runtime.Settings(STATE_FILE.parent)
+
+
+def _nginx_project_has_site(project: DeployProject) -> bool:
+    settings = _nginx_settings()
+    if settings.read()["profile"].get("mode") == "none":
+        return False
+    return (settings.runtime(live=False).conf_root / f"mini-deploy-{project.key}.conf").exists()
+
+
+def _nginx_payload(*, discover: bool = False) -> dict[str, Any]:
+    with _config_transaction_lock, _nginx_lock:
+        settings = _nginx_settings()
+        data = settings.read()
+        data["projects"] = [{"key": p.key, "name": p.name, "port": p.service_port} for p in PROJECTS.values()]
+        if discover:
+            data["detected"] = settings.discover()
+        return data
+
+
+@_maintenance_shared_operation
+def _save_nginx_settings(data: dict[str, Any]) -> dict[str, Any]:
+    with _config_transaction_lock, _nginx_lock:
+        settings = _nginx_settings()
+        old = settings.read()
+        profile = settings.candidate(data.get("mode"), data.get("container", ""))
+        if old["profile"] != profile:
+            cert_dir = STATE_FILE.parent / "certificates"
+            if cert_dir.exists() and any(cert_dir.iterdir()):
+                raise certificates.CertificateError("请先停用并删除已有证书，再切换 Nginx 实例")
+            if old["profile"].get("mode") != "none":
+                old_runtime = settings.runtime(live=False)
+                if any(old_runtime.conf_root.glob("mini-deploy-*.conf")):
+                    raise certificates.CertificateError("旧实例仍有 mini-deploy 站点配置，请先移除这些站点再切换实例")
+        settings.save(profile, old["upstreams"] if old["profile"] == profile else {})
+        return _nginx_payload()
+
+
+@_maintenance_shared_operation
+def _nginx_upstream_operation(data: dict[str, Any]) -> dict[str, Any]:
+    with _config_transaction_lock, _nginx_lock:
+        settings = _nginx_settings()
+        saved = settings.read()
+        key = data.get("project")
+        if not isinstance(key, str) or key not in PROJECTS:
+            raise certificates.CertificateError("请选择已保存的业务项目")
+        project = PROJECTS[key]
+        runtime = settings.runtime()
+        host = runtime.upstream(data.get("host"))
+        runtime.probe(host, project.service_port)
+        if data.get("action") == "save-upstream":
+            old_host = saved["upstreams"].get(key, "127.0.0.1")
+            if old_host != host and _project_nginx_conf_path(project).exists():
+                raise certificates.CertificateError("现有站点配置仍在使用旧地址，请先在接入设置中移除站点再修改后端地址")
+            saved["upstreams"][key] = host
+            settings.save(saved["profile"], saved["upstreams"])
+        return {"ok": True, "host": host, "port": project.service_port, "settings": _nginx_payload()}
+
+
+@_maintenance_shared_operation
+def _remove_nginx_site(data: dict[str, Any]) -> dict[str, Any]:
+    with _config_transaction_lock, _nginx_lock:
+        key = data.get("project")
+        if not isinstance(key, str) or key not in PROJECTS:
+            raise certificates.CertificateError("请选择已保存的项目")
+        project = PROJECTS[key]
+        runtime = _nginx_settings().runtime()
+        store = certificates.CertificateStore(STATE_FILE.parent / "certificates", runtime)
+        path = _project_nginx_conf_path(project)
+        previous = store.config(path)
+        record = store.read(project)
+        if record and store.active(project, record, previous):
+            raise certificates.CertificateError("请先停用 HTTPS，再移除站点")
+        if previous and previous != _project_nginx_config_text(project) and not previous.startswith("# mini-deploy-managed: project-http-v1\n"):
+            raise certificates.CertificateError("仅能移除本面板托管的 HTTP 站点")
+        if previous:
+            # Keep an empty managed placeholder until Nginx accepts the removal.
+            store.commit_config(path, "# mini-deploy-managed: project-http-v1\n", previous)
+            path.unlink()
+        return {"ok": True}
+
+
+def _certificates_payload() -> dict[str, Any]:
+    with _config_transaction_lock, _nginx_lock:
+        items = []
+        for project in PROJECTS.values():
+            try:
+                store = _certificate_store()
+                items.append(store.describe(project, _project_nginx_conf_path(project)))
+            except (ValueError, OSError):
+                items.append({"project": project.key, "name": project.name, "domain": project.app_domain,
+                              "certificate": None, "error": "证书记录或文件权限异常，请检查服务器"})
+        return {"projects": items, "nginx_available": bool(shutil.which("nginx")),
+                "openssl_available": bool(shutil.which("openssl"))}
+
+
+@_maintenance_shared_operation
+def _certificate_operation(data: dict[str, Any]) -> None:
+    with _config_transaction_lock, _nginx_lock:
+        key = data.get("project")
+        if not isinstance(key, str) or key not in PROJECTS:
+            raise certificates.CertificateError("请选择已登记的项目")
+        project = PROJECTS[key]
+        settings = _nginx_settings()
+        if not settings.read()["configured"]:
+            raise certificates.CertificateError("请先检测并保存 Nginx 运行环境")
+        runtime = settings.runtime()
+        store = certificates.CertificateStore(STATE_FILE.parent / "certificates", runtime)
+        if data.get("action") == "enable":
+            runtime.probe(settings.read()["upstreams"].get(key), project.service_port)
+        store.operate(project, data.get("action"), data,
+                                     _project_nginx_conf_path(project), _project_nginx_config_text(project))
+
+
 def _project_nginx_conf_path(project: DeployProject) -> Path:
-    return Path("/etc/nginx/conf.d") / f"mini-deploy-{project.key}.conf"
+    return _nginx_settings().runtime(live=False).conf_root / f"mini-deploy-{project.key}.conf"
 
 
 def _project_nginx_config_text(project: DeployProject) -> str:
     domain = _normalize_domain(project.app_domain)
     port = project.service_port or 8000
+    settings = _nginx_settings()
+    upstream = settings.runtime(live=False).upstream(settings.read()["upstreams"].get(project.key))
     return "\n".join([
         "server {",
         "    listen 80;",
@@ -2100,7 +2246,7 @@ def _project_nginx_config_text(project: DeployProject) -> str:
         "    client_max_body_size 50m;",
         "",
         "    location / {",
-        f"        proxy_pass http://127.0.0.1:{port};",
+        f"        proxy_pass http://{upstream}:{port};",
         "        proxy_http_version 1.1;",
         "        proxy_set_header Host $host;",
         "        proxy_set_header X-Real-IP $remote_addr;",
@@ -2115,82 +2261,49 @@ def _project_nginx_config_text(project: DeployProject) -> str:
 
 
 @_maintenance_shared_operation
+@_nginx_serialized
 def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None = None) -> dict[str, Any]:
-    results: list[dict[str, Any]] = []
     domain = _normalize_domain(project.app_domain)
     https_requested = project.app_https if issue_https is None else bool(issue_https)
-    conf_path = _project_nginx_conf_path(project)
-    backup_path: Path | None = None
-
-    if not domain:
-        return {"ok": False, "project": project.key, "results": [_bootstrap_result("domain", False, "请先填写业务域名")]}
-    if not _valid_domain(domain):
-        return {"ok": False, "project": project.key, "results": [_bootstrap_result("domain", False, f"域名格式不正确: {domain}")]}
-    if not 1 <= int(project.service_port or 0) <= 65535:
-        return {"ok": False, "project": project.key, "results": [_bootstrap_result("service_port", False, "服务端口必须在 1-65535 之间")]}
-    if not shutil.which("nginx"):
-        return {
-            "ok": False,
-            "project": project.key,
-            "results": [_bootstrap_result("nginx", False, "服务器未安装 Nginx", "Ubuntu/Debian: apt install -y nginx\nCentOS/Rocky: dnf install -y nginx")],
-        }
-
+    results: list[dict[str, Any]] = []
     try:
-        conf_path.parent.mkdir(parents=True, exist_ok=True)
-        if conf_path.exists():
-            backup_path = conf_path.with_suffix(f".conf.{time.strftime('%Y%m%d-%H%M%S')}.bak")
-            shutil.copy2(conf_path, backup_path)
-        conf_path.write_text(_project_nginx_config_text(project), encoding="utf-8")
-        os.chmod(conf_path, 0o644)
-        results.append(_bootstrap_result("nginx_config", True, f"已写入 {conf_path}"))
-
-        test = _run_bootstrap_command(["nginx", "-t"], step="nginx_test", timeout=20.0)
-        results.append(test)
-        if not test["ok"]:
-            if backup_path and backup_path.exists():
-                shutil.copy2(backup_path, conf_path)
-            else:
-                try:
-                    conf_path.unlink()
-                except OSError:
-                    pass
-            results.append(_bootstrap_result("nginx_restore", True, "Nginx 测试失败，已恢复旧配置"))
-            return {"ok": False, "project": project.key, "domain": domain, "conf": str(conf_path), "results": results}
-
-        reload_result = _run_bootstrap_command(["systemctl", "reload", "nginx"], step="nginx_reload", timeout=20.0)
-        if not reload_result["ok"]:
-            reload_result = _run_bootstrap_command(["systemctl", "restart", "nginx"], step="nginx_restart", timeout=30.0)
-        results.append(reload_result)
-
+        settings = _nginx_settings()
+        if not settings.read()["configured"]:
+            raise certificates.CertificateError("请先在 Nginx 证书页检测并保存运行环境")
+        if not _valid_domain(domain) or not 1 <= int(project.service_port or 0) <= 65535:
+            raise certificates.CertificateError("请先填写有效的业务域名和服务端口")
+        runtime = settings.runtime()
+        store = certificates.CertificateStore(STATE_FILE.parent / "certificates", runtime)
+        conf_path = _project_nginx_conf_path(project)
+        previous = store.config(conf_path)
+        record = store.read(project)
+        if record and store.active(project, record, previous):
+            raise certificates.CertificateError("此项目已使用上传证书，请到证书管理中操作 HTTPS")
+        config = _project_nginx_config_text(project)
+        marker = "# mini-deploy-managed: project-http-v1\n"
+        if previous and previous != config and not previous.startswith(marker):
+            raise certificates.CertificateError("已有站点不是本面板托管的 HTTP 配置，拒绝覆盖")
+        runtime.probe(settings.read()["upstreams"].get(project.key), project.service_port)
+        store.commit_config(conf_path, marker + config, previous)
+        results.append(_bootstrap_result("nginx_reload", True, "Nginx 配置已校验并重载"))
         if https_requested:
-            if not shutil.which("certbot"):
-                results.append(_bootstrap_result("certbot", False, "未安装 certbot，HTTP 已可用；如需 HTTPS 请先安装 certbot"))
+            if runtime.mode == "docker":
+                results.append(_bootstrap_result("certbot_https", False, "Docker Nginx 请在证书页上传证书并启用 HTTPS；不会在宿主机运行 certbot --nginx"))
+            elif not shutil.which("certbot"):
+                results.append(_bootstrap_result("certbot_https", False, "未安装 Certbot，HTTP 已可用；也可上传证书"))
             else:
                 results.append(_run_bootstrap_command([
-                    "certbot",
-                    "--nginx",
-                    "-d",
-                    domain,
-                    "--non-interactive",
-                    "--agree-tos",
-                    "--register-unsafely-without-email",
+                    "certbot", "--nginx", "-d", domain, "--non-interactive",
+                    "--agree-tos", "--register-unsafely-without-email",
                 ], step="certbot_https", timeout=180.0))
-    except Exception as exc:  # noqa: BLE001 - return actionable Nginx failure to UI
+    except (ValueError, OSError) as exc:
         results.append(_bootstrap_result("nginx", False, str(exc)))
-
-    http_ready = any(item["step"] in {"nginx_reload", "nginx_restart"} and item["ok"] for item in results)
-    certbot_items = [item for item in results if item["step"] == "certbot_https"]
-    https_ok = bool(certbot_items) and all(item["ok"] for item in certbot_items)
-    ok = http_ready and (not https_requested or https_ok)
+    http_ready = any(item["step"] == "nginx_reload" and item["ok"] for item in results)
+    https_ok = any(item["step"] == "certbot_https" and item["ok"] for item in results)
     return {
-        "ok": ok,
-        "http_ready": http_ready,
-        "https_ok": https_ok,
-        "project": project.key,
-        "domain": domain,
-        "url": f"{'https' if https_ok else 'http'}://{domain}",
-        "conf": str(conf_path),
-        "results": results,
+        "ok": http_ready and (not https_requested or https_ok), "http_ready": http_ready,
+        "https_ok": https_ok, "project": project.key, "domain": domain,
+        "url": f"{'https' if https_ok else 'http'}://{domain}", "results": results,
     }
 
 
@@ -3596,6 +3709,8 @@ def _short_sha(value: Any) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "nginx.js": "application/javascript; charset=utf-8",
+    "certificates.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
 }
@@ -3865,6 +3980,17 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._write_json(200, _projects_config_payload(include_secret=True))
             return
+        if path == "/certificates":
+            if self._require_auth_json():
+                self._write_json(200, _certificates_payload())
+            return
+        if path == "/nginx-settings":
+            if self._require_auth_json():
+                try:
+                    self._write_json(200, _nginx_payload(discover=parse_qs(parsed.query).get("discover") == ["1"]))
+                except (ValueError, OSError) as exc:
+                    self._write_json(400, {"error": "nginx_settings_invalid", "detail": str(exc)})
+            return
         if path == "/projects-config/doctor":
             if self._require_auth_json():
                 self._handle_projects_config_doctor(parse_qs(parsed.query))
@@ -3883,6 +4009,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == "/nginx-settings":
+            if self._require_auth_json():
+                self._handle_nginx_settings()
+            return
+        if path == "/certificates":
+            if self._require_auth_json():
+                self._handle_certificates()
+            return
         if path == "/setup-password":
             self._handle_setup_password()
             return
@@ -3945,6 +4079,45 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(404, {"error": "not_found"})
             return
         self._handle_webhook(parsed)
+
+    def _handle_nginx_settings(self) -> None:
+        try:
+            data = _read_json_body(self, max_bytes=8192)
+            action = data.get("action", "")
+            if action == "save":
+                result = _save_nginx_settings(data)
+            elif action in ("probe", "save-upstream"):
+                result = _nginx_upstream_operation(data)
+            elif action == "remove-site":
+                result = _remove_nginx_site(data)
+            else:
+                raise ValueError("未知的 Nginx 操作")
+        except (ValueError, OSError, _MaintenanceLockError) as exc:
+            self._write_json(503 if isinstance(exc, _MaintenanceLockError) else 400,
+                             {"error": "nginx_operation_failed", "detail": str(exc)})
+            return
+        _audit_event("nginx_settings", actor=self.client_address[0], success=True, detail={"action": action})
+        self._write_json(200, result)
+
+    def _handle_certificates(self) -> None:
+        action, project = "invalid", ""
+        try:
+            data = _read_json_body(self, max_bytes=300 * 1024)
+            if not isinstance(data, dict):
+                raise ValueError("请求必须为 JSON 对象")
+            action = data.get("action", "invalid")
+            project = data.get("project", "")
+            _certificate_operation(data)
+        except (ValueError, OSError, _MaintenanceLockError) as exc:
+            _audit_event("certificate_operation", actor=self.client_address[0], success=False,
+                         detail={"action": action if isinstance(action, str) and action in {"upload", "enable", "disable", "rename", "delete"} else "invalid"})
+            status = 503 if isinstance(exc, _MaintenanceLockError) else 400
+            detail = str(exc) if isinstance(exc, certificates.CertificateError) else "证书操作失败，请检查请求、文件权限或维护状态"
+            self._write_json(status, {"error": "certificate_operation_failed", "detail": detail})
+            return
+        _audit_event("certificate_operation", actor=self.client_address[0], target=project, success=True,
+                     detail={"action": action})
+        self._write_json(200, _certificates_payload())
 
     def _handle_login(self) -> None:
         if not UI_PASSWORD_HASH or not UI_SESSION_SECRET:
@@ -4126,6 +4299,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         except _ProjectRunningError:
             self._write_json(409, {"error": "project_is_running"})
+            return
+        except certificates.CertificateError as exc:
+            self._write_json(409, {"error": "certificate_in_use", "detail": str(exc)})
             return
         except OSError as exc:
             _log(f"projects config delete failed: {exc}")

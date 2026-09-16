@@ -7,7 +7,7 @@ APP_HOME="${MINI_DEPLOY_HOME:-}"
 ENV_FILE="${DEPLOY_AGENT_ENV_FILE:-/etc/mini-deploy-agent.env}"
 SERVICE_NAME="${DEPLOY_AGENT_SERVICE_NAME:-}"
 STATE_FILE="${DEPLOY_AGENT_STATE_FILE:-}"
-PORT="${DEPLOY_AGENT_PORT:-}"
+PORT=6868
 PROJECTS_FILE="${DEPLOY_PROJECTS_FILE:-}"
 
 env_file_value() {
@@ -35,14 +35,12 @@ if [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
   [[ -n "$APP_HOME" ]] || APP_HOME="$(env_file_value "MINI_DEPLOY_HOME")"
   [[ -n "$SERVICE_NAME" ]] || SERVICE_NAME="$(env_file_value "DEPLOY_AGENT_SERVICE_NAME")"
   [[ -n "$STATE_FILE" ]] || STATE_FILE="$(env_file_value "DEPLOY_AGENT_STATE_FILE")"
-  [[ -n "$PORT" ]] || PORT="$(env_file_value "DEPLOY_AGENT_PORT")"
   [[ -n "$PROJECTS_FILE" ]] || PROJECTS_FILE="$(env_file_value "DEPLOY_PROJECTS_FILE")"
 fi
 APP_HOME="${APP_HOME:-/opt/mini_deploy}"
 SERVICE_NAME="${SERVICE_NAME:-mini-deploy-agent}"
 STATE_FILE="${STATE_FILE:-/var/lib/mini-deploy-agent/state.json}"
 DATA_HOME="${DATA_HOME:-$(dirname -- "$STATE_FILE")}"
-PORT="${PORT:-9010}"
 PROJECTS_FILE="${PROJECTS_FILE:-$DATA_HOME/projects.json}"
 PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
 if [[ -n "$PYTHON_BIN" ]]; then

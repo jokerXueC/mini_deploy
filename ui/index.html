@@ -64,7 +64,58 @@
       <button id="serverViewTab" class="view-tab" type="button" data-view="server">服务器状态</button>
       <button id="eventsViewTab" class="view-tab" type="button" data-view="events">告警事件</button>
       <button id="notifyViewTab" class="view-tab" type="button" data-view="notify">通知配置</button>
+      <button id="certificatesViewTab" class="view-tab" type="button" data-view="certificates">Nginx 证书</button>
     </nav>
+
+    <div id="certificatesView" class="dashboard-view">
+      <section class="panel certificate-panel nginx-setup">
+        <div class="panel-head"><h2>Nginx 接入</h2><button id="nginxDetect" class="ghost-button" type="button">检测运行环境</button></div>
+        <div id="nginxFeedback" role="status" aria-live="polite"></div>
+        <form id="nginxSettingsForm" class="certificate-layout">
+          <div>
+            <label class="field"><span>运行方式</span><select id="nginxMode"><option value="none">暂不配置</option><option value="local">服务器本机</option><option value="docker">Docker 容器</option></select></label>
+            <label id="nginxContainerField" class="field" hidden><span>Nginx 容器</span><input id="nginxContainer" list="nginxContainerOptions" maxlength="128" placeholder="选择检测结果或填写容器名称"><datalist id="nginxContainerOptions"></datalist></label>
+            <dl id="nginxDetectedDetails" class="detail-list certificate-details"></dl>
+          </div>
+          <div>
+            <div id="nginxCurrent" class="muted">尚未接入</div>
+            <div id="nginxMountHelp" hidden><p>容器需要以下目录挂载；修改 Compose 后需重建容器。</p><pre id="nginxMountExample" class="command-output"></pre><p>证书目录只能单独挂载，不能把整个 Agent 数据目录交给容器。</p></div>
+            <div class="certificate-actions"><button id="nginxSave" class="danger-button" type="submit">检查并保存</button></div>
+          </div>
+        </form>
+        <form id="nginxUpstreamForm" class="nginx-upstream">
+          <label class="field"><span>业务项目</span><select id="nginxProject"><option value="">请先添加项目</option></select></label>
+          <label class="field"><span>Nginx 访问的后端地址</span><input id="nginxUpstream" maxlength="253" placeholder="例如 api 或 172.17.0.1" required></label>
+          <span id="nginxPort" class="muted"></span>
+          <div class="certificate-actions"><button id="nginxProbe" class="ghost-button" type="button">检查连通</button><button id="nginxSaveUpstream" class="ghost-button" type="submit">检查并保存后端</button><button id="nginxRemoveSite" class="ghost-button danger-text" type="button">移除域名入口</button></div>
+          <p id="nginxNetworkHint" class="muted"></p>
+        </form>
+      </section>
+      <section class="panel certificate-panel">
+        <div class="panel-head"><h2>域名证书</h2><span id="certificateEnvironment" class="muted"></span></div>
+        <div id="certificateFeedback" role="status" aria-live="polite"></div>
+        <div class="certificate-layout">
+          <div>
+            <label class="field"><span>业务项目</span><select id="certificateProject"><option value="">加载中</option></select></label>
+            <dl id="certificateDetails" class="detail-list certificate-details"></dl>
+            <div class="certificate-actions">
+              <button id="certificateEnable" class="ghost-button" type="button" disabled>启用 HTTPS</button>
+              <button id="certificateDisable" class="ghost-button" type="button" disabled>停用 HTTPS</button>
+              <button id="certificateDelete" class="ghost-button danger-text" type="button" disabled>删除证书</button>
+            </div>
+          </div>
+          <form id="certificateForm" autocomplete="off">
+            <label class="field"><span>证书名称</span><input id="certificateLabel" maxlength="80" required placeholder="例如：API 正式证书"></label>
+            <label class="field"><span>完整证书链（PEM）</span><input id="certificateFile" type="file" accept=".pem,.crt,.cer"><textarea id="certificatePem" rows="5" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+            <label class="field"><span>未加密私钥（PEM）</span><input id="certificateKeyFile" type="file" accept=".pem,.key"><textarea id="certificatePrivateKey" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+            <div class="certificate-actions">
+              <button id="certificateUpload" class="danger-button" type="submit" disabled>保存证书</button>
+              <button id="certificateRename" class="ghost-button" type="button" disabled>修改名称</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
 
     <div id="deployView" class="dashboard-view active">
     <section class="summary-grid status-grid">
@@ -580,5 +631,7 @@
   </main>
 
   <script src="ui/app.js"></script>
+  <script src="ui/certificates.js"></script>
+  <script src="ui/nginx.js"></script>
 </body>
 </html>

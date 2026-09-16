@@ -42,13 +42,10 @@ bash install.sh
 
 直接回车就是中文；输入 `en` 使用英文。
 
-然后会问面板域名：
+默认不需要填写域名，也不需要 Nginx 或证书。安装后直接访问 **`http://服务器公网IP:6868`**，端口固定为 `6868`。
+脚本会尝试识别公网 IP；识别失败时，用云控制台显示的公网 IP 替换地址中的占位符。也可用 `DEPLOY_PUBLIC_IP` 指定安装完成时显示的 IP。
 
-```text
-请输入部署面板域名，例如 deploy.example.com；直接回车则跳过 Nginx 自动配置:
-```
-
-填了域名后，脚本会尝试自动配置 Nginx，并可选安装 certbot 申请 HTTPS。
+如需额外配置域名入口，可以执行 `DEPLOY_DOMAIN=deploy.example.com bash install.sh`，脚本会配置 Nginx，并可选安装 certbot 申请 HTTPS。
 如果你的项目使用 Docker Compose，且服务器未安装 Docker，安装脚本也会询问是否自动安装 Docker；默认不安装。
 
 安装过程中还会要求输入两次管理员密码。脚本先把密码哈希和独立的 Session Secret 写入 `/etc/mini-deploy-agent.env`，然后才启动 Agent 和配置公网入口。网页不提供管理员密码初始化，避免第一个公网访问者抢先注册。
@@ -56,10 +53,12 @@ bash install.sh
 没有 HTTPS 也能访问：
 
 ```text
-http://你的域名/deploy/ui
+http://服务器公网IP:6868
 ```
 
-测试环境确需经过公网访问时必须开启 HTTPS，并限制来源；HTTPS 不能消除当前 root 权限边界。
+安装器会尝试在已启用的 UFW/firewalld 中放行 TCP 6868；**云服务器还需在安全组中放行入站 TCP 6868**。默认 HTTP 不加密，可以后续配置域名和 HTTPS。
+
+升级也会切换到固定的 `0.0.0.0:6868`，旧 `DEPLOY_AGENT_HOST` / `DEPLOY_AGENT_PORT` 不再控制监听地址；安装器管理的旧 Nginx 配置会同步修改上游端口。若 6868 已被其他服务占用，安装器会停止并提示释放端口。
 
 ## 第一次登录
 
@@ -82,7 +81,7 @@ systemctl restart mini-deploy-agent
 
 ```bash
 systemctl status mini-deploy-agent
-curl http://127.0.0.1:9010/health
+curl http://127.0.0.1:6868/health
 ```
 
 ## 添加第一个项目
@@ -115,13 +114,13 @@ curl http://127.0.0.1:9010/health
 
 “服务器执行指令”仍然保留，作为自动初始化失败时的备用方案。
 
-如果你填写了业务域名，可以点击“配置业务域名”。它会自动生成该项目的 Nginx 反向代理配置：
+如果你填写了业务域名，先在 **Nginx 证书 → Nginx 接入** 中选择运行环境，再点击项目里的“配置业务域名”。它会自动生成该项目的 Nginx 反向代理配置：
 
 ```text
 api.example.com -> http://127.0.0.1:8001
 ```
 
-如果勾选“业务域名申请 HTTPS”，会在服务器已安装 certbot 时尝试自动申请证书。没有 HTTPS 时，HTTP 访问仍然可用。
+如果勾选“业务域名申请 HTTPS”，本机模式会在服务器已安装 certbot 时尝试申请证书；Docker 模式请在证书页上传证书。没有 HTTPS 时，HTTP 访问仍然可用。
 
 ## 重要边界
 
@@ -157,6 +156,43 @@ curl -fsS http://127.0.0.1:8001/health
 URL 中只保留 `project` 参数，不要拼接 `token` 或 `secret`。把 Token 分别填入 Gitee 的密码/Token、GitHub 的 Secret 或 GitLab 的 Secret token 字段，触发事件选择 Push。GitHub 会使用 HMAC-SHA256 签名，Gitee/GitLab 会使用平台原生 Token 请求头。
 
 之后你每次 push 到配置分支，mini_deploy 就会执行该项目的 `deploy.sh`。
+
+### 选择 Nginx 运行环境
+
+面板 `公网IP:6868` 不依赖 Nginx。只有配置业务域名或证书时，才需要完成以下步骤：
+
+1. 先保存业务项目；打开 **Nginx 证书**，点击 **检测运行环境**。
+2. 选择“服务器本机”或“Docker 容器”。两者都存在时，请选择实际承接域名流量的实例；也可以“暂不配置”。
+3. 点击 **检查并保存**。后续项目和证书操作都会复用此实例。
+4. 选择业务项目，填写 **Nginx 访问的后端地址**，点击 **检查并保存后端**。再回项目配置业务域名。
+
+本机或 Docker `host` 网络通常使用 `127.0.0.1`；Docker 桥接网络应填写同网络的业务服务名，例如 `api`，或容器可达的宿主机地址。业务端口来自项目设置。宿主机业务如果只监听 `127.0.0.1`，桥接容器通常无法连接它，需要调整业务监听或网络。
+
+Docker 接入要求本机 Docker Unix Socket、运行中的 Nginx 容器，以及两个**目录 bind mount**：
+
+- 独立的宿主机配置目录 → `/etc/nginx/conf.d`。
+- Agent 数据目录下的 `certificates` → `/etc/mini-deploy/certificates`，可只读挂载。
+
+网页会显示检测到的网络、端口和挂载，并给出所需挂载示例。修改 Compose 挂载后需要重建容器，再次检测。暂不支持远程 Docker、命名 Volume 或单文件配置挂载；不会自动重建已有容器。容器应发布实际使用的 80/443 端口；Nginx 主配置需包含 `include /etc/nginx/conf.d/*.conf;`。
+
+没有 Nginx 时可以先选择“暂不配置”，或安装本机 Nginx；新建 Docker Nginx 可参考 [Compose 示例](../examples/nginx.compose.yml)。本机未安装并不代表 Docker 中没有 Nginx。
+
+修改运行实例前，需要先停用 HTTPS、删除该实例的托管证书，并对已有项目点击 **移除域名入口**。移除入口不会删除业务代码或停止业务服务，但域名访问会暂时中断。
+
+### 网页管理 HTTPS 证书
+
+先完成上面的 Nginx 接入，Agent 所在服务器还需安装 OpenSSL。已有证书时，不用每次登录服务器替换文件：
+
+1. 在项目设置里填写业务域名和服务端口。
+2. 打开 **Nginx 证书**，选择项目，填写证书名称。
+3. 选择或粘贴 PEM 完整证书链（`fullchain.pem`）和未加密私钥（`privkey.pem`），点击保存。
+4. 点击 **启用 HTTPS**。面板校验证书和 Nginx 配置后重新加载服务，HTTP 会跳转至 HTTPS。
+
+续期后上传新证书和私钥，点击 **替换并应用证书** 即可；也可以单独修改证书名称。删除前必须先停用 HTTPS，停用后站点仅保留 HTTP。443 端口需要在防火墙和安全组中放行。
+
+此入口管理已选择的本机/Docker Nginx 上、面板已登记的**业务项目域名**，不覆盖面板自身域名、手工维护的站点或 Certbot 改写的配置。已有 Certbot 站点应继续使用 Certbot 续期；本入口不自动申请或续签证书。没有域名时无法启用此功能。
+
+上传证书保存在数据目录的 `certificates/` 下，私钥不回显。Nginx 实例及项目后端设置保存于同目录的 `nginx.json`。替换时保留旧证书用于恢复，删除会一并删除保留版本；安装备份包含这两项数据，但不自动归档外部 Docker Compose 文件或业务 Nginx 挂载目录，后两项需另行备份。
 
 ## 常用排查
 

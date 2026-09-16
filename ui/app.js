@@ -940,8 +940,8 @@ function animateNumberText(id, value, formatter) {
 }
 
 function setView(view) {
-  activeView = ['server', 'events', 'notify'].includes(view) ? view : 'deploy';
-  ['deploy', 'server', 'events', 'notify'].forEach(name => {
+  activeView = ['server', 'events', 'notify', 'certificates'].includes(view) ? view : 'deploy';
+  ['deploy', 'server', 'events', 'notify', 'certificates'].forEach(name => {
     $(`${name}View`)?.classList.toggle('active', activeView === name);
     $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
   });
@@ -950,6 +950,7 @@ function setView(view) {
     server: ['服务器健康面板', '查看服务器资源、网络吞吐和 Docker 容器运行状态。'],
     events: ['告警与事件', '集中查看部署、WebHook、容器和资源异常。'],
     notify: ['通知配置', '配置部署结果、服务器和 Docker 异常的推送渠道。'],
+    certificates: ['Nginx 证书', '项目域名、证书有效期与 HTTPS 状态。'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
@@ -960,6 +961,7 @@ function setView(view) {
   if (activeView === 'server') refreshServerStatus();
   else if (activeView === 'events') refreshEventsStatus();
   else if (activeView === 'notify') refreshNotificationConfig();
+  else if (activeView === 'certificates') refreshCertificates();
   else refresh();
 }
 
@@ -1692,9 +1694,10 @@ async function configureProjectNginx() {
     setProjectFormError('请先填写业务域名，例如 api.example.com。');
     return;
   }
+  if (!await ensureNginxConfigured()) return;
   const confirmed = await showConfirmDialog({
     title: '配置业务域名',
-    message: `将为 ${project.app_domain} 生成 Nginx 反向代理，转发到 127.0.0.1:${project.service_port || 8000}${project.app_https ? '，并尝试申请 HTTPS 证书' : ''}。确认继续？`,
+    message: `将使用已选择的 Nginx 实例和后端地址，为 ${project.app_domain} 配置反向代理。业务端口为 ${project.service_port || 8000}${project.app_https ? '；仅本机模式可通过 Certbot 自动申请证书' : ''}。确认继续？`,
     confirmText: '配置域名',
     danger: false,
   });
@@ -3040,6 +3043,40 @@ function scheduleServerRefresh() {
   serverRefreshTimer = window.setTimeout(refreshServerStatus, serverRefreshSeconds * 1000);
 }
 
+function clearEventsRefresh() {
+  if (eventsRefreshTimer) window.clearTimeout(eventsRefreshTimer);
+  eventsRefreshTimer = null;
+}
+
+async function refreshEventsStatus() {
+  if (activeView !== 'events') return;
+  clearEventsRefresh();
+  try {
+    const status = await fetchJson('status');
+    csrfToken = status.csrf_token || csrfToken;
+    if (activeView !== 'events') return;
+    renderAlerts(status.alerts || []);
+    renderEvents(status.events || []);
+    $('updatedAt').textContent = `事件刷新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+  } catch (err) {
+    if (activeView === 'events') $('eventTimelineHint').textContent = `事件加载失败: ${err.message}`;
+  } finally {
+    if (activeView === 'events') eventsRefreshTimer = window.setTimeout(refreshEventsStatus, 30000);
+  }
+}
+
+async function refreshNotificationConfig() {
+  try {
+    const [config, status] = await Promise.all([fetchJson('projects-config'), fetchJson('status')]);
+    csrfToken = status.csrf_token || csrfToken;
+    if (activeView !== 'notify') return;
+    lastConfig = config;
+    renderNotificationConfig(config.notifications || {});
+  } catch (err) {
+    if (activeView === 'notify') $('notificationResult').textContent = `通知配置加载失败: ${err.message}`;
+  }
+}
+
 async function refreshServerStatus() {
   if (activeView !== 'server') return;
   clearServerRefresh();
@@ -3177,12 +3214,14 @@ $('refreshBtn').addEventListener('click', () => {
   if (activeView === 'server') refreshServerStatus();
   else if (activeView === 'events') refreshEventsStatus();
   else if (activeView === 'notify') refreshNotificationConfig();
+  else if (activeView === 'certificates') refreshCertificates();
   else refresh();
 });
 $('deployViewTab').addEventListener('click', () => setView('deploy'));
 $('serverViewTab').addEventListener('click', () => setView('server'));
 $('eventsViewTab')?.addEventListener('click', () => setView('events'));
 $('notifyViewTab')?.addEventListener('click', () => setView('notify'));
+$('certificatesViewTab')?.addEventListener('click', () => setView('certificates'));
 $('clearAlertsBtn')?.addEventListener('click', toggleCurrentNoticeDismissal);
 $('deployStats')?.addEventListener('click', (event) => {
   const bar = event.target.closest('.history-bar[data-detail-key]');

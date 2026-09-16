@@ -14,7 +14,7 @@
 你最终要得到的是：
 
 - 一台 Linux 服务器。
-- 一个可以打开的部署面板：`https://你的域名/deploy/ui`。
+- 一个可以打开的部署面板：`http://服务器公网IP:6868`，不需要域名。
 - 一个后端项目目录，例如 `/srv/python-api`、`/srv/go-api`、`/srv/java-api`。
 - 一个部署脚本，例如 `/srv/python-api/deploy/deploy.sh`。
 - 一个 WebHook：你每次 `git push` 后，代码平台通知 mini_deploy，mini_deploy 自动执行部署脚本。
@@ -29,7 +29,7 @@ mini_deploy 不会自动理解你的业务代码。它可以生成 `deploy.sh` �
 flowchart TD
     A[你在本地写代码] --> B[git push 到 Gitee/GitHub/GitLab]
     B --> C[代码平台触发 WebHook]
-    C --> D[Nginx 收到 /deploy/webhook]
+    C --> D[服务器 6868 端口收到 /webhook]
     D --> E[mini_deploy Agent 校验 Token 和分支]
     E --> F{校验通过?}
     F -- 否 --> G[拒绝请求并写日志]
@@ -98,12 +98,12 @@ dnf install -y git
 
 ```mermaid
 flowchart TD
-    A[登录 Linux 服务器] --> B[准备域名并解析到服务器]
+    A[登录 Linux 服务器] --> B[确认公网 IP 并放行 TCP 6868]
     B --> C[clone mini_deploy]
     C --> D[执行 bash install.sh]
-    D --> E[输入域名和管理员密码]
-    E --> F[写入凭据/启动 Agent/生成 Nginx 配置]
-    F --> G[打开面板 /deploy/ui 并登录]
+    D --> E[选择语言并设置管理员密码]
+    E --> F[写入凭据并启动 Agent]
+    F --> G[打开 http://公网IP:6868 并登录]
     G --> I[添加项目]
     I --> J[点击自动初始化]
     J --> K[保存项目配置并生成脚本/service]
@@ -141,17 +141,7 @@ bash install.sh
 en
 ```
 
-然后脚本会继续问部署面板域名：
-
-```text
-请输入部署面板域名，例如 deploy.example.com；直接回车则跳过 Nginx 自动配置:
-```
-
-你填自己的域名，例如：
-
-```text
-deploy.example.com
-```
+默认不用填写域名。接下来设置管理员密码，安装后通过固定的 `6868` 端口访问。
 
 然后脚本会自动做这些事：
 
@@ -160,20 +150,21 @@ deploy.example.com
 - 创建 `/var/lib/mini-deploy-agent/projects.json`；它是持久数据，不放在程序发布目录中。
 - 安装 systemd 服务。
 - 启动 `mini-deploy-agent`。
-- 如果服务器没装 Nginx，会问你是否自动安装。
-- 自动写入 `/etc/nginx/conf.d/mini-deploy.conf`。
-- 自动执行 `nginx -t`。
-- 自动重载 Nginx。
+- 固定监听 `0.0.0.0:6868`。
+- 尝试在已启用的 UFW/firewalld 中放行 TCP 6868。
+- 只有显式选择域名入口时，才安装和配置 Nginx。
 - 如果服务器没装 Docker，会问你是否自动安装；只有 Docker Compose 项目才需要。
 - 输出最终访问地址。
 
 正常情况下，你只需要打开脚本最后输出的地址：
 
 ```text
-http://deploy.example.com/deploy/ui
+http://服务器公网IP:6868
 ```
 
-如果你已经配好 HTTPS 或后续用 certbot 申请证书，就打开：
+云厂商安全组也需要放行入站 TCP 6868。安装器无法自动修改云控制台的安全组。如果脚本未识别到公网 IP，使用控制台显示的 IP 即可。
+
+如果你额外配置了域名和 HTTPS，也可以打开：
 
 ```text
 https://deploy.example.com/deploy/ui
@@ -191,10 +182,10 @@ DEPLOY_DOMAIN=deploy.example.com bash install.sh
 INSTALL_LANG=en DEPLOY_DOMAIN=deploy.example.com bash install.sh
 ```
 
-如果你暂时没有域名，直接回车跳过，先用服务器本机测试：
+服务器本机也可以测试：
 
 ```text
-http://127.0.0.1:9010/ui
+http://127.0.0.1:6868
 ```
 
 ## 4. 安装后只需要检查这三件事
@@ -203,7 +194,7 @@ http://127.0.0.1:9010/ui
 
 ```bash
 systemctl status mini-deploy-agent
-curl http://127.0.0.1:9010/health
+curl http://127.0.0.1:6868/health
 ```
 
 看到类似下面这样就正常：
@@ -321,13 +312,15 @@ git ls-remote git@gitee.com:你的组织/你的仓库.git HEAD
 
 “服务器执行指令”仍然保留，主要用于自动初始化失败时手动排查。
 
-如果项目填写了业务域名，例如 `api.example.com`，再点击“配置业务域名”。面板会自动生成该项目的 Nginx 反向代理：
+如果项目填写了业务域名，例如 `api.example.com`，先保存项目，再到“Nginx 证书 → Nginx 接入”检测并选择本机或 Docker Nginx，检查并保存业务后端地址。然后回到项目点击“配置业务域名”。面板会生成：
 
 ```text
-api.example.com -> http://127.0.0.1:项目端口
+api.example.com -> http://已保存的后端地址:项目端口
 ```
 
-如果勾选“业务域名申请 HTTPS”，并且服务器有 certbot，会继续尝试自动申请证书。HTTP 配置会先生成，所以 HTTPS 暂时失败也不影响先访问业务域名。
+本机或 Docker host 网络通常使用 `127.0.0.1`；桥接网络要填写同网络服务名或可达的宿主机地址。Docker 模式还需按引导挂载配置和证书目录。
+
+如果勾选“业务域名申请 HTTPS”，本机模式在服务器有 certbot 时会尝试申请证书；Docker 模式使用网页上传证书。HTTP 配置会先生成，所以 HTTPS 暂时失败不影响 HTTP 入口。
 
 它们通常会做这些事：
 
@@ -456,14 +449,12 @@ curl -fsS --max-time 10 http://127.0.0.1:8001/health
 sequenceDiagram
     participant Dev as 你
     participant Git as 代码平台
-    participant Nginx as Nginx
     participant Agent as mini_deploy Agent
     participant Script as deploy.sh
     participant App as 后端服务
 
     Dev->>Git: git push
-    Git->>Nginx: POST /deploy/webhook?project=xxx + 平台原生 Token/签名
-    Nginx->>Agent: 转发请求
+    Git->>Agent: POST http://公网IP:6868/webhook?project=xxx + 平台原生 Token/签名
     Agent->>Agent: 校验 project、请求头/HMAC、branch
     Agent->>Agent: 加入部署队列
     Agent->>Script: 执行 deploy.sh
