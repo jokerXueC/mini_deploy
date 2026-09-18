@@ -638,6 +638,17 @@ html[data-theme="light"] .theme-toggle-icon {
   background: var(--surface-track);
 }
 .resource-bar:hover { opacity: .82; }
+.gateway-entry-choice {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  margin: 12px 0 20px;
+}
+.gateway-entry-choice .gateway-caption { margin: 0; line-height: 1.7; }
+@media (max-width: 700px) {
+  .gateway-entry-choice { grid-template-columns: 1fr; gap: 8px; }
+}
 .system-trend-panel {
   margin-top: 12px;
   padding: 16px;
@@ -686,12 +697,10 @@ html[data-theme="light"] .theme-toggle-icon {
 .system-trend-chart {
   min-height: 196px;
   overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.045), transparent),
-    var(--surface-soft);
-  padding: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 .trend-card-grid {
   display: grid;
@@ -704,7 +713,7 @@ html[data-theme="light"] .theme-toggle-icon {
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 8px;
   background:
     linear-gradient(180deg, color-mix(in srgb, currentColor 4%, transparent), transparent 74%),
     color-mix(in srgb, var(--surface-muted) 70%, transparent);
@@ -731,7 +740,7 @@ html[data-theme="light"] .theme-toggle-icon {
 }
 .trend-card-head strong {
   color: currentColor;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 950;
   line-height: 1;
   white-space: nowrap;
@@ -775,7 +784,7 @@ html[data-theme="light"] .theme-toggle-icon {
   display: block;
   width: var(--trend-width, 100%);
   min-width: 100%;
-  height: 126px;
+  height: 210px;
   margin-top: 0;
 }
 .trend-grid-line {
@@ -3088,8 +3097,24 @@ html[data-theme="light"] .theme-toggle-icon {
 .gateway-advanced > summary { cursor: pointer; font-size: 13px; font-weight: 700; }
 .gateway-advanced > summary span { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 12px; }
 .gateway-advanced > form { margin-top: 20px; }
+.nginx-runtime-form { align-items: start; column-gap: 32px; row-gap: 20px; }
+.nginx-runtime-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.nginx-runtime-fields .certificate-details { margin-top: 0; gap: 4px; }
+.nginx-runtime-guide { min-width: 0; padding-top: 2px; }
+.nginx-setup p.nginx-mount-intro { margin: 0 0 12px; font-size: 12px; line-height: 1.85; white-space: normal; overflow-wrap: anywhere; }
+.nginx-mount-details { min-width: 0; }
+.nginx-mount-details > summary { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 10px 2px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--fg); }
+.nginx-mount-details > summary::-webkit-details-marker { display: none; }
+.nginx-mount-details > summary:hover { color: var(--blue); }
+.nginx-mount-details > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+.nginx-mount-chevron { width: 6px; height: 6px; flex: 0 0 6px; margin: 0 2px; border: solid currentColor; border-width: 1.5px 1.5px 0 0; transform: rotate(45deg); }
+.nginx-mount-details[open] .nginx-mount-chevron { transform: rotate(135deg); }
+.nginx-mount-format { margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 400; }
+.nginx-mount-details .command-output { min-width: 0; max-width: 100%; margin: 0 0 14px; padding: 12px; border: 0; border-radius: 6px; background: var(--surface-muted); color: var(--fg); font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nginx-runtime-actions { grid-column: 1 / -1; display: flex; justify-content: flex-start; padding-top: 4px; }
 .gateway-section .certificate-details { grid-template-columns: minmax(0, 1fr); }
 .gateway-section .certificate-details > div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; border-bottom: 1px solid var(--line); padding: 10px 0; }
+.gateway-section .nginx-runtime-fields .certificate-details > div { border: 0; padding: 8px 0; }
 .gateway-section .certificate-details dt { color: var(--muted); font-size: 12px; }
 .gateway-section .certificate-details dd { font-size: 12px; margin: 0; }
 .gateway-pem[open] { display: grid; gap: 12px; }

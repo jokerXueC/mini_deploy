@@ -71,6 +71,44 @@ const DashboardMotion = (() => {
   }
 
   function morph(svg, next) {
+    if (svg.dataset?.realtime === 'true' && next.dataset?.realtime === 'true') {
+      // Match timestamps: a rolling window moves existing samples horizontally.
+      const previous = new Map();
+      svg.querySelectorAll('path.trend-line').forEach(path => {
+        JSON.parse(path.dataset.samples || '[]').forEach(sample => previous.set(sample[2], sample));
+      });
+      const transitions = Array.from(next.querySelectorAll('path.trend-line')).map(path => {
+        const samples = JSON.parse(path.dataset.samples || '[]');
+        const from = samples.map((sample, index) => previous.get(sample[2]) ||
+          previous.get(samples[index - 1]?.[2]) || sample);
+        return {path, samples, from};
+      });
+      cancel(svg);
+      svg.replaceChildren(...Array.from(next.childNodes));
+      const dots = Array.from(svg.querySelectorAll('.trend-point'));
+      value(svg, 1, progress => {
+        let index = 0;
+        transitions.forEach(({path, samples, from}) => {
+          const visible = samples.map(([x, y, ts], i) => [
+            from[i][0] + (x - from[i][0]) * progress,
+            from[i][1] + (y - from[i][1]) * progress, ts,
+          ]);
+          // Coincident points occur when a new sample grows from the endpoint.
+          path.setAttribute('d', curve(visible.filter((p, i) => !i || p[0] > visible[i - 1][0])));
+          path.dataset.samples = JSON.stringify(visible);
+          visible.forEach(([x, y]) => {
+            dots[index++]?.querySelectorAll('circle').forEach(circle => {
+              circle.setAttribute('cx', x);
+              circle.setAttribute('cy', y);
+            });
+          });
+        });
+      }, {initial: 0, duration: 850});
+      return;
+    }
+    if (svg.dataset && next.dataset) {
+      svg.dataset.realtime = next.dataset.realtime || 'false';
+    }
     const before = Array.from(svg.querySelectorAll('path,circle,line,text'));
     const after = Array.from(next.querySelectorAll('path,circle,line,text'));
     const compatible = svg.getAttribute('viewBox') === next.getAttribute('viewBox') && before.length === after.length &&

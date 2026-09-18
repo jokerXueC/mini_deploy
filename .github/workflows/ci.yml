@@ -27,7 +27,7 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Lint Python
-        run: ruff check agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py scripts/verify_backup.py tests
+        run: ruff check agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py entrypoint_checks.py scripts/verify_backup.py tests
       - name: Run tests
         run: pytest
 

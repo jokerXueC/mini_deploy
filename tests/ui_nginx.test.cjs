@@ -16,7 +16,7 @@ function setup() {
     },
   };
   vm.createContext(context);
-  for (const name of ['gatewayTab', 'invalidateNginxPlan', 'nginxQuickFields', 'nginxQuickPayload', 'nginxInstallFields', 'nginxInstallPayload', 'toggleNginxInstall']) {
+  for (const name of ['gatewayTab', 'invalidateNginxPlan', 'nginxQuickFields', 'nginxQuickPayload', 'nginxInstallFields', 'nginxInstallPayload', 'toggleNginxInstall', 'nginxEntryFields']) {
     const start = source.indexOf(`function ${name}(`);
     const end = source.indexOf('\n}', start) + 2;
     vm.runInContext(source.slice(start, end), context);
@@ -24,6 +24,24 @@ function setup() {
   context.$('nginxQuickProject').value = 'api';
   return context;
 }
+
+test('project-owned entry hides installation and managed forms without changing runtime settings', () => {
+  const ctx = setup();
+  const original = JSON.stringify(ctx.nginxSettings);
+  ctx.$('nginxEntryChoice').value = 'project';
+  ctx.nginxEntryFields();
+  assert.equal(ctx.$('nginxInstall').hidden, true);
+  assert.equal(ctx.$('nginxInstallForm').hidden, true);
+  assert.equal(ctx.$('nginxQuickForm').hidden, true);
+  assert.equal(JSON.stringify(ctx.nginxSettings), original);
+  ctx.nginxQuickFields();
+  assert.equal(ctx.$('nginxQuickForm').hidden, true);
+  ctx.$('nginxEntryChoice').value = 'chained';
+  ctx.nginxEntryFields();
+  assert.equal(ctx.$('nginxInstall').hidden, false);
+  assert.equal(ctx.$('nginxQuickForm').hidden, false);
+  assert.match(ctx.$('nginxEntryAdvice').textContent, /8080/);
+});
 
 test('beginner setup defaults to local host and hides advanced address', () => {
   const ctx = setup();

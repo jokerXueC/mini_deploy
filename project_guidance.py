@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import entrypoint_checks
+
 
 def diagnose(output: str, *, exit_code: int = 1) -> list[dict[str, str]]:
     """Return advice only; never copy credentials or run suggested commands."""
@@ -34,7 +36,7 @@ def diagnose(output: str, *, exit_code: int = 1) -> list[dict[str, str]]:
         ("network", ("connection timed out", "failed to connect", "network is unreachable", "connection reset", "operation timed out"),
          "服务器网络连接失败", "检查仓库或镜像源是否可从服务器访问，以及代理、防火墙和出站规则。"),
         ("port", ("address already in use", "port is already allocated", "bind: address already in use"),
-         "业务端口被占用", "核对项目端口和已有服务。可执行 ss -ltnp 查看监听进程；不要直接停止不明服务。"),
+         "业务端口被占用", "在项目中点击检查项目，核对 Compose 映射与端口归属；也可执行 ss -ltnp 和 docker ps。项目自带 Nginx 时无需重复安装；使用统一入口时需调整业务映射。不要直接停止已有服务。"),
         ("disk", ("no space left on device", "disk quota exceeded"),
          "磁盘空间或 inode 不足", "执行 df -h 和 df -i 检查空间，优先清理确认不再需要的日志；不要删除数据库或 Docker 数据卷。"),
         ("docker", ("cannot connect to the docker daemon", "is the docker daemon running"),
@@ -80,6 +82,7 @@ def detect(files: dict[str, str]) -> dict[str, Any]:
     compose = next((name for name in ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml") if name in files), "")
     if compose:
         candidates.append({"template": "docker", "label": "Docker Compose", "evidence": [compose], "entry": ""})
+        warnings.extend(entrypoint_checks.entry_advice(entrypoint_checks.inspect_files(files), check_live=False))
     manifests = [name for name in ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py") if name in files]
     if manifests:
         entries = []
@@ -117,14 +120,15 @@ def detect(files: dict[str, str]) -> dict[str, Any]:
     if len(candidates) > 1:
         warnings.insert(0, "检测到多种部署方式，请选择实际使用的一种。")
     script = next((name for name in ("deploy/deploy.sh", "deploy.sh") if name in files), "")
-    return {"candidates": candidates, "warnings": warnings, "existing_script": script}
+    return {"candidates": candidates, "warnings": warnings, "existing_script": script,
+            "ingress": entrypoint_checks.inspect_files(files)}
 
 
 INSPECT_FILES = (
     "compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml", "Dockerfile",
     "requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "main.py", "app.py", "app/main.py", "src/main.py",
     "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "package.json", "deploy.sh", "deploy/deploy.sh",
-)
+) + entrypoint_checks.OVERRIDE_FILES
 _inspection_lock = threading.Lock()
 
 
@@ -186,8 +190,8 @@ def _inspect_repository(repo: str, branch: str, *, env: dict[str, str] | None = 
                 if mode not in {"100644", "100755"} or kind != "blob" or name not in INSPECT_FILES:
                     continue
                 files[name] = ""
-                # Only Python source is parsed. Manifests and scripts are presence hints.
-                if name.endswith(".py") and int(size) <= 131072:
+                # Read manifests as data only; never execute repository code.
+                if (name.endswith(".py") or name in entrypoint_checks.COMPOSE_FILES + entrypoint_checks.OVERRIDE_FILES) and int(size) <= 131072:
                     code, content = git(["-C", checkout, "cat-file", "blob", oid])
                     if code == 0:
                         files[name] = content

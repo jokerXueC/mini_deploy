@@ -77,6 +77,10 @@
       </div>
       <section id="gatewaySites" class="certificate-panel nginx-setup gateway-section" role="tabpanel" aria-labelledby="gatewaySitesTab">
         <div class="panel-head"><div><h2>项目访问入口</h2><p class="gateway-caption">域名与业务服务</p></div><div class="certificate-actions"><button id="nginxDetect" class="ghost-button compact-action" type="button">立即检测</button><button id="nginxInstall" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="nginxInstallForm">安装 Nginx</button></div></div>
+        <div class="gateway-entry-choice">
+          <label class="field"><span>本次如何配置入口</span><select id="nginxEntryChoice"><option value="project">保留项目自带入口（无需安装）</option><option value="managed">使用面板统一入口</option><option value="chained">统一入口转发到项目 Nginx</option></select></label>
+          <p id="nginxEntryAdvice" class="gateway-caption" role="status"></p>
+        </div>
         <div id="nginxSiteList" class="gateway-site-list"></div>
         <div id="nginxFeedback" role="status" aria-live="polite"></div>
         <form id="nginxInstallForm" class="gateway-install" hidden>
@@ -115,15 +119,21 @@
         </form>
         <details id="nginxAdvanced" class="gateway-advanced">
           <summary>高级接入 <span>已有 Nginx / Docker / 自定义后端</span></summary>
-        <form id="nginxSettingsForm" class="certificate-layout">
-          <div>
+        <form id="nginxSettingsForm" class="certificate-layout nginx-runtime-form">
+          <div class="nginx-runtime-fields">
             <label class="field"><span>运行方式</span><select id="nginxMode"><option value="none">暂不配置</option><option value="local">服务器本机</option><option value="docker">Docker 容器</option></select></label>
             <label id="nginxContainerField" class="field" hidden><span>Nginx 容器</span><input id="nginxContainer" list="nginxContainerOptions" maxlength="128" placeholder="选择检测结果或填写容器名称"><datalist id="nginxContainerOptions"></datalist></label>
             <dl id="nginxDetectedDetails" class="detail-list certificate-details"></dl>
           </div>
-          <div>
-            <div id="nginxMountHelp" hidden><p>仅接入挂载条件齐全的容器。缺少挂载需要维护原 Compose 并重建，不会自动停止或重建容器。</p><details><summary>查看挂载要求</summary><pre id="nginxMountExample" class="command-output"></pre></details></div>
-            <div class="certificate-actions"><button id="nginxSave" class="danger-button" type="submit">检查并保存</button></div>
+          <div id="nginxMountHelp" class="nginx-runtime-guide" hidden>
+            <p class="nginx-mount-intro">容器需挂载配置和证书目录。缺少挂载时，请修改原 Compose 后重建；面板不会自动重建已有容器。</p>
+            <details class="nginx-mount-details">
+              <summary><span class="nginx-mount-chevron" aria-hidden="true"></span><span>查看挂载要求</span><span class="nginx-mount-format">Compose</span></summary>
+              <pre id="nginxMountExample" class="command-output" tabindex="0" aria-label="Nginx 目录挂载示例"></pre>
+            </details>
+          </div>
+          <div class="nginx-runtime-actions">
+            <button id="nginxSave" class="ghost-button compact-action" type="submit">检查并保存</button>
           </div>
         </form>
         <form id="nginxUpstreamForm" class="nginx-upstream">

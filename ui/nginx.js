@@ -4,6 +4,20 @@ let nginxBusy = false;
 let nginxQuickPlan = null;
 let nginxQuickVersion = 0;
 
+function nginxEntryFields() {
+  const choice = $('nginxEntryChoice')?.value || 'managed';
+  const project = choice === 'project';
+  $('nginxInstall').hidden = project;
+  $('nginxAdvanced').hidden = project;
+  if (project) toggleNginxInstall(false);
+  $('nginxEntryAdvice').textContent = project
+    ? '保留项目 Compose 中的 Nginx 和端口映射即可。这里无需安装或接管；已有面板入口仍会保留。部署前请在项目的「检查项目」中核对端口占用。'
+    : choice === 'chained'
+      ? '统一入口负责域名和证书，业务端口填写项目 Nginx 的可达端口（例如 8080）。两者不能同时发布服务器相同地址的 80/443；请先调整业务 Compose。'
+      : '没有自带入口的项目可使用此方式。统一 Nginx 转发到业务服务；安装是可选步骤，已有 Nginx 可通过高级接入复用。';
+  nginxQuickFields();
+}
+
 function nginxInstallFields() {
   const docker = $('nginxInstallMode').value === 'docker';
   $('nginxInstallPort').readOnly = !docker;
@@ -47,7 +61,7 @@ function invalidateNginxPlan() {
 function nginxQuickFields() {
   invalidateNginxPlan();
   const project = nginxSettings?.projects?.find(item => item.key === $('nginxQuickProject').value);
-  $('nginxQuickForm').hidden = !project;
+  $('nginxQuickForm').hidden = !project || $('nginxEntryChoice')?.value === 'project';
   const bridge = nginxSettings?.configured && nginxSettings.profile.mode === 'docker' && nginxSettings.profile.network !== 'host';
   $('nginxQuickDomain').value = project?.domain || '';
   $('nginxQuickPort').value = project?.port || 8000;
@@ -263,6 +277,9 @@ async function ensureNginxConfigured() {
     closeProjectModal();
     setView('certificates');
     gatewayTab('Sites');
+    $('nginxEntryChoice').value = 'managed';
+    nginxEntryFields();
+    window.AppSelects?.syncAll();
     nginxMessage('在访问入口中选择项目、填写域名和端口，即可检查并配置。');
   } catch (error) {
     setProjectFormError(`Nginx 接入检查失败：${error.message}`);
@@ -271,6 +288,8 @@ async function ensureNginxConfigured() {
 }
 
 $('nginxMode').addEventListener('change', nginxFields);
+$('nginxEntryChoice').addEventListener('change', nginxEntryFields);
+nginxEntryFields();
 $('nginxContainer').addEventListener('input', nginxFields);
 $('nginxProject').addEventListener('change', nginxProjectFields);
 $('nginxDetect').addEventListener('click', () => nginxOperation('detect'));

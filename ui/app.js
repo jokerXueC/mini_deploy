@@ -2293,11 +2293,19 @@ function trendPointValue(point, key, { percent = true } = {}) {
   return percent ? Math.max(0, Math.min(100, value)) : Math.max(0, value);
 }
 
+const realtimeTrendScales = new Map();
 function trendScale(points, key, options = {}) {
   const values = points
     .map(point => trendPointValue(point, key, options))
     .filter(value => value != null);
   if (!values.length) return null;
+  if (options.realtime) {
+    const max = options.percent === false
+      ? Math.max(realtimeTrendScales.get(key) || 8, 2 ** Math.ceil(Math.log2(Math.max(8, ...values))))
+      : 100;
+    realtimeTrendScales.set(key, max);
+    return {min: 0, max, latest: values[values.length - 1]};
+  }
   let min = Math.min(...values);
   let max = Math.max(...values);
   const spread = max - min;
@@ -2343,7 +2351,7 @@ function trendPath(points, key, width, height, pad, scale, options = {}) {
     current.push([x, y, value, point]);
   });
   if (current.length) segments.push(current);
-  return segments.map(trendLinePath);
+  return options.withSamples ? segments : segments.map(trendLinePath);
 }
 
 function trendLinePath(segment) {
@@ -2453,14 +2461,14 @@ function renderTrendCard(points, config, availability = trendAvailability(points
       </article>
     `;
   }
-  const height = 126;
+  const height = 210;
   const pad = { top: 12, right: 12, bottom: 20, left: 42 };
   const width = config.realtime ? 480 : trendChartWidth(points, pad);
   const yTop = pad.top;
   const yMid = pad.top + (height - pad.top - pad.bottom) / 2;
   const yBottom = height - pad.bottom;
-  const paths = trendPath(points, key, width, height, pad, scale, config)
-    .map(path => `<path class="trend-line ${className}" d="${path}"></path>`)
+  const paths = trendPath(points, key, width, height, pad, scale, {...config, withSamples: true})
+    .map(segment => `<path class="trend-line ${className}" data-samples="${escapeHtml(JSON.stringify(segment.map(([x, y, , point]) => [x, y, point.ts])))}" d="${trendLinePath(segment)}"></path>`)
     .join('');
   const dots = trendDots(points, key, className, label, width, height, pad, scale, config);
   const latestPoint = points[points.length - 1] || {};
@@ -2475,7 +2483,7 @@ function renderTrendCard(points, config, availability = trendAvailability(points
         <span>${escapeHtml(formatter(scale.min))}-${escapeHtml(formatter(scale.max))}</span>
       </div>
       <div class="trend-chart-scroll" tabindex="0">
-        <svg class="trend-mini-svg" ${config.realtime ? 'preserveAspectRatio="none"' : ''} viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
+        <svg class="trend-mini-svg" ${config.realtime ? 'data-realtime="true" preserveAspectRatio="none"' : ''} viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
           <line class="trend-grid-line" x1="${pad.left}" y1="${yTop.toFixed(1)}" x2="${width - pad.right}" y2="${yTop.toFixed(1)}"></line>
           <line class="trend-grid-line" x1="${pad.left}" y1="${yMid.toFixed(1)}" x2="${width - pad.right}" y2="${yMid.toFixed(1)}"></line>
           <line class="trend-grid-line" x1="${pad.left}" y1="${yBottom.toFixed(1)}" x2="${width - pad.right}" y2="${yBottom.toFixed(1)}"></line>

@@ -78,7 +78,7 @@ for path in "$ENV_FILE" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   fi
 done
 
-for required in agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py env.example examples/projects.empty.json systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
+for required in agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py entrypoint_checks.py env.example examples/projects.empty.json systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
   if [[ ! -f "$SOURCE_DIR/$required" ]]; then
     echo "安装包不完整 / Incomplete installation package: $required" >&2
     exit 1
@@ -2040,6 +2040,20 @@ if nginx_setup_enabled; then
   setup_nginx "$DEPLOY_DOMAIN"
 fi
 
+if ! "$PYTHON_BIN" -c 'import yaml' >/dev/null 2>&1; then
+  echo "安装 Compose 配置检查依赖 / Installing Compose inspection dependency"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update && apt-get install -y python3-yaml
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y python3-pyyaml
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y python3-pyyaml
+  else
+    echo "请为当前 Python 安装 PyYAML 后重试 / Install PyYAML for the current Python and retry" >&2
+    exit 1
+  fi
+  "$PYTHON_BIN" -c 'import yaml'
+fi
 install_docker_if_requested
 
 if curl -fsS --max-time 5 http://127.0.0.1:6868/health >/dev/null 2>&1; then

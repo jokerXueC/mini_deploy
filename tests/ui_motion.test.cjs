@@ -79,6 +79,26 @@ test('growing chart paths keep their SVG opaque and interpolate without replacin
   assert.equal(before.line.d, target);
 });
 
+test('rolling realtime samples retain their height and slide by timestamp', () => {
+  const e = environment();
+  function svg(samples) {
+    const line = {dataset: {samples: JSON.stringify(samples)}, setAttribute(name, value) {this[name] = value;}};
+    return {isConnected: true, dataset: {realtime: 'true'}, childNodes: [line],
+      querySelectorAll(selector) {return selector === 'path.trend-line' ? this.childNodes : [];},
+      replaceChildren(...children) {this.childNodes = children;}};
+  }
+  const before = svg([[0, 80, 1], [10, 20, 2], [20, 80, 3]]);
+  const after = svg([[0, 20, 2], [10, 80, 3], [20, 30, 4]]);
+  e.motion.morph(before, after);
+  assert.doesNotMatch(before.childNodes[0].d, /NaN|Infinity/);
+  e.tick(425);
+  const midway = JSON.parse(before.childNodes[0].dataset.samples);
+  assert.deepEqual(midway[0], [5, 20, 2]);
+  assert.deepEqual(midway[1], [15, 80, 3]);
+  e.tick(850);
+  assert.deepEqual(JSON.parse(before.childNodes[0].dataset.samples), [[0, 20, 2], [10, 80, 3], [20, 30, 4]]);
+});
+
 test('hidden pages settle and detached resources stop scheduling frames', () => {
   const e = environment(), el = {isConnected: true};
   let shown;

@@ -48,6 +48,7 @@ import certificates
 import nginx_runtime
 import nginx_install
 import project_guidance
+import entrypoint_checks
 
 try:
     import fcntl
@@ -1877,6 +1878,9 @@ def _project_doctor(project: DeployProject) -> dict[str, Any]:
             level="warn",
         ))
 
+    ingress = entrypoint_checks.inspect_directory(project.workdir)
+    for index, advice in enumerate(entrypoint_checks.entry_advice(ingress)):
+        checks.append(_doctor_item(f"ingress_{index}", "项目访问入口", False, advice, level="warn"))
     ok = all(item["ok"] or item.get("level") == "warn" for item in checks)
     return {
         "project": project.key,
@@ -3434,10 +3438,12 @@ def _preflight_payload(project: DeployProject) -> dict[str, Any]:
             code, output = _run_command(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=4.0)
             if code != 0:
                 items.append(_preflight_item("critical", "Docker daemon is unavailable", output or "docker info failed", "systemctl status docker --no-pager"))
-            compose_file = project.workdir / "docker-compose.yml"
-            compose_yaml = project.workdir / "docker-compose.yaml"
-            if not compose_file.exists() and not compose_yaml.exists():
+            if not any((project.workdir / name).exists() for name in entrypoint_checks.COMPOSE_FILES):
                 items.append(_preflight_item("warning", "docker-compose file was not found", str(project.workdir), f"ls -lh {shlex.quote(str(project.workdir))}"))
+
+    ingress = entrypoint_checks.inspect_directory(project.workdir)
+    for advice in entrypoint_checks.entry_advice(ingress):
+        items.append(_preflight_item("warning", "项目访问入口检查", advice))
 
     try:
         usage = shutil.disk_usage(project.workdir if project.workdir.exists() else Path("/"))
@@ -4478,6 +4484,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = project_guidance.inspect_repository(
                     str(raw.get("repo") or "").strip(), str(raw.get("branch") or "main").strip(), env=environment,
                 )
+                if result.get("ok") and result.get("ingress"):
+                    result["warnings"] = list(dict.fromkeys(result.get("warnings", []) +
+                        entrypoint_checks.entry_advice(result["ingress"])))
             else:
                 result = _project_preview(_project_from_form(raw))
         except (ValueError, OSError) as exc:
