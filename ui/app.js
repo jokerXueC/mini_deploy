@@ -947,7 +947,10 @@ function setView(view) {
   clearRefresh();
   clearServerRefresh();
   clearEventsRefresh();
-  if (activeView === 'server') refreshServerStatus();
+  if (activeView === 'server') {
+    refreshServerStatus();
+    window.DockerImages?.refresh();
+  }
   else if (activeView === 'events') refreshEventsStatus();
   else if (activeView === 'notify') refreshNotificationConfig();
   else if (activeView === 'certificates') refreshCertificates();
@@ -2192,6 +2195,9 @@ function containerActions(container) {
   } else {
     actions.push({ action: 'start', label: '启动' });
   }
+  if (['exited', 'created', 'dead'].includes(state)) {
+    actions.push({ action: 'remove', label: '删除', danger: true });
+  }
   return actions.map(item => `
     <button
       class="ghost-button container-action ${item.danger ? 'danger-text' : ''}"
@@ -2856,28 +2862,38 @@ function downloadCurrentContainerLog() {
   });
 }
 
+let containerActionBusy = false;
 async function runContainerAction(container, action) {
+  if (containerActionBusy) return;
+  containerActionBusy = true;
+  const item = lastSystemPayload?.docker?.containers?.find(item => item.name === container || item.id === container);
   const labels = {
     restart: '重启',
     stop: '停止',
     start: '启动',
     pause: '暂停',
     unpause: '恢复',
+    remove: '删除',
   };
   const label = labels[action] || action;
   const confirmed = await showConfirmDialog({
     title: `${label}容器`,
-    message: `确认${label}容器 ${container}？`,
+    message: action === 'remove'
+      ? `确认删除容器 ${container}（${item?.id?.slice(0, 12) || '未知 ID'}）？容器自身写入的文件将丢失，数据卷和宿主机挂载目录保留。Compose 下次部署可能重建该容器。`
+      : `确认${label}容器 ${container}？`,
     confirmText: label,
     danger: action !== 'start' && action !== 'unpause',
   });
-  if (!confirmed) return;
+  if (!confirmed) { containerActionBusy = false; return; }
   try {
-    await postJsonBody('docker/action', { container, action });
-    $('logs').textContent = `容器 ${container} 已${label}`;
+    $('dockerFeedback').textContent = `正在${label}容器 ${container}…`;
+    await postJsonBody('docker/action', { container, action, container_id: item?.id || '' });
+    $('dockerFeedback').textContent = `容器 ${container} 已${label}`;
     await refresh();
   } catch (err) {
-    $('logs').textContent = `容器操作失败: ${err.message}`;
+    $('dockerFeedback').textContent = `容器操作失败：${err.message}`;
+  } finally {
+    containerActionBusy = false;
   }
 }
 

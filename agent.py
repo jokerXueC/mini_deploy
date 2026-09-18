@@ -2780,7 +2780,7 @@ def _run_command(command: list[str], timeout: float = 3.0) -> tuple[int, str]:
 def _docker_status() -> dict[str, Any]:
     if not shutil.which("docker"):
         return {"available": False, "error": "docker command not found", "containers": []}
-    code, ps_output = _run_command(["docker", "ps", "-a", "--format", "{{json .}}"], timeout=4.0)
+    code, ps_output = _run_command(["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"], timeout=4.0)
     if code != 0:
         return {"available": False, "error": ps_output or "docker ps failed", "containers": []}
 
@@ -2916,16 +2916,73 @@ def _docker_logs_text(container: str, lines: int | None = None, all_lines: bool 
 
 
 @_maintenance_shared_operation
-def _docker_action(container: str, action: str) -> str:
+def _docker_action(container: str, action: str, expected_id: str = "") -> str:
     if not shutil.which("docker"):
         raise RuntimeError("docker command not found")
-    allowed = {"restart", "stop", "start", "pause", "unpause"}
+    allowed = {"restart", "stop", "start", "pause", "unpause", "remove"}
     if action not in allowed:
         raise ValueError("invalid_action")
-    code, output = _run_command(["docker", action, container], timeout=30.0)
+    if action == "remove":
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_id):
+            raise ValueError("请刷新列表并确认要删除的容器")
+        code, output = _run_command(["docker", "inspect", "--type", "container", "--format",
+            '{{json .Id}} {{json .State.Status}}', container], timeout=5.0)
+        if code != 0:
+            raise ValueError("容器已不存在，请刷新列表")
+        parts = output.strip().split()
+        if len(parts) != 2 or json.loads(parts[0]) != expected_id:
+            raise ValueError("容器已发生变化，请刷新后重新确认")
+        if json.loads(parts[1]) not in {"exited", "created", "dead"}:
+            raise ValueError("请先停止容器，再执行删除")
+        command = ["docker", "rm", expected_id]
+    else:
+        command = ["docker", action, container]
+    code, output = _run_command(command, timeout=30.0)
     if code != 0:
         raise RuntimeError(output or f"docker {action} failed")
     return output
+
+
+def _docker_images() -> list[dict[str, Any]]:
+    code, output = _run_command(["docker", "image", "ls", "--no-trunc", "--digests", "--format", "{{json .}}"], timeout=10)
+    if code != 0:
+        raise RuntimeError(output or "无法读取 Docker 镜像")
+    images: dict[str, dict[str, Any]] = {}
+    for line in output.splitlines():
+        item = json.loads(line)
+        image_id = str(item.get("ID", ""))
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
+            raise RuntimeError("Docker 返回了无法识别的镜像 ID")
+        image = images.setdefault(image_id, {"id": image_id, "tags": [], "size": item.get("Size", ""),
+                                            "created": item.get("CreatedAt", ""), "digests": []})
+        if item.get("Repository") not in (None, "<none>") and item.get("Tag") not in (None, "<none>"):
+            tag = f'{item["Repository"]}:{item["Tag"]}'
+            if tag not in image["tags"]:
+                image["tags"].append(tag)
+        digest = item.get("Digest")
+        if digest and digest != "<none>" and digest not in image["digests"]:
+            image["digests"].append(digest)
+    return list(images.values())
+
+
+@_maintenance_shared_operation
+def _docker_image_action(action: str, reference: str) -> str:
+    if action == "pull":
+        if (len(reference) > 255 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", reference)
+                or "://" in reference):
+            raise ValueError("请输入镜像名称，例如 nginx:stable-alpine 或 registry.example.com/team/app:v1")
+        command = ["docker", "pull", reference]
+    elif action == "remove":
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", reference):
+            raise ValueError("请刷新列表并选择完整镜像 ID")
+        command = ["docker", "image", "rm", reference]
+    else:
+        raise ValueError("不支持的镜像操作")
+    code, output = _run_command(command, timeout=180 if action == "pull" else 30)
+    if code != 0:
+        hint = "拉取失败，请检查镜像名称、仓库权限、镜像源和服务器网络。" if action == "pull" else "删除失败：镜像可能被运行中或已停止的容器引用，或有多个标签；不会强制删除。"
+        raise RuntimeError(f"{hint}\n{output[-4000:]}")
+    return output[-4000:]
 
 
 def _system_status_payload() -> dict[str, Any]:
@@ -3977,6 +4034,7 @@ UI_ASSET_TYPES = {
     "selects.js": "application/javascript; charset=utf-8",
     "motion.js": "application/javascript; charset=utf-8",
     "nginx.js": "application/javascript; charset=utf-8",
+    "docker-images.js": "application/javascript; charset=utf-8",
     "certificates.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
@@ -4241,6 +4299,13 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._handle_docker_logs(parse_qs(parsed.query))
             return
+        if path == "/docker/images":
+            if self._require_auth_json():
+                try:
+                    self._write_json(200, {"images": _docker_images()})
+                except (OSError, ValueError, RuntimeError) as exc:
+                    self._write_json(500, {"error": "docker_images_failed", "detail": str(exc)})
+            return
         if path == "/docker/logs/download":
             if self._authenticated():
                 self._handle_docker_logs_download(parse_qs(parsed.query))
@@ -4313,6 +4378,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/docker/action":
             if self._require_auth_json():
                 self._handle_docker_action()
+            return
+        if path == "/docker/images/action":
+            if self._require_auth_json():
+                self._handle_docker_image_action()
             return
         if path == "/projects-config/init":
             if self._require_auth_json():
@@ -4748,7 +4817,7 @@ class Handler(BaseHTTPRequestHandler):
             data = _read_json_body(self, max_bytes=4096)
             action = str(data.get("action") or "").strip()
             container = _validate_docker_container(data.get("container"))
-            output = _docker_action(container, action)
+            output = _docker_action(container, action, str(data.get("container_id") or ""))
         except (ValueError, json.JSONDecodeError) as exc:
             _audit_event("docker_action", actor=self.client_address[0], success=False, detail={"error": str(exc)})
             self._write_json(400, {"error": str(exc)})
@@ -4767,6 +4836,25 @@ class Handler(BaseHTTPRequestHandler):
             "container": container,
             "output": output,
         })
+
+    def _handle_docker_image_action(self) -> None:
+        try:
+            data = _read_json_body(self, max_bytes=4096)
+            action = str(data.get("action") or "")
+            reference = str(data.get("reference") or "").strip()
+            if action == "remove" and data.get("confirmed") is not True:
+                raise ValueError("请先确认删除镜像")
+            output = _docker_image_action(action, reference)
+        except ValueError as exc:
+            self._write_json(400, {"error": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001 - report bounded Docker failures
+            _audit_event("docker_image_action", actor=self.client_address[0], success=False)
+            self._write_json(500, {"error": "docker_image_action_failed", "detail": str(exc)})
+            return
+        _audit_event("docker_image_action", actor=self.client_address[0], target=reference,
+                     success=True, detail={"action": action})
+        self._write_json(200, {"ok": True, "output": output})
 
     def _handle_redeploy(self, query: dict[str, list[str]]) -> None:
         if _jobs.full():

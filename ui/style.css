@@ -638,6 +638,26 @@ html[data-theme="light"] .theme-toggle-icon {
   background: var(--surface-track);
 }
 .resource-bar:hover { opacity: .82; }
+.docker-images-panel { margin-top: 16px; }
+.docker-image-tools { display: flex; gap: 12px; flex-wrap: wrap; }
+.docker-image-tools input { min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--fg); font: inherit; font-size: 13px; }
+.docker-image-tools input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.docker-image-tools > input { flex: 1; min-width: 180px; }
+.docker-image-tools form { display: flex; gap: 8px; flex: 2; min-width: 250px; }
+.docker-image-tools form input { flex: 1; min-width: 0; }
+.docker-image-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px 230px auto; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.docker-image-row:last-child { border-bottom: 0; }
+.docker-image-row > span { font-size: 13px; }
+.docker-image-identity strong { font-size: 14px; }
+.docker-image-identity { min-width: 0; display: grid; gap: 5px; overflow-wrap: anywhere; }
+.docker-image-identity code, .docker-image-row time { color: var(--muted); font-size: 12px; }
+.docker-image-identity code { font-family: inherit; }
+#dockerImageFeedback, #dockerFeedback { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .docker-image-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+  .docker-image-row time { grid-column: 1; overflow-wrap: anywhere; }
+  .docker-image-tools form { min-width: 0; flex-basis: 100%; }
+}
 .gateway-entry-choice {
   display: grid;
   grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);

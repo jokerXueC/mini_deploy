@@ -505,6 +505,22 @@
           </div>
         </div>
         <div id="containerList" class="container-list skeleton-block"></div>
+        <p id="dockerFeedback" class="muted" role="status" aria-live="polite"></p>
+      </section>
+      <section class="panel docker-images-panel" aria-labelledby="dockerImagesHeading">
+        <div class="panel-head">
+          <div><h2 id="dockerImagesHeading">Docker 镜像</h2><p id="dockerImageCount">尚未加载</p></div>
+          <button id="dockerImagesRefresh" class="ghost-button compact-action" type="button">刷新镜像</button>
+        </div>
+        <div class="docker-image-tools">
+          <input id="dockerImageSearch" type="search" aria-label="搜索镜像" placeholder="搜索镜像名称、标签或 ID">
+          <form id="dockerImagePullForm">
+            <input id="dockerImageReference" aria-label="要拉取的镜像" placeholder="例如 nginx:stable-alpine" maxlength="255" required>
+            <button id="dockerImagePull" class="ghost-button compact-action" type="submit">拉取镜像</button>
+          </form>
+        </div>
+        <p id="dockerImageFeedback" class="muted" role="status" aria-live="polite"></p>
+        <div id="dockerImageList" class="docker-image-list"></div>
       </section>
     </div>
 
@@ -705,5 +721,6 @@
   <script src="ui/app.js"></script>
   <script src="ui/certificates.js"></script>
   <script src="ui/nginx.js"></script>
+  <script src="ui/docker-images.js"></script>
 </body>
 </html>

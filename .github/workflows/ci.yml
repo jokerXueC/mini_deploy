@@ -43,7 +43,7 @@ jobs:
       - name: Check JavaScript syntax
         run: find ui -type f -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Test dashboard navigation
-        run: node --test tests/ui_navigation.test.cjs tests/ui_motion.test.cjs tests/ui_onboarding.test.cjs tests/ui_nginx.test.cjs
+        run: node --test tests/ui_navigation.test.cjs tests/ui_motion.test.cjs tests/ui_onboarding.test.cjs tests/ui_nginx.test.cjs tests/ui_docker.test.cjs
 
   shell:
     name: ShellCheck
