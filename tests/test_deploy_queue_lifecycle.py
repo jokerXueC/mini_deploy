@@ -4,6 +4,7 @@ import itertools
 import queue
 import subprocess
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -129,6 +130,25 @@ def test_failure_advice_persists_with_its_deployment(monkeypatch, deploy_runtime
     agent._run_deploy({"project_key": project.key, "source": "manual", "after": "next-commit"})
     assert "diagnosis" not in agent._state["last_deploy"]
     assert not agent._running_lock.locked()
+
+
+def test_commands_execution_uses_current_confirmed_plan(monkeypatch, deploy_runtime, tmp_path):
+    project, _ = deploy_runtime
+    monkeypatch.setattr(agent, "STATE_FILE", tmp_path / "data" / "state.json")
+    project = replace(project, deployment_plan={"situation": "existing", "method": "commands", "build": "", "restart": "echo old"},
+                      script=str(agent.STATE_FILE.parent / "command-plans" / project.key / "deploy.sh"))
+    monkeypatch.setattr(agent, "PROJECTS", {project.key: project})
+    agent._prepare_command_script(project)
+    project.deployment_plan["restart"] = "echo new-confirmed-plan"
+
+    def launch(*args, **kwargs):
+        assert "echo new-confirmed-plan" in Path(args[0][0]).read_text(encoding="utf-8")
+        assert "echo old" not in Path(args[0][0]).read_text(encoding="utf-8")
+        return FakeProcess(returncode=0)
+
+    monkeypatch.setattr(agent.subprocess, "Popen", launch)
+    agent._run_deploy({"project_key": project.key, "source": "manual"})
+    assert agent._state["last_deploy"]["status"] == "success"
 
 
 def test_canceled_deploy_returns_130_and_terminates_process(

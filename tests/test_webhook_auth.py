@@ -43,6 +43,54 @@ def test_project_webhook_accepts_valid_github_hmac(project: agent.DeployProject)
     assert not agent._valid_signature_for_project(project, headers, BODY + b" ", {})
 
 
+@pytest.mark.parametrize("uppercase", [False, True])
+def test_gitea_hmac_is_verified_globally_and_per_project(monkeypatch, project, uppercase):
+    monkeypatch.setattr(agent, "WEBHOOK_SECRET", WEBHOOK_SECRET)
+    digest = hmac.new(WEBHOOK_SECRET.encode(), BODY, hashlib.sha256).hexdigest()
+    headers = {"X-Gitea-Signature": digest.upper() if uppercase else digest}
+    for verify in (agent._valid_signature, lambda headers, body, query: agent._valid_signature_for_project(project, headers, body, query)):
+        assert verify(headers, BODY, {})
+        assert not verify(headers, BODY + b" ", {})
+        assert not verify({"X-Gitea-Signature": "invalid"}, BODY, {})
+
+
+@pytest.mark.parametrize(("mode", "event_header", "event", "reason"), [
+    ("manual", "X-GitHub-Event", "push", "automatic_updates_disabled"),
+    ("webhook", "X-GitHub-Event", "pull_request", "event_mismatch"),
+    ("webhook", "X-Gitea-Event", "issues", "event_mismatch"),
+    ("webhook", "X-Gitee-Event", "Tag Push Hook", "event_mismatch"),
+    ("webhook", "X-Gitlab-Event", "Merge Request Hook", "event_mismatch"),
+])
+def test_trigger_and_event_guards_do_not_enqueue(monkeypatch, project, mode, event_header, event, reason):
+    monkeypatch.setattr(agent, "PROJECTS", {project.key: replace(project, trigger_mode=mode)})
+    monkeypatch.setattr(agent, "_update_state", lambda **kwargs: None)
+    monkeypatch.setattr(agent, "_log", lambda message: None)
+    monkeypatch.setattr(agent, "_enqueue_job", lambda job: pytest.fail("Ignored request must not enqueue"))
+    responses = []
+    handler = object.__new__(agent.Handler)
+    handler.headers = {"Content-Length": str(len(BODY)), "X-Gitee-Token": WEBHOOK_SECRET, event_header: event}
+    handler.rfile = io.BytesIO(BODY)
+    handler.client_address = ("198.51.100.9", 1234)
+    handler._write_json = lambda status, payload: responses.append((status, payload))
+    handler._handle_webhook(agent.urlparse("/webhook?project=api"))
+    assert responses[-1] == (202, {"status": "ignored", "project": "api", "reason": reason})
+    handler.headers["X-Gitee-Token"] = "wrong"
+    handler.rfile = io.BytesIO(BODY)
+    handler._handle_webhook(agent.urlparse("/webhook?project=api"))
+    assert responses[-1] == (403, {"error": "forbidden"})
+
+
+@pytest.mark.parametrize("body", [b"[]", b"null", b'"text"', b"\xff", b"{"])
+def test_malformed_webhook_body_returns_bad_request(body):
+    responses = []
+    handler = object.__new__(agent.Handler)
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler._write_json = lambda status, payload: responses.append((status, payload))
+    handler._handle_webhook(agent.urlparse("/webhook?project=api"))
+    assert responses[-1] == (400, {"error": "invalid_json"})
+
+
 @pytest.mark.parametrize("query_key", ["token", "secret"])
 def test_query_token_is_rejected_by_default(
     monkeypatch: pytest.MonkeyPatch,

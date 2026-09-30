@@ -2,6 +2,8 @@
 
 mini_deploy runs shell scripts. These templates are starting points, not guaranteed final scripts.
 
+These are optional examples, not mandatory project files. The UI wizard can also use existing Compose/Dockerfile configuration or save your own build/restart steps. Existing-service preparation does not pull code or restart the service. New wizard projects default to manual updates.
+
 Before enabling WebHook deployment, make sure your script can run successfully on the server.
 
 ## Basic Shape

@@ -13,9 +13,12 @@ mini_deploy receives Git webhooks, runs your project deploy script, and shows de
 
 ## What It Does
 
-- Receives Gitee / GitHub / GitLab push webhooks
+- Receives Gitee / GitHub / GitLab / Gitea push webhooks
 - Runs one deploy script per project
 - Supports multiple projects
+- Guides repository access, deployment plans, and update triggers separately; no LLM required
+- Supports existing scripts, user-defined build/restart steps, Compose, Dockerfile, and optional runtime templates
+- Adopts an existing service without fetching, checking out code, or restarting it during preparation
 - Provides manual deploy, rollback, cancel, logs, and history
 - Shows CPU, memory, disk, network, and Docker container status
 - Generates per-project Nginx reverse proxy config for business domains
@@ -35,7 +38,9 @@ For each business project, you still need to confirm:
 - which port it listens on
 - which health URL means it is running correctly
 
-The panel can initialize a project directory, clone/pull code, generate a starter `deploy.sh`, create a starter systemd service for common backend templates, and generate Nginx reverse proxy config for a business domain. You should still review generated scripts before enabling automatic deployment.
+Choose first deployment or an already-running service, connect the repository, then confirm its actual deployment method and review the execution plan. The panel can prepare missing files for selected templates; it does not require every project to use Docker or systemd. Existing scripts are preserved, and custom commands run only during deployment, with the Agent user's privileges.
+
+New wizard projects default to manual updates. For push-to-deploy, explicitly select Push WebHook and configure the URL and Secret in your code platform. Self-hosted GitLab/Gitea can be selected manually; other Git hosts can use manual updates without changing repositories.
 
 ## Requirements
 
@@ -128,14 +133,18 @@ Use HTTPS for public access when DNS is ready.
 
 In the web panel:
 
-1. Add a project.
-2. Fill the project key, repository URL and branch. Use “识别仓库” to detect common project templates, then confirm the port and startup command.
-3. Use “预览部署文件” to review the script and optional systemd service, and check the confirmation box.
-4. Click “Auto Initialize” to clone the code and create missing files. Existing scripts and service files are preserved; initialization does not start the application.
-5. Click “Check Project”, install missing business runtimes, then enable the project and try a manual deployment. Failure details include suggested troubleshooting steps.
-6. Configure the URL in your Git platform, then put the project Token in Gitee's
-   password/Token field, GitLab's Secret token field, or GitHub's Secret field.
-7. Enable the project.
+1. Click “添加仓库”, paste the repository URL, then connect. Leave the branch empty to detect the default branch.
+2. Confirm the detected runtime. Existing Compose files are preserved. For a Dockerfile, confirm the application and public ports, add required variables and optionally select persistent data directories. Common non-container backends use structured startup entries instead of a full command.
+3. Review the generated files and confirm. Click “准备项目” to pull code and prepare files without starting the application.
+4. Resolve any environment-check failures, then click “开始首次部署”. The panel enables the project and opens deployment logs. You can return to fix ports or variables and retry using the same project.
+5. For future automatic deployments, copy the webhook URL and secret from the wizard into your Git platform's webhook settings and select push events. Use Gitee's password/Token field, GitLab's Secret token field, or GitHub's Secret field.
+
+Generated Dockerfile run configuration is kept outside the business repository.
+Environment values are stored in a separate private server file, not project JSON
+or configuration previews. Persistent directories use independent Docker volumes;
+panel configuration backups do not back up those volumes. Databases, additional
+Compose runtime files, repository access and cloud firewall rules still need to
+be ready. Use HTTPS or an SSH tunnel before submitting sensitive values.
 
 New installations start with no projects. The files under `examples/` are reference
 templates only; they are not imported into the active project configuration.

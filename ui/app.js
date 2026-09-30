@@ -929,8 +929,8 @@ function animateNumberText(id, value, formatter) {
 }
 
 function setView(view) {
-  activeView = ['server', 'events', 'notify', 'certificates'].includes(view) ? view : 'deploy';
-  ['deploy', 'server', 'events', 'notify', 'certificates'].forEach(name => {
+  activeView = ['server', 'events', 'notify', 'certificates', 'requests'].includes(view) ? view : 'deploy';
+  ['deploy', 'server', 'events', 'notify', 'certificates', 'requests'].forEach(name => {
     $(`${name}View`)?.classList.toggle('active', activeView === name);
     $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
   });
@@ -940,6 +940,7 @@ function setView(view) {
     events: ['告警与事件', '集中查看部署、WebHook、容器和资源异常。'],
     notify: ['通知配置', '配置部署结果、服务器和 Docker 异常的推送渠道。'],
     certificates: ['域名与证书', '项目访问入口、证书有效期与 HTTPS 状态。'],
+    requests: ['请求记录', '查看所选 Nginx 的最近访问。'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
@@ -954,6 +955,7 @@ function setView(view) {
   else if (activeView === 'events') refreshEventsStatus();
   else if (activeView === 'notify') refreshNotificationConfig();
   else if (activeView === 'certificates') refreshCertificates();
+  else if (activeView === 'requests') window.NginxRequests?.refresh();
   else refresh();
 }
 
@@ -1234,7 +1236,7 @@ function normalizedProjectKeyFromForm(project) {
 
 function projectTemplateLabel(template) {
   return ({
-    docker: 'Docker Compose',
+    docker: 'Docker 容器',
     python: 'Python / systemd',
     node: 'Node / PM2',
     java: 'Java / systemd',
@@ -1574,6 +1576,8 @@ function generateWebhookGuide(project) {
     `Gitee 密码/Token: ${token}`,
     `GitHub Secret: ${token}`,
     `GitLab Secret token: ${token}`,
+    `Gitea Secret: ${token}`,
+    project.trigger_mode === 'manual' ? '当前仅手动更新；需先在项目设置中启用 Push WebHook。' : '设置并测试 Push WebHook 后启用自动更新。',
   ].join('\n');
 }
 
@@ -1854,6 +1858,11 @@ function openProjectModal(project = null) {
   $('projectNameInput').value = project ? project.name : '';
   $('projectTemplateInput').value = project ? (project.template || 'custom') : 'docker';
   $('projectRepoInput').value = project ? project.repo : '';
+  $('projectProviderInput').value = project?.repository_provider || 'auto';
+  $('projectTriggerInput').value = project ? project.trigger_mode || 'webhook' : 'manual';
+  $('projectBuildStepInput').value = project?.deployment_plan?.build || '';
+  $('projectRestartStepInput').value = project?.deployment_plan?.restart || '';
+  $('projectCommandFields').hidden = project?.deployment_plan?.method !== 'commands';
   $('projectBranchInput').value = project ? project.branch : 'main';
   $('projectTimeoutInput').value = project ? project.timeout_seconds : 900;
   $('projectWorkdirInput').value = project ? project.workdir : '';
@@ -1876,10 +1885,13 @@ function openProjectModal(project = null) {
   applyTemplateDefaults(!project);
   updateWebhookPreview();
   $('projectModal').hidden = false;
-  $('projectKeyInput').focus();
+  window.ProjectWizard?.open(!project);
+  (project ? $('projectKeyInput') : $('projectRepoInput')).focus();
 }
 
 function closeProjectModal() {
+  if (window.ProjectWizard?.busy()) return;
+  window.ProjectWizard?.close();
   projectGuidanceVersion += 1;
   $('projectModal').hidden = true;
   editingProjectKey = '';
@@ -1895,12 +1907,16 @@ function updateWebhookPreview() {
 }
 
 function collectProjectForm() {
+  const existingPlan = lastProjects.find(project => project.key === editingProjectKey)?.deployment_plan;
   return {
     key: $('projectKeyInput').value,
     name: $('projectNameInput').value,
     template: $('projectTemplateInput').value,
     repo: $('projectRepoInput').value,
     branch: $('projectBranchInput').value,
+    repository_provider: $('projectProviderInput').value,
+    trigger_mode: $('projectTriggerInput').value,
+    ...(existingPlan?.method === 'commands' ? {deployment_plan: {...existingPlan, build: $('projectBuildStepInput').value, restart: $('projectRestartStepInput').value}} : {}),
     timeout_seconds: Number($('projectTimeoutInput').value || 900),
     workdir: $('projectWorkdirInput').value,
     script: $('projectScriptInput').value,
@@ -1915,6 +1931,7 @@ function collectProjectForm() {
     webhook_secret: $('projectSecretInput').value,
     enabled: $('projectEnabledInput').checked,
     manual_deploy_enabled: $('projectManualInput').checked,
+    ...window.ProjectWizard?.entrySettings(),
   };
 }
 
@@ -2083,6 +2100,7 @@ async function initProjectConfig() {
 
 async function saveProjectForm(event) {
   event.preventDefault();
+  if (window.ProjectWizard?.active()) { window.ProjectWizard.next(); return; }
   setProjectFormError('');
   try {
     const payload = {
@@ -3441,6 +3459,7 @@ $('refreshBtn').addEventListener('click', () => {
   else if (activeView === 'events') refreshEventsStatus();
   else if (activeView === 'notify') refreshNotificationConfig();
   else if (activeView === 'certificates') refreshCertificates();
+  else if (activeView === 'requests') window.NginxRequests?.refresh();
   else refresh();
 });
 $('deployViewTab').addEventListener('click', () => setView('deploy'));
@@ -3448,6 +3467,7 @@ $('serverViewTab').addEventListener('click', () => setView('server'));
 $('eventsViewTab')?.addEventListener('click', () => setView('events'));
 $('notifyViewTab')?.addEventListener('click', () => setView('notify'));
 $('certificatesViewTab')?.addEventListener('click', () => setView('certificates'));
+$('requestsViewTab')?.addEventListener('click', () => setView('requests'));
 $('clearAlertsBtn')?.addEventListener('click', toggleCurrentNoticeDismissal);
 $('deployStats')?.addEventListener('click', (event) => {
   const bar = event.target.closest('.history-bar[data-detail-key]');
@@ -3540,6 +3560,8 @@ $('copyWebhookTokenBtn').addEventListener('click', () => copyFromElement('projec
   'projectHealthInput',
   'projectLogInput',
   'projectSecretInput',
+  'projectBuildStepInput',
+  'projectRestartStepInput',
 ].forEach(id => {
   const input = $(id);
   if (input) input.addEventListener('input', updateWebhookPreview);
@@ -3559,12 +3581,13 @@ $('projectTemplateInput').addEventListener('change', () => {
 $('projectEnabledInput').addEventListener('change', updateWebhookPreview);
 $('projectManualInput').addEventListener('change', updateWebhookPreview);
 $('projectAppHttpsInput').addEventListener('change', updateWebhookPreview);
+['projectProviderInput', 'projectTriggerInput'].forEach(id => $(id).addEventListener('change', () => {
+  invalidateProjectPreview();
+  updateWebhookPreview();
+}));
 $('copyProjectCommandsBtn').addEventListener('click', () => copyFromElement('projectSetupCommands', 'copyProjectCommandsBtn'));
 $('copyWebhookGuideBtn').addEventListener('click', () => copyFromElement('projectWebhookGuide', 'copyWebhookGuideBtn'));
 $('themeToggleBtn')?.addEventListener('click', toggleTheme);
-$('projectModal').addEventListener('click', (event) => {
-  if (event.target === $('projectModal')) closeProjectModal();
-});
 $('containerLogsModal').addEventListener('click', (event) => {
   if (event.target === $('containerLogsModal')) closeContainerLogsModal();
 });

@@ -178,6 +178,8 @@ def test_repository_inspection_reads_real_git_objects_without_checkout(tmp_path,
     subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
     (repo / "requirements.txt").write_text("fastapi\nuvicorn\n", encoding="utf-8")
     (repo / "main.py").write_text("raise RuntimeError('must not execute')\napp = FastAPI()", encoding="utf-8")
+    (repo / "Dockerfile").write_text("FROM python:3.12\nEXPOSE 8000\nCMD python main.py\n", encoding="utf-8")
+    (repo / ".env.example").write_text("DATABASE_URL=must-not-copy-secret\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.test",
                     "-c", "commit.gpgsign=false", "commit", "-m", "test"], check=True, capture_output=True)
@@ -185,7 +187,10 @@ def test_repository_inspection_reads_real_git_objects_without_checkout(tmp_path,
     clones = []
 
     def local_transport(command, **kwargs):
-        if "clone" in command:
+        if "ls-remote" in command:
+            command = ["protocol.file.allow=always" if arg == "protocol.file.allow=never" else arg for arg in command]
+            command[command.index("https://example.test/test.git")] = repo.as_uri()
+        elif "clone" in command:
             assert "--no-checkout" in command
             assert "protocol.ext.allow=never" in command
             assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
@@ -199,8 +204,15 @@ def test_repository_inspection_reads_real_git_objects_without_checkout(tmp_path,
     monkeypatch.setattr(guidance.subprocess, "Popen", local_transport)
     result = guidance.inspect_repository("https://example.test/test.git", "main")
     assert result["ok"]
-    assert result["candidates"][0]["entry"] == "main:app"
+    assert next(item for item in result["candidates"] if item["template"] == "python")["entry"] == "main:app"
+    assert result["docker"]["ports"] == [8000]
+    assert result["docker"]["environment"][0]["name"] == "DATABASE_URL"
+    assert "must-not-copy-secret" not in json.dumps(result)
     assert not clones[-1].exists()
+    automatic = guidance.inspect_repository("https://example.test/test.git", "")
+    assert automatic["ok"]
+    assert automatic["branch"] == "main"
+    assert "main" in automatic["branches"]
     missing = guidance.inspect_repository("https://example.test/test.git", "missing-branch")
     assert not missing["ok"]
     assert missing["diagnosis"][0]["code"] == "branch"

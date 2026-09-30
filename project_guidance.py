@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import signal
@@ -15,6 +16,65 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import entrypoint_checks
+import docker_onboarding
+
+
+PROVIDERS = {
+    "github": {"label": "GitHub", "keys": "仓库 Settings → Deploy keys → Add deploy key，添加服务器公钥，仅授予读取权限。",
+               "hooks": "仓库 Settings → Webhooks → Add webhook；Content type 选择 application/json，事件选择 Just the push event。"},
+    "gitee": {"label": "Gitee", "keys": "仓库管理 → 部署公钥，添加服务器公钥，并确认该公钥有仓库读取权限。",
+              "hooks": "仓库管理 → WebHooks → 添加；填写 URL 和 WebHook 密码 / Token，选择 Push 事件。"},
+    "gitlab": {"label": "GitLab", "keys": "项目 Settings → Repository → Deploy keys，添加服务器公钥并启用读取权限。",
+               "hooks": "项目 Settings → Webhooks；填写 URL 和 Secret token，勾选 Push events。"},
+    "gitea": {"label": "Gitea", "keys": "仓库设置 → 部署密钥，添加服务器公钥，保留只读权限。",
+              "hooks": "仓库设置 → Webhooks → 添加 Gitea 类型；填写 URL 和 Secret，选择 Push 事件。"},
+    "generic": {"label": "其他 Git 平台", "keys": "在代码平台为该仓库添加服务器 SSH 公钥；具体菜单以平台文档为准。",
+                "hooks": "使用平台支持的 WebHook 验签方式；未兼容的平台可以先手动更新，不必更换仓库。"},
+}
+
+
+def provider_info(repo: str, provider: str = "auto") -> dict[str, str]:
+    if provider not in {"auto", *PROVIDERS}:
+        raise ValueError("请选择支持的平台类型，未知平台可选择其他 Git 平台")
+    if provider == "auto":
+        parsed = urlsplit(repo)
+        host = parsed.hostname or (repo.split("@", 1)[-1].split(":", 1)[0] if "@" in repo else "")
+        provider = {"github.com": "github", "gitee.com": "gitee", "gitlab.com": "gitlab"}.get(host.lower(), "generic")
+    return {"type": provider, **PROVIDERS[provider]}
+
+
+def repository_identity(repo: str) -> tuple[str, str]:
+    parsed = urlsplit(repo)
+    if parsed.hostname:
+        host, path = parsed.hostname, parsed.path
+        if parsed.port and parsed.port != {"ssh": 22, "https": 443}.get(parsed.scheme):
+            host = f"{host}:{parsed.port}"
+    else:
+        host, _, path = repo.split("@", 1)[-1].partition(":")
+    return host.lower(), path.strip("/").removesuffix(".git")
+
+
+def deployment_plan(raw: object) -> dict[str, str]:
+    if not raw:
+        return {}
+    if (not isinstance(raw, dict) or not isinstance(raw.get("situation"), str) or
+            raw["situation"] not in {"new", "existing", "unsure"}):
+        raise ValueError("请选择首次部署、接入已有服务或帮助检查")
+    if not isinstance(raw.get("method"), str) or raw["method"] not in {"template", "script", "commands"}:
+        raise ValueError("请选择沿用配置、现有脚本或自定义部署步骤")
+    result = {"situation": raw["situation"], "method": raw["method"]}
+    if result["method"] == "commands":
+        for field in ("build", "restart"):
+            value = raw.get(field, "")
+            if not isinstance(value, str) or len(value) > 4096:
+                raise ValueError("部署步骤过长或包含不支持的控制字符")
+            value = value.replace("\r\n", "\n")
+            if any(ord(char) < 32 and char not in {"\n", "\t"} for char in value):
+                raise ValueError("部署步骤过长或包含不支持的控制字符")
+            result[field] = value.strip()
+        if not result["restart"]:
+            raise ValueError("请提供实际的启动或重启步骤，不会自动猜测服务名称")
+    return result
 
 
 def diagnose(output: str, *, exit_code: int = 1) -> list[dict[str, str]]:
@@ -75,6 +135,38 @@ def validate_repository(repo: str, branch: str) -> None:
         raise ValueError("请填写有效的部署分支，例如 main 或 release/v1")
 
 
+def entry_command(template: str, kind: str, entry: str, app_object: str, workdir: str, port: int) -> str:
+    """Generate systemd arguments from repository-relative, validated entry fields."""
+    allowed = {"python": {"fastapi", "python"}, "go": {"go"}, "java": {"java"}}
+    if kind not in allowed.get(template, set()):
+        raise ValueError("运行类型与项目类型不匹配")
+    if (not entry or len(entry) > 240 or not re.fullmatch(r"[A-Za-z0-9_./-]+", entry)
+            or entry.startswith(("/", "-")) or ".." in entry.split("/") or "//" in entry):
+        raise ValueError("启动入口需为仓库内的相对路径，例如 main.py 或 cmd/server；不能使用绝对路径或上级目录")
+    entry = entry.removeprefix("./") if entry != "." else entry
+    if kind in {"python", "fastapi"} and not entry.endswith(".py"):
+        raise ValueError("Python 启动入口应为 .py 文件，例如 app/main.py")
+    if kind == "fastapi":
+        if not all(part.isidentifier() and part.isascii() for part in entry[:-3].split("/")):
+            raise ValueError("FastAPI 入口的目录和文件名需为有效 Python 模块名")
+        if not app_object.isidentifier() or not app_object.isascii():
+            raise ValueError("请填写 FastAPI 应用对象名，例如 app")
+    if kind == "java" and not entry.endswith(".jar"):
+        raise ValueError("Java 启动入口应为构建生成的可执行 .jar 文件")
+    if kind == "go" and entry.endswith(".go"):
+        raise ValueError("Go 请选择入口所在目录，例如 cmd/server，而不是单个 .go 文件")
+    def quote(value: str) -> str:
+        return json.dumps(value.replace("%", "%%").replace("$", "$$"), ensure_ascii=False)
+    root = workdir.rstrip("/")
+    if kind == "fastapi":
+        return f'{quote(root + "/.venv/bin/uvicorn")} {entry[:-3].replace("/", ".")}:{app_object} --host 127.0.0.1 --port {port}'
+    if kind == "python":
+        return f'{quote(root + "/.venv/bin/python")} {quote(root + "/" + entry)}'
+    if kind == "go":
+        return quote(root + "/bin/app")
+    return f'/usr/bin/java -jar {quote(root + "/target/deploy/app.jar")} --server.port={port}'
+
+
 def detect(files: dict[str, str]) -> dict[str, Any]:
     """Inspect known root manifests without importing or executing repository code."""
     candidates: list[dict[str, Any]] = []
@@ -83,52 +175,78 @@ def detect(files: dict[str, str]) -> dict[str, Any]:
     if compose:
         candidates.append({"template": "docker", "label": "Docker Compose", "evidence": [compose], "entry": ""})
         warnings.extend(entrypoint_checks.entry_advice(entrypoint_checks.inspect_files(files), check_live=False))
+    elif "Dockerfile" in files:
+        candidates.append({"template": "docker", "label": "Dockerfile", "evidence": ["Dockerfile"], "entry": ""})
+    docker = docker_onboarding.detect(files)
+    if docker["choices"]:
+        warnings.extend(docker["warnings"])
     manifests = [name for name in ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py") if name in files]
-    if manifests:
+    if manifests or any(name.endswith('.py') for name in files):
         entries = []
-        for name in ("main.py", "app.py", "app/main.py", "src/main.py"):
+        entry_choices = []
+        for name in PYTHON_ENTRY_FILES:
             if name not in files:
                 continue
             try:
                 tree = ast.parse(files[name])
             except (SyntaxError, ValueError, RecursionError):
                 continue
+            factories = {"FastAPI"}
+            modules = {"fastapi"}
+            for node in tree.body:
+                if isinstance(node, ast.ImportFrom) and node.module == "fastapi":
+                    factories.update(alias.asname or alias.name for alias in node.names if alias.name == "FastAPI")
+                elif isinstance(node, ast.Import):
+                    modules.update(alias.asname or alias.name for alias in node.names if alias.name == "fastapi")
+            found = False
             for node in tree.body:
                 if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call):
                     func = node.value.func
-                    if isinstance(func, ast.Name) and func.id == "FastAPI":
+                    if ((isinstance(func, ast.Name) and func.id in factories) or
+                            (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                             and func.value.id in modules and func.attr == "FastAPI")):
                         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                        entries.extend(f"{name[:-3].replace('/', '.')}:{target.id}"
-                                       for target in targets if isinstance(target, ast.Name))
+                        for target in targets:
+                            if isinstance(target, ast.Name):
+                                found = True
+                                entries.append(f"{name[:-3].replace('/', '.')}:{target.id}")
+                                entry_choices.append({"kind": "fastapi", "path": name, "object": target.id})
+            if not found:
+                entry_choices.append({"kind": "python", "path": name, "object": ""})
         candidates.append({"template": "python", "label": "Python / systemd", "evidence": manifests,
-                           "entry": entries[0] if len(entries) == 1 else ""})
+                           "entry": entries[0] if len(entries) == 1 else "", "entries": entry_choices})
         if len(entries) != 1:
-            warnings.append("Python 启动入口无法唯一确定，请填写实际启动命令。")
+            warnings.append("请确认运行类型和入口文件；有多个入口时请选择实际需要运行的程序。")
         if "requirements.txt" not in files:
-            warnings.append("当前 Python 初版脚本使用 requirements.txt；请按项目的 Poetry/uv 等依赖管理方式调整脚本。")
+            warnings.append("Python 建议方案主要使用 requirements.txt；项目使用 Poetry/uv 时可选择自己的构建和重启步骤或已有脚本。")
     if "go.mod" in files:
-        candidates.append({"template": "go", "label": "Go / systemd", "evidence": ["go.mod"], "entry": ""})
-        warnings.append("Go 模板编译 cmd/server 或仓库根目录；请确认程序读取端口的方式和实际入口。")
+        candidates.append({"template": "go", "label": "Go / systemd", "evidence": ["go.mod"], "entry": "",
+            "entries": [{"kind": "go", "path": str(Path(name).parent).replace('\\', '/'), "object": ""}
+                        for name in GO_ENTRY_FILES if name in files]})
+        warnings.append("请选择 Go 主程序所在目录；程序监听端口仍以业务自身配置为准。")
     java = [name for name in ("pom.xml", "build.gradle", "build.gradle.kts") if name in files]
     if java:
-        candidates.append({"template": "java", "label": "Java / systemd", "evidence": java, "entry": ""})
+        candidates.append({"template": "java", "label": "Java / systemd", "evidence": java, "entry": "",
+                           "entries": [{"kind": "java", "path": "target/deploy/app.jar", "object": ""}]})
         warnings.append("Java 模板适用于单模块可执行 JAR；多模块、WAR 或非 Spring Boot 项目需调整构建和启动命令。")
     if "package.json" in files:
         candidates.append({"template": "node", "label": "Node / PM2", "evidence": ["package.json"], "entry": ""})
     if not candidates:
-        warnings.append("未识别到根目录的常见构建文件。子目录或特殊项目请选择自定义脚本。")
+        warnings.append("未识别到根目录的常见构建文件。子目录或特殊项目可以选择已有脚本，或填写实际构建和重启步骤。")
     if len(candidates) > 1:
         warnings.insert(0, "检测到多种部署方式，请选择实际使用的一种。")
     script = next((name for name in ("deploy/deploy.sh", "deploy.sh") if name in files), "")
     return {"candidates": candidates, "warnings": warnings, "existing_script": script,
-            "ingress": entrypoint_checks.inspect_files(files)}
+            "ingress": entrypoint_checks.inspect_files(files), "docker": docker}
 
 
+PYTHON_ENTRY_FILES = ("main.py", "app.py", "server.py", "app/main.py", "src/main.py", "src/app.py")
+GO_ENTRY_FILES = ("main.go", "cmd/server/main.go", "cmd/api/main.go")
 INSPECT_FILES = (
     "compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml", "Dockerfile",
     "requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "main.py", "app.py", "app/main.py", "src/main.py",
     "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "package.json", "deploy.sh", "deploy/deploy.sh",
-) + entrypoint_checks.OVERRIDE_FILES
+) + entrypoint_checks.OVERRIDE_FILES + PYTHON_ENTRY_FILES + GO_ENTRY_FILES + docker_onboarding.EXAMPLE_FILES
 _inspection_lock = threading.Lock()
 
 
@@ -143,7 +261,7 @@ def inspect_repository(repo: str, branch: str, *, env: dict[str, str] | None = N
 
 
 def _inspect_repository(repo: str, branch: str, *, env: dict[str, str] | None = None) -> dict[str, Any]:
-    validate_repository(repo, branch)
+    validate_repository(repo, branch or "main")
     environment = dict(os.environ if env is None else env)
     environment.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never",
                         "GIT_SSH_COMMAND": "ssh -oBatchMode=yes -oConnectTimeout=10 -oStrictHostKeyChecking=yes"})
@@ -172,6 +290,20 @@ def _inspect_repository(repo: str, branch: str, *, env: dict[str, str] | None = 
             return code, output.read(131072).decode("utf-8", errors="replace")
 
     try:
+        branches: list[str] = []
+        if not branch:
+            code, refs = git(["ls-remote", "--symref", "--", repo, "HEAD", "refs/heads/*"])
+            if code:
+                return {"ok": False, "diagnosis": diagnose(refs)}
+            for line in refs.splitlines():
+                if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+                    branch = line.split("\t", 1)[0][len("ref: refs/heads/"):]
+                elif "\trefs/heads/" in line:
+                    branches.append(line.split("\trefs/heads/", 1)[1])
+            if not branch:
+                return {"ok": False, "diagnosis": [{"code": "branch", "title": "无法确定默认分支",
+                    "advice": "仓库可能尚无提交。请确认仓库已有代码，并填写要部署的分支后重试。"}]}
+            validate_repository(repo, branch)
         with tempfile.TemporaryDirectory(prefix="mini-deploy-inspect-", ignore_cleanup_errors=True) as temp:
             checkout = str(Path(temp) / "repo")
             code, output = git(["clone", "--depth", "1", "--single-branch", "--no-checkout", "--quiet",
@@ -191,11 +323,12 @@ def _inspect_repository(repo: str, branch: str, *, env: dict[str, str] | None = 
                     continue
                 files[name] = ""
                 # Read manifests as data only; never execute repository code.
-                if (name.endswith(".py") or name in entrypoint_checks.COMPOSE_FILES + entrypoint_checks.OVERRIDE_FILES) and int(size) <= 131072:
+                if (name.endswith(".py") or name in entrypoint_checks.COMPOSE_FILES + entrypoint_checks.OVERRIDE_FILES
+                        or name in ("Dockerfile",) + docker_onboarding.EXAMPLE_FILES) and int(size) <= 131072:
                     code, content = git(["-C", checkout, "cat-file", "blob", oid])
                     if code == 0:
                         files[name] = content
-            return {"ok": True, **detect(files)}
+            return {"ok": True, "branch": branch, "branches": branches[:200], **detect(files)}
     except FileNotFoundError:
         return {"ok": False, "diagnosis": [{"code": "git_missing", "title": "服务器未安装 Git",
                                             "advice": "请先安装 git。Debian/Ubuntu 可执行 apt update && apt install -y git。"}]}

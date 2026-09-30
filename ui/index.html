@@ -65,7 +65,28 @@
       <button id="eventsViewTab" class="view-tab" type="button" data-view="events">告警事件</button>
       <button id="notifyViewTab" class="view-tab" type="button" data-view="notify">通知配置</button>
       <button id="certificatesViewTab" class="view-tab" type="button" data-view="certificates">域名与证书</button>
+      <button id="requestsViewTab" class="view-tab" type="button" data-view="requests">请求记录</button>
     </nav>
+
+    <div id="requestsView" class="dashboard-view">
+      <section class="request-section">
+        <div class="panel-head request-head">
+          <div><h2>Nginx 请求</h2><span id="requestSource" class="muted">检查中</span></div>
+          <div class="request-actions">
+            <button id="requestEnable" class="ghost-button compact-action" type="button" hidden>开启记录</button>
+            <button id="requestDisable" class="ghost-button compact-action" type="button" hidden>关闭记录</button>
+            <button id="requestRefresh" class="ghost-button compact-action" type="button" title="刷新请求" aria-label="刷新请求">刷新</button>
+          </div>
+        </div>
+        <div class="request-filters">
+          <label>状态<select id="requestStatus"><option value="all">全部</option><option value="success">2xx / 3xx</option><option value="error">4xx / 5xx</option></select></label>
+          <label>查找路径<input id="requestSearch" type="search" placeholder="路径或域名" autocomplete="off"></label>
+          <label>最近<select id="requestLimit"><option value="100">100 条</option><option value="300">300 条</option></select></label>
+        </div>
+        <p id="requestNotice" class="muted" role="status"></p>
+        <div id="requestRows" class="request-rows" aria-live="polite"></div>
+      </section>
+    </div>
 
     <div id="certificatesView" class="dashboard-view">
       <div class="gateway-toolbar">
@@ -595,6 +616,82 @@
           <button id="closeProjectModalBtn" class="ghost-button icon-action" type="button">关闭</button>
         </div>
         <form id="projectForm" class="project-form">
+          <section id="projectWizard" hidden aria-label="添加项目向导">
+            <ol class="project-wizard-steps" aria-label="接入进度"><li>了解现状</li><li>确认方案</li><li>检查与执行</li></ol>
+            <section id="wizardConnect">
+              <h3>连接你的代码仓库</h3>
+              <div class="form-grid">
+                <label class="wide-field">项目目前是什么情况？<select id="wizardSituation"><option value="">请选择</option><option value="new">第一次部署到这台服务器</option><option value="existing">已经在这台服务器运行，接入更新</option><option value="unsure">不确定，先帮我检查仓库</option></select></label>
+                <label id="wizardExistingDirectoryField" class="wide-field" hidden>已有项目的代码目录<input id="wizardExistingDirectory" placeholder="例如 /srv/my-app" maxlength="512"></label>
+              </div>
+              <div id="wizardConnectFields" class="form-grid"></div>
+              <datalist id="wizardBranches"></datalist>
+              <details class="wizard-details"><summary>私有仓库 / SSH 授权</summary><p>服务器需要有仓库读取权限。HTTPS 私有仓库使用服务器已有的 Git 凭据；SSH 仓库需在代码平台添加服务器公钥，并确认平台主机指纹。</p><p>仓库地址中不要填写密码或 Token。授权完成后，可点击重新连接。</p></details>
+              <div id="wizardPlatformAdvice" class="muted" role="status"></div>
+              <div id="wizardConnectResult" role="status" aria-live="polite"></div>
+            </section>
+            <section id="wizardConfigure" hidden>
+              <h3>选择符合项目的部署方案</h3>
+              <p id="wizardDetectedFacts" class="muted"></p>
+              <div class="form-grid"><label class="wide-field">部署方式<select id="wizardDeployMethod"><option value="">请选择</option><option value="template">沿用容器配置 / 使用建议方案</option><option value="script">沿用已有部署脚本</option><option value="commands">填写自己的构建和重启步骤</option></select></label></div>
+              <div id="wizardRuntimeFields" class="form-grid"></div>
+              <div id="wizardPathFields" class="form-grid wizard-entry-fields"></div>
+              <div id="wizardCommandFields" class="form-grid wizard-entry-fields" hidden></div>
+              <p id="wizardCommandsWarning" class="muted" hidden>这些步骤会以面板运行用户的权限执行。不要在命令中填写密码；启动或重启步骤应执行完成并返回，不能是长期占用终端的前台进程。</p>
+              <div id="wizardDockerFields" class="wizard-entry-fields" hidden>
+                <div class="form-grid">
+                  <label class="wide-field">容器配置<select id="wizardDockerChoice"><option value="">请选择仓库里的配置</option></select></label>
+                  <label class="wide-field">配置文件路径<input id="wizardDockerFile" placeholder="例如 Dockerfile 或 deploy/compose.yml" maxlength="240"></label>
+                </div>
+                <div id="wizardDockerBuildFields" class="form-grid wizard-entry-fields">
+                  <label>应用端口（容器内）<input id="wizardDockerContainerPort" type="number" min="1" max="65535" placeholder="例如 8000"></label>
+                  <label>服务器访问端口<input id="wizardDockerPublishedPort" type="number" min="1" max="65535" value="8080"></label>
+                  <label class="wide-field">访问范围<select id="wizardDockerAccess"><option value="public">通过服务器 IP 访问</option><option value="local">仅服务器本机（可接入 Nginx）</option></select></label>
+                  <label class="onboarding-confirm wide-field"><input id="wizardDockerPersist" type="checkbox"> 保存上传文件等业务数据</label>
+                  <label id="wizardDockerVolumesField" class="wide-field" hidden>容器里的数据目录<textarea id="wizardDockerVolumes" rows="2" placeholder="/app/uploads&#10;/app/data" maxlength="4000"></textarea></label>
+                </div>
+                <div class="wizard-env-head"><h4>环境变量</h4><button id="wizardDockerAddEnv" type="button" class="ghost-button compact-action">添加变量</button></div>
+                <div id="wizardDockerEnvironment"></div>
+                <p id="wizardDockerEnvironmentEmpty" class="muted">未发现必填变量</p>
+              </div>
+              <div id="wizardEntryFields" class="form-grid wizard-entry-fields">
+                <label id="wizardEntryChoiceField" class="wide-field">识别到的入口<select id="wizardEntryChoice"><option value="">手动填写</option></select></label>
+                <label id="wizardPythonKindField">运行类型<select id="wizardEntryKind"><option value="">请选择</option><option value="fastapi">FastAPI</option><option value="python">普通 Python 程序</option></select></label>
+                <label class="wide-field"><span id="wizardEntryLabel">启动入口（仓库内路径）</span><input id="wizardEntryPath" placeholder="例如 main.py 或 app/main.py" maxlength="240"></label>
+                <label id="wizardEntryObjectField">应用对象<input id="wizardEntryObject" placeholder="例如 app" maxlength="80"></label>
+              </div>
+              <div id="wizardServiceFields" class="form-grid wizard-entry-fields"></div>
+              <p id="wizardRuntimeHint" class="muted"></p>
+              <div id="wizardWarnings" class="failure-advice"></div>
+              <div id="wizardAutomationFields" class="form-grid wizard-entry-fields"></div>
+              <details class="wizard-details"><summary>高级设置</summary><label id="wizardCustomCommandField" class="onboarding-confirm"><input id="wizardCustomCommand" type="checkbox"> 自定义完整启动命令</label><div id="wizardAdvancedFields" class="form-grid"></div></details>
+            </section>
+            <section id="wizardReview" hidden>
+              <h3 id="wizardReviewTitle">确认并准备部署</h3>
+              <dl id="wizardSummary" class="detail-list"></dl>
+              <ol id="wizardPlanSteps" class="wizard-plan-steps"></ol>
+              <p id="wizardReviewHint" class="muted">准备阶段会拉取代码并补齐部署文件，仓库已有的同名文件会保留。业务所需的环境变量、数据库和运行环境需已准备好。</p>
+              <details class="wizard-details"><summary>查看部署文件</summary><div id="wizardFiles"></div></details>
+              <div id="wizardCheckField"></div>
+              <div id="wizardProgress" role="status" aria-live="polite"></div>
+              <details id="wizardWebhookSetup" class="wizard-details" hidden>
+                <summary>后续 push 自动部署（可选）</summary>
+                <p id="wizardWebhookGuide">在代码平台的仓库设置中添加 WebHook，选择 Push 事件。</p>
+                <p id="wizardWebhookModeHint"></p>
+                <div class="webhook-box"><div><div class="webhook-label">WebHook POST 地址</div><code id="wizardWebhookUrl">-</code></div><button id="wizardCopyWebhookUrl" class="ghost-button compact-action" type="button">复制地址</button></div>
+                <div class="webhook-box"><div><div class="webhook-label">Token / Secret</div><span>已生成，复制后填入代码平台</span></div><button id="wizardCopyWebhookSecret" class="ghost-button compact-action" type="button">复制密钥</button></div>
+              </details>
+              <button id="wizardDeploy" class="danger-button compact-action" type="button" hidden>开始首次部署</button>
+              <button id="wizardRecheck" class="ghost-button compact-action" type="button" hidden>重新检查环境</button>
+            </section>
+            <p id="wizardError" class="form-error" role="alert" hidden></p>
+            <div class="modal-actions wizard-actions">
+              <button id="wizardBack" class="ghost-button compact-action" type="button" hidden>上一步</button>
+              <button id="wizardFinish" class="ghost-button compact-action" type="button" hidden>稍后部署</button>
+              <span class="modal-spacer"></span>
+              <button id="wizardNext" class="danger-button compact-action" type="button">连接并识别</button>
+            </div>
+          </section>
           <input id="projectOriginalKey" type="hidden">
           <div class="form-grid">
             <h3 class="wide-field onboarding-heading">1. 连接仓库</h3>
@@ -602,7 +699,7 @@
             <label>显示名称<input id="projectNameInput" name="name" placeholder="Example Node"></label>
             <label>项目类型
               <select id="projectTemplateInput" name="template">
-                <option value="docker">Docker Compose</option>
+                <option value="docker">Docker（Compose / Dockerfile）</option>
                 <option value="python">Python / systemd</option>
                 <option value="node">Node / PM2</option>
                 <option value="java">Java / systemd</option>
@@ -612,6 +709,8 @@
               </select>
             </label>
             <label class="wide-field">仓库地址<input id="projectRepoInput" name="repo" placeholder="git@gitee.com:org/repo.git"></label>
+            <label>代码平台<select id="projectProviderInput"><option value="auto">自动识别（自建平台可手动选择）</option><option value="github">GitHub</option><option value="gitee">Gitee</option><option value="gitlab">GitLab（含自建）</option><option value="gitea">Gitea（含自建）</option><option value="generic">其他 Git 平台</option></select></label>
+            <label>更新触发方式<select id="projectTriggerInput"><option value="manual">手动点击更新</option><option value="webhook">通过 Push WebHook 更新</option></select></label>
             <label>部署分支<input id="projectBranchInput" name="branch" placeholder="master"></label>
             <div class="wide-field onboarding-tools">
               <button id="inspectProjectBtn" class="ghost-button compact-action" type="button">识别仓库</button>
@@ -630,6 +729,10 @@
             <label class="wide-field">健康检查<input id="projectHealthInput" name="health_url" placeholder="http://127.0.0.1:8001/health，可留空"></label>
             <label class="wide-field">日志文件<input id="projectLogInput" name="deploy_log_file" placeholder="/var/log/example-node-deploy.log"></label>
             <label class="wide-field">Webhook Token<input id="projectSecretInput" name="webhook_secret" placeholder="保存时自动生成"></label>
+          </div>
+          <div id="projectCommandFields" class="form-grid" hidden>
+            <label class="wide-field">构建步骤（可留空）<textarea id="projectBuildStepInput" rows="3" maxlength="4096" placeholder="填写项目现有的依赖安装或构建步骤"></textarea></label>
+            <label class="wide-field">启动 / 重启步骤<textarea id="projectRestartStepInput" rows="3" maxlength="4096" placeholder="例如 systemctl restart my-app，或已有的容器更新命令"></textarea></label>
           </div>
           <div class="toggle-row">
             <label><input id="projectEnabledInput" type="checkbox"> 启用项目</label>
@@ -722,5 +825,7 @@
   <script src="ui/certificates.js"></script>
   <script src="ui/nginx.js"></script>
   <script src="ui/docker-images.js"></script>
+  <script src="ui/onboarding.js"></script>
+  <script src="ui/nginx-requests.js"></script>
 </body>
 </html>

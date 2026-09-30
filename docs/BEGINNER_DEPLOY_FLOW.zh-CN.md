@@ -4,6 +4,8 @@
 
 如果你只是想快速安装和接入第一个项目，先看：[快速上手](QUICKSTART.zh-CN.md)。
 
+**当前向导不要求每个用户手写 `.sh` 和 `.service`。** 它先区分首次部署与已有服务，再让你选择现有容器配置、已有脚本或自己的构建和重启步骤。本文后面的 Python / Go / Java 脚本和 systemd 示例是可选方案，不是所有项目的强制流程。新向导默认手动更新，Push WebHook 需明确启用。
+
 > [!WARNING]
 > 当前默认安装器以 `root` 运行 Agent，权限拆分、版本化自动回滚和恢复命令仍是开源发布阻塞项。本文档用于受控专用测试服务器，不代表当前版本已经适合生产部署。
 
@@ -16,14 +18,16 @@
 - 一台 Linux 服务器。
 - 一个可以打开的部署面板：`http://服务器公网IP:6868`，不需要域名。
 - 一个后端项目目录，例如 `/srv/python-api`、`/srv/go-api`、`/srv/java-api`。
-- 一个部署脚本，例如 `/srv/python-api/deploy/deploy.sh`。
-- 一个 WebHook：你每次 `git push` 后，代码平台通知 mini_deploy，mini_deploy 自动执行部署脚本。
+- 一份确认过的部署方案：现有配置、已有脚本或由面板保存的构建和重启步骤。
+- 可选的 WebHook：启用后，代码平台在 `git push` 时通知 mini_deploy 执行部署；也可以只手动更新。
 
 需要先说清楚边界：
 
 mini_deploy 不会自动理解你的业务代码。它可以生成 `deploy.sh` 初版和检查项，但项目实际怎么启动、怎么重启、哪个健康检查算成功，仍然需要你按自己的项目确认。
 
 ## 0. 先看懂整套东西在做什么
+
+下面以已经启用 Push WebHook、使用部署脚本的项目为例。
 
 ```mermaid
 flowchart TD
@@ -44,7 +48,7 @@ flowchart TD
 
 一句话理解：
 
-`mini_deploy` 本身不关心你的项目是 Python、Go 还是 Java。它只负责接收 WebHook，然后执行你指定的 `deploy.sh`。真正怎么构建、怎么重启服务，都写在每个项目自己的 `deploy.sh` 里。
+`mini_deploy` 不限定项目语言或部署工具。它根据手动操作或已启用的 WebHook，把任务加入队列，执行用户确认的方案；最终仍由脚本完成构建和重启，但脚本可以沿用已有文件，也可以由面板根据确认的步骤生成。
 
 ## 1. 你要准备什么
 
@@ -60,6 +64,7 @@ flowchart TD
 - Gitee
 - GitHub
 - GitLab
+- Gitea 或其他可访问的 Git 仓库
 
 后面都叫“代码平台”。
 

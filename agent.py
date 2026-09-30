@@ -34,7 +34,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from email.message import EmailMessage
 from functools import wraps
 from http import cookies
@@ -47,8 +47,10 @@ from urllib.request import Request, urlopen
 import certificates
 import nginx_runtime
 import nginx_install
+import nginx_requests
 import project_guidance
 import entrypoint_checks
+import docker_onboarding
 
 try:
     import fcntl
@@ -184,6 +186,13 @@ class DeployProject:
     start_command: str
     app_domain: str
     app_https: bool
+    entry_kind: str = ""
+    entry_path: str = ""
+    entry_object: str = ""
+    docker_config: dict[str, Any] = field(default_factory=dict)
+    deployment_plan: dict[str, str] = field(default_factory=dict)
+    repository_provider: str = "auto"
+    trigger_mode: str = "webhook"
 
 
 def _safe_project_key(value: str) -> str:
@@ -288,6 +297,13 @@ def _project_from_config(raw: dict[str, Any], fallback_key: str) -> DeployProjec
         start_command=str(raw.get("start_command") or ""),
         app_domain=str(raw.get("app_domain") or raw.get("domain") or ""),
         app_https=_bool_config(raw.get("app_https") or raw.get("https"), False),
+        entry_kind=str(raw.get("entry_kind") or ""),
+        entry_path=str(raw.get("entry_path") or ""),
+        entry_object=str(raw.get("entry_object") or ""),
+        docker_config=docker_onboarding.normalize(raw.get("docker_config")),
+        deployment_plan=project_guidance.deployment_plan(raw.get("deployment_plan")),
+        repository_provider=str(raw.get("repository_provider") or "auto"),
+        trigger_mode=str(raw.get("trigger_mode") or "webhook"),
     )
 
 
@@ -702,6 +718,11 @@ def _valid_signature(headers: Any, body: bytes, query: dict[str, list[str]]) -> 
         digest = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
         return _constant_time_equal(signature, f"sha256={digest}")
 
+    signature = headers.get("X-Gitea-Signature", "")
+    if re.fullmatch(r"[0-9a-fA-F]{64}", signature):
+        digest = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        return _constant_time_equal(signature.lower(), digest)
+
     return False
 
 
@@ -858,6 +879,11 @@ def _valid_signature_for_project(project: DeployProject, headers: Any, body: byt
         digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
         return _constant_time_equal(signature, f"sha256={digest}")
 
+    signature = headers.get("X-Gitea-Signature", "")
+    if re.fullmatch(r"[0-9a-fA-F]{64}", signature):
+        digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        return _constant_time_equal(signature.lower(), digest)
+
     return False
 
 
@@ -976,6 +1002,13 @@ def _project_to_config(project: DeployProject, include_secret: bool = True) -> d
         "service_name": project.service_name,
         "service_port": project.service_port,
         "start_command": project.start_command,
+        "entry_kind": project.entry_kind,
+        "entry_path": project.entry_path,
+        "entry_object": project.entry_object,
+        "docker_config": project.docker_config,
+        "deployment_plan": project.deployment_plan,
+        "repository_provider": project.repository_provider,
+        "trigger_mode": project.trigger_mode,
         "app_domain": project.app_domain,
         "app_https": project.app_https,
     }
@@ -1036,6 +1069,48 @@ def _project_from_form(raw: dict[str, Any], existing: DeployProject | None = Non
         existing.start_command if existing else "",
         max_length=1024,
     )
+    plan = project_guidance.deployment_plan(raw.get("deployment_plan", existing.deployment_plan if existing else {}))
+    if plan.get("method") in {"commands", "script"}:
+        template = "custom"
+        start_command = ""
+    entry_kind = str(raw.get("entry_kind", existing.entry_kind if existing else "") or "")
+    entry_path = str(raw.get("entry_path", existing.entry_path if existing else "") or "").strip()
+    entry_object = str(raw.get("entry_object", existing.entry_object if existing else "") or "").strip()
+    if plan.get("method") in {"commands", "script"}:
+        entry_kind = entry_path = entry_object = ""
+    if "entry_kind" not in raw and existing and (start_command != existing.start_command or template != existing.template):
+        entry_kind = entry_path = entry_object = ""
+    if entry_kind:
+        start_command = project_guidance.entry_command(template, entry_kind, entry_path, entry_object,
+            workdir_text, _int_config(raw.get("service_port"), existing.service_port if existing else 8000))
+        entry_path = entry_path.removeprefix("./") if entry_path != "." else entry_path
+    else:
+        entry_path = entry_object = ""
+    docker_config = docker_onboarding.normalize(raw.get("docker_config", existing.docker_config if existing else {})) if template == "docker" else {}
+    provider = str(raw.get("repository_provider", existing.repository_provider if existing else "auto"))
+    project_guidance.provider_info(repo, provider)
+    trigger = str(raw.get("trigger_mode", existing.trigger_mode if existing else "webhook"))
+    if trigger not in {"manual", "webhook"}:
+        raise ValueError("请选择手动更新或 Push WebHook，未实现的触发方式不能启用")
+    if plan.get("method") == "template" and template in {"custom", "static"}:
+        raise ValueError("该项目需要已有部署脚本或明确的部署步骤，不会生成占位方案")
+    if plan.get("situation") == "existing" and plan.get("method") == "template":
+        if template != "docker" or docker_config.get("mode") != "compose":
+            raise ValueError("接入已有服务请选择现有 Compose、部署脚本或实际重启步骤，不会生成新的业务服务")
+    if template != "docker":
+        docker_config = {}
+    if docker_config:
+        script = str(_docker_project_directory(key) / "deploy.sh")
+        if docker_config["mode"] == "dockerfile":
+            service_port = docker_config["published_port"]
+        else:
+            service_port = _int_config(raw.get("service_port"), existing.service_port if existing else 8000)
+    else:
+        service_port = _int_config(raw.get("service_port") or raw.get("port"), existing.service_port if existing else 8000)
+    if plan.get("method") == "commands":
+        script = str(STATE_FILE.parent / "command-plans" / key / "deploy.sh")
+    if plan.get("method") == "script" and not str(raw.get("script") or (existing.script if existing else "")).strip():
+        raise ValueError("请提供已有部署脚本的路径")
     app_https_raw = raw["app_https"] if "app_https" in raw else raw.get("https")
     app_domain = _clean_config_text(
         raw.get("app_domain") or raw.get("domain"),
@@ -1066,10 +1141,17 @@ def _project_from_form(raw: dict[str, Any], existing: DeployProject | None = Non
         timeout_seconds=_int_config(raw.get("timeout_seconds"), existing.timeout_seconds if existing else 900),
         rollback_script=_clean_config_text(raw.get("rollback_script"), existing.rollback_script if existing else "", max_length=512),
         service_name=_safe_project_key(service_name),
-        service_port=_int_config(raw.get("service_port") or raw.get("port"), existing.service_port if existing else 8000),
+        service_port=service_port,
         start_command=start_command,
         app_domain=_normalize_domain(app_domain),
         app_https=_bool_config(app_https_raw, existing.app_https if existing else False),
+        entry_kind=entry_kind,
+        entry_path=entry_path,
+        entry_object=entry_object,
+        docker_config=docker_config,
+        deployment_plan=plan,
+        repository_provider=provider,
+        trigger_mode=trigger,
     )
 
 
@@ -1196,6 +1278,8 @@ def _save_project_transaction(raw_project: dict[str, Any], original_key: str = "
         projects = dict(PROJECTS)
         existing = projects.get(original_key) if original_key else None
         project = _project_from_form(raw_project, existing=existing)
+        if existing and existing.docker_config and project.key != existing.key:
+            raise ValueError("面板托管的容器项目不能修改标识，以免丢失原数据目录和容器归属")
         if existing and (STATE_FILE.parent / "certificates" / existing.key).exists():
             if (project.key, project.app_domain, project.service_port) != (existing.key, existing.app_domain, existing.service_port):
                 raise ValueError("请先在证书管理中停用并删除证书，再修改项目标识、域名或端口")
@@ -1258,6 +1342,13 @@ def _reset_project_secret_transaction(key: str) -> DeployProject:
             service_name=project.service_name,
             service_port=project.service_port,
             start_command=project.start_command,
+            entry_kind=project.entry_kind,
+            entry_path=project.entry_path,
+            entry_object=project.entry_object,
+            docker_config=project.docker_config,
+            deployment_plan=project.deployment_plan,
+            repository_provider=project.repository_provider,
+            trigger_mode=project.trigger_mode,
             app_domain=project.app_domain,
             app_https=project.app_https,
         )
@@ -1800,6 +1891,11 @@ def _doctor_item(key: str, title: str, ok: bool, message: str, level: str | None
 
 def _project_doctor(project: DeployProject) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
+    if project.entry_kind in {"fastapi", "python", "go"}:
+        entry = project.workdir / project.entry_path
+        exists = entry.is_dir() if project.entry_kind == "go" else entry.is_file()
+        checks.append(_doctor_item("startup_entry", "启动入口", exists,
+            f"{project.entry_path} {'已找到' if exists else '不存在，请在项目仓库中确认入口路径'}"))
     checks.append(_doctor_item(
         "workdir",
         "项目目录",
@@ -1811,8 +1907,8 @@ def _project_doctor(project: DeployProject) -> dict[str, Any]:
     checks.append(_doctor_item(
         "git",
         "Git 仓库",
-        git_dir.is_dir(),
-        f"{git_dir} {'存在' if git_dir.is_dir() else '不存在，WebHook 部署前需要先 clone 仓库'}",
+        git_dir.exists(),
+        f"{git_dir} {'存在' if git_dir.exists() else '不存在，部署前需要先 clone 仓库'}",
     ))
 
     script_path = _project_script_path(project)
@@ -1849,6 +1945,8 @@ def _project_doctor(project: DeployProject) -> dict[str, Any]:
             bool(found),
             found or f"未找到 {command} 命令，请先安装或改用自定义脚本",
         ))
+    if project.docker_config:
+        checks.extend(_docker_readiness(project))
 
     if project.template in {"python", "go", "java"}:
         service_path = Path("/etc/systemd/system") / f"{project.service_name}.service"
@@ -1890,12 +1988,22 @@ def _project_doctor(project: DeployProject) -> dict[str, Any]:
 
 
 def _template_deploy_steps(project: DeployProject) -> list[str]:
+    if project.entry_kind:
+        project_guidance.entry_command(project.template, project.entry_kind, project.entry_path,
+                                      project.entry_object, str(project.workdir), project.service_port)
     service = project.service_name or project.key
     health_line = [f"curl -fsS --max-time 10 {shlex.quote(project.health_url)}"] if project.health_url else [
         "# 可选：在项目配置里填写 health_url 后，这里会自动检查",
     ]
     template = project.template
+    if project.deployment_plan.get("method") == "commands":
+        return [f"(\n{command}\n)" for command in (project.deployment_plan.get("build"), project.deployment_plan["restart"]) if command] + health_line
     if template == "docker":
+        if project.docker_config:
+            arguments = [sys.executable, str(APP_HOME / "docker_onboarding.py"),
+                         "--workdir", str(project.workdir), "--directory", str(_docker_project_directory(project.key)),
+                         "--key", project.key]
+            return [shlex.join(arguments), *health_line]
         return ["docker compose up -d --build", "docker compose ps", *health_line]
     if template == "node":
         return [
@@ -1909,23 +2017,29 @@ def _template_deploy_steps(project: DeployProject) -> list[str]:
             "python3 -m venv .venv",
             ". .venv/bin/activate",
             "pip install --upgrade pip",
-            "pip install -r requirements.txt",
+            "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi" if project.entry_kind == "python" else "pip install -r requirements.txt",
             f"systemctl restart {shlex.quote(service)}",
             *health_line,
         ]
     if template == "java":
-        return [
-            "if [ -f ./gradlew ]; then bash ./gradlew clean build -x test; jar_dir=build/libs; elif [ -f ./mvnw ]; then bash ./mvnw clean package -DskipTests; jar_dir=target; else mvn clean package -DskipTests; jar_dir=target; fi",
-            "mkdir -p target/deploy",
+        artifact_steps = [
             "mapfile -t jars < <(find \"$jar_dir\" -maxdepth 1 -type f -name '*.jar' ! -name '*sources.jar' ! -name '*javadoc.jar' ! -name '*-plain.jar')",
             'if [ "${#jars[@]}" -ne 1 ]; then echo "需要唯一的可执行 JAR，请检查构建产物"; exit 1; fi',
             'cp "${jars[0]}" target/deploy/app.jar',
+        ]
+        if project.entry_kind == "java" and project.entry_path.removeprefix("./") != "target/deploy/app.jar":
+            artifact_steps = [f"test -f {shlex.quote(project.entry_path)}", f"cp -- {shlex.quote(project.entry_path)} target/deploy/app.jar"]
+        return [
+            "if [ -f ./gradlew ]; then bash ./gradlew clean build -x test; jar_dir=build/libs; elif [ -f ./mvnw ]; then bash ./mvnw clean package -DskipTests; jar_dir=target; else mvn clean package -DskipTests; jar_dir=target; fi",
+            "mkdir -p target/deploy",
+            *artifact_steps,
             f"systemctl restart {shlex.quote(service)}",
             *health_line,
         ]
     if template == "go":
         return [
             "mkdir -p bin",
+            f"go build -o bin/app {shlex.quote('./' + project.entry_path)}" if project.entry_kind == "go" else
             "if [ -d cmd/server ]; then go build -o bin/app ./cmd/server; else go build -o bin/app .; fi",
             f"systemctl restart {shlex.quote(service)}",
             *health_line,
@@ -1944,6 +2058,7 @@ def _template_deploy_steps(project: DeployProject) -> list[str]:
 def _deploy_script_text(project: DeployProject) -> str:
     lines = [
         "#!/usr/bin/env bash",
+        *(["# mini-deploy-managed: command-plan-v1"] if project.deployment_plan.get("method") == "commands" else []),
         "set -Eeuo pipefail",
         "",
         f"cd {shlex.quote(str(project.workdir))}",
@@ -1971,6 +2086,9 @@ def _deploy_script_text(project: DeployProject) -> str:
 
 
 def _default_start_command(project: DeployProject) -> str:
+    if project.entry_kind:
+        return project_guidance.entry_command(project.template, project.entry_kind, project.entry_path,
+                                             project.entry_object, project.workdir.as_posix(), project.service_port)
     if project.start_command:
         return project.start_command
     port = project.service_port or 8000
@@ -2033,6 +2151,11 @@ def _project_preview(project: DeployProject) -> dict[str, Any]:
         raise ValueError("服务器目录必须是绝对路径")
     files = []
     paths = [("deploy.sh", _project_script_path(project), _deploy_script_text(project))]
+    if project.docker_config:
+        directory = _docker_project_directory(project.key)
+        if project.docker_config["mode"] == "dockerfile":
+            paths.append(("compose", directory / "compose.yaml",
+                          docker_onboarding.compose_text(project.docker_config, project.workdir, directory)))
     if project.template in {"python", "go", "java"}:
         paths.append(("systemd", Path("/etc/systemd/system") / f"{project.service_name}.service",
                       _systemd_service_text(project)))
@@ -2040,14 +2163,154 @@ def _project_preview(project: DeployProject) -> dict[str, Any]:
         if path.is_symlink():
             raise ValueError(f"文件是符号链接，请人工核对：{path}")
         exists = path.exists()
+        managed = ((bool(project.docker_config) and path.parent == _docker_project_directory(project.key)) or
+                   (project.deployment_plan.get("method") == "commands" and path.parent == STATE_FILE.parent / "command-plans" / project.key))
         if exists:
             if not path.is_file() or path.stat().st_size > 128 * 1024:
                 raise ValueError(f"文件不是普通小型配置文件，请人工核对：{path}")
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content = generated if managed else path.read_text(encoding="utf-8", errors="replace")
         else:
-            content = generated
-        files.append({"kind": kind, "path": str(path), "exists": exists, "content": content})
-    return {"files": files}
+            content = "# 准备时检查指定脚本是否存在；不会生成占位脚本。\n" if project.deployment_plan.get("method") == "script" else generated
+        files.append({"kind": kind, "path": str(path), "exists": exists, "content": content, "managed": managed})
+    plan_steps = ["读取已有代码目录（不拉取、不重启）"] if project.deployment_plan.get("situation") == "existing" else ["拉取指定仓库和分支"]
+    if project.deployment_plan.get("method") == "commands":
+        plan_steps += ["准备用户确认的构建和重启步骤（此时不执行）"]
+    elif project.deployment_plan.get("method") == "script":
+        plan_steps += ["检查并保留现有部署脚本，不生成占位脚本"]
+    else:
+        plan_steps += ["保留已有文件，补齐确认过的部署文件"]
+    external_script = project.deployment_plan.get("method") == "script" or (files[0]["exists"] and not files[0]["managed"])
+    execution_steps = ["执行部署时：运行已有脚本，代码更新和重启以该脚本内容为准"] if external_script else [
+        f"执行部署时：fetch origin {project.branch}、切换分支并 fast-forward 更新代码（遇到冲突停止）",
+        "按所选方案执行构建和启动 / 重启步骤",
+    ]
+    if project.health_url:
+        execution_steps.append(f"健康地址通过 HEALTH_URL 传给已有脚本，是否检查需核对脚本内容：{project.health_url}" if external_script else
+                               f"执行部署后：检查 {project.health_url}")
+    return {"files": files, "start_command": _default_start_command(project), "script": project.script, "plan_steps": plan_steps,
+            "execution_steps": execution_steps,
+            "docker_environment": project.docker_config.get("environment", [])}
+
+
+def _existing_repository_check(project: DeployProject) -> dict[str, Any]:
+    if not project.workdir.is_dir():
+        return _bootstrap_result("existing_directory", False, "已有代码目录不存在，请填写正在运行项目的实际目录；不会自动创建或重新 clone")
+    code, root = _run_command(["git", "-C", str(project.workdir), "rev-parse", "--show-toplevel"], timeout=5)
+    if code or Path(root.strip()).resolve() != project.workdir.resolve():
+        return _bootstrap_result("existing_repository", False, "请填写 Git 仓库根目录，而不是父目录或仓库内的子目录")
+    code, origin = _run_command(["git", "-C", str(project.workdir), "remote", "get-url", "origin"], timeout=5)
+    if code or not origin.strip():
+        return _bootstrap_result("existing_repository", False, "无法读取已有目录的 Git origin，请确认目录和 Git 读取权限")
+    try:
+        matches = project_guidance.repository_identity(origin.strip()) == project_guidance.repository_identity(project.repo)
+    except ValueError:
+        matches = False
+    if not matches:
+        return _bootstrap_result("existing_repository", False, "该目录的 origin 与填写仓库不一致，请核对地址；不会改写远程地址或切换代码")
+    return _bootstrap_result("existing_repository", True, "已有 Git 仓库匹配，接入阶段不修改代码或重启服务")
+
+
+def _prepare_command_script(project: DeployProject) -> None:
+    directory = STATE_FILE.parent / "command-plans" / project.key
+    for path in (directory.parent, directory):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise ValueError("自定义步骤目录不安全")
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name != "nt" and path.stat().st_uid != os.geteuid():
+            raise ValueError("自定义步骤目录不属于面板运行用户")
+        os.chmod(path, 0o700)
+    script = directory / "deploy.sh"
+    marker = "# mini-deploy-managed: command-plan-v1\n"
+    if script.is_symlink() or (script.exists() and (not script.is_file() or script.stat().st_size > 128 * 1024)):
+        raise ValueError("自定义步骤文件不安全")
+    if script.exists() and marker not in script.read_text(encoding="utf-8")[:150]:
+        raise ValueError("目标脚本不是面板托管文件，不会覆盖")
+    text = _deploy_script_text(project)
+    _atomic_write_private_text(script, text)
+    os.chmod(script, 0o700)
+
+
+def _docker_project_directory(key: str) -> Path:
+    return STATE_FILE.parent / "managed-projects" / _safe_project_key(key)
+
+
+def _secure_docker_directory(project: DeployProject) -> Path:
+    directory = _docker_project_directory(project.key)
+    for path in (directory.parent, directory):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise ValueError("面板容器配置目录不安全，请检查服务器目录")
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name != "nt" and path.stat().st_uid != os.geteuid():
+            raise ValueError("面板容器配置目录不属于面板运行用户")
+        os.chmod(path, 0o700)
+    for filename in ("plan.json", "compose.yaml", "environment.json", "deploy.sh"):
+        path = directory / filename
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("面板容器配置文件不安全，请检查服务器目录")
+    plan = directory / "plan.json"
+    if plan.exists():
+        previous = json.loads(plan.read_text(encoding="utf-8"))
+        if (previous.get("mode") != project.docker_config["mode"] or
+                previous.get("volumes", []) != project.docker_config.get("volumes", [])):
+            raise ValueError("已有容器运行计划的数据映射或部署方式不同，请保留原映射，避免覆盖业务数据")
+    return directory
+
+
+def _prepare_docker_files(project: DeployProject, environment: dict[str, str] | None) -> None:
+    source = project.workdir / project.docker_config["file"]
+    if not source.is_file() or source.is_symlink() or not source.resolve().is_relative_to(project.workdir.resolve()):
+        raise ValueError("仓库容器配置文件不存在或路径不安全，请确认已提交对应文件")
+    directory = _secure_docker_directory(project)
+    config = project.docker_config
+    names = config["environment"]
+    if environment is not None:
+        values = docker_onboarding.environment_values(environment, names)
+        _atomic_write_private_text(directory / "environment.json", json.dumps(values, ensure_ascii=False))
+    else:
+        docker_onboarding.execution_environment(directory / "environment.json", names)
+    if config["mode"] == "dockerfile":
+        _atomic_write_private_text(directory / "compose.yaml", docker_onboarding.compose_text(config, project.workdir, directory))
+    _atomic_write_private_text(directory / "plan.json", json.dumps(config, ensure_ascii=False))
+
+
+def _docker_readiness(project: DeployProject) -> list[dict[str, Any]]:
+    config = project.docker_config
+    directory = _docker_project_directory(project.key)
+    checks = []
+    source = project.workdir / config["file"]
+    exists = source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(project.workdir.resolve())
+    checks.append(_doctor_item("docker_source", "仓库容器配置", exists,
+        f"{config['file']} {'已找到' if exists else '不存在，请提交配置文件后重试'}"))
+    plan = directory / "plan.json"
+    try:
+        plan_ok = not plan.is_symlink() and plan.stat().st_size <= 64 * 1024 and json.loads(plan.read_text(encoding="utf-8")) == config
+    except (OSError, ValueError):
+        plan_ok = False
+    checks.append(_doctor_item("docker_plan", "部署计划", plan_ok, "运行计划已准备" if plan_ok else "运行计划缺失或已变更，请重新初始化项目"))
+    try:
+        env = docker_onboarding.execution_environment(directory / "environment.json", config["environment"])
+        checks.append(_doctor_item("docker_environment", "环境变量", True, "变量已准备（不显示值）"))
+    except (OSError, ValueError):
+        checks.append(_doctor_item("docker_environment", "环境变量", False, "变量未准备，请返回接入配置填写并重新初始化"))
+        return checks
+    if not shutil.which("docker"):
+        return checks
+    if config["mode"] == "dockerfile":
+        ready = docker_onboarding.port_ready(config, project.key)
+        checks.append(_doctor_item("docker_port", "服务器访问端口", ready,
+            f"端口 {config['published_port']} 可使用" if ready else f"端口 {config['published_port']} 被其他服务占用或无法确认，请选择其他端口；不会自动停止已有服务"))
+    code, _ = _run_command(["docker", "compose", "version"], timeout=5)
+    checks.append(_doctor_item("docker_compose", "Docker Compose", code == 0,
+        "Compose 可用" if code == 0 else "需要安装 Docker Compose 插件；可运行 SETUP_DOCKER=yes bash install.sh"))
+    if code == 0 and exists:
+        try:
+            result = subprocess.run(docker_onboarding.command(project.workdir, config, directory, project.key) + ["config", "--quiet"],
+                                    env=env, cwd=project.workdir, capture_output=True, timeout=10, check=False)
+            checks.append(_doctor_item("docker_config", "容器运行配置", result.returncode == 0,
+                "配置校验通过" if result.returncode == 0 else "配置校验失败：请确认必填变量、引用的文件及 Compose 语法；变量值不会输出"))
+        except (OSError, subprocess.SubprocessError):
+            checks.append(_doctor_item("docker_config", "容器运行配置", False, "无法完成配置校验，请检查 Docker Compose"))
+    return checks
 
 
 def _run_bootstrap_command(command: list[str], *, step: str, timeout: float = 60.0) -> dict[str, Any]:
@@ -2056,11 +2319,13 @@ def _run_bootstrap_command(command: list[str], *, step: str, timeout: float = 60
 
 
 @_maintenance_shared_operation
-def _bootstrap_project(project: DeployProject, *, write_service: bool = True) -> dict[str, Any]:
+def _bootstrap_project(project: DeployProject, *, write_service: bool = True, environment: dict[str, str] | None = None) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     service_written = False
     script_path = _project_script_path(project)
     try:
+        if project.deployment_plan.get("situation") == "unsure":
+            raise ValueError("请先确认首次部署还是接入已有服务，不确定时只能检查仓库")
         project_guidance.validate_repository(project.repo, project.branch)
         _project_preview(project)
     except (ValueError, OSError) as exc:
@@ -2083,7 +2348,14 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True) ->
             "ssh_public_keys": _ssh_public_keys(),
         }
 
-    ls_remote = _run_bootstrap_command(["git", "ls-remote", project.repo, "HEAD"], step="repo_access", timeout=30.0)
+    adopting = project.deployment_plan.get("situation") == "existing"
+    if project.deployment_plan.get("situation") == "new" and (project.workdir / ".git").exists():
+        local_check = _existing_repository_check(project)
+        results.append(local_check)
+        if not local_check["ok"]:
+            return {"ok": False, "project": project.key, "results": results}
+    ls_remote = (_existing_repository_check(project) if adopting else
+                 _run_bootstrap_command(["git", "ls-remote", project.repo, "HEAD"], step="repo_access", timeout=30.0))
     results.append(ls_remote)
     if not ls_remote["ok"]:
         return {
@@ -2095,8 +2367,9 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True) ->
         }
 
     try:
-        project.workdir.parent.mkdir(parents=True, exist_ok=True)
-        if (project.workdir / ".git").is_dir():
+        if adopting:
+            pass
+        elif (project.workdir / ".git").exists():
             for step, args in (("git_fetch", ["fetch", "origin", project.branch]),
                                ("git_checkout", ["checkout", project.branch]),
                                ("git_pull", ["pull", "--ff-only", "origin", project.branch])):
@@ -2105,24 +2378,41 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True) ->
                 if not result["ok"]:
                     break
         else:
+            project.workdir.parent.mkdir(parents=True, exist_ok=True)
             results.append(_run_bootstrap_command(["git", "clone", "--branch", project.branch, project.repo, str(project.workdir)], step="git_clone", timeout=180.0))
         if not all(item["ok"] for item in results):
             return {"ok": False, "project": project.key, "results": results, "ssh_public_keys": _ssh_public_keys()}
 
-        script_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with script_path.open("x", encoding="utf-8", newline="\n") as stream:
-                stream.write(_deploy_script_text(project))
-            os.chmod(script_path, 0o755)
-            results.append(_bootstrap_result("deploy_script", True, f"已写入 {script_path}"))
-        except FileExistsError:
-            results.append(_bootstrap_result("deploy_script", True, f"保留已有文件：{script_path}"))
+        if project.docker_config:
+            _prepare_docker_files(project, environment)
+            results.append(_bootstrap_result("docker_configuration", True, "容器运行配置已准备；仓库原文件保持不变，变量已单独保存"))
+
+        if project.deployment_plan.get("method") == "script":
+            if not script_path.is_file() or script_path.is_symlink():
+                raise ValueError("指定的部署脚本不存在或是符号链接，请选择已有文件；不会生成占位脚本")
+            results.append(_bootstrap_result("deploy_script", True, f"保留已有脚本：{script_path}"))
+        elif project.deployment_plan.get("method") == "commands":
+            _prepare_command_script(project)
+            results.append(_bootstrap_result("deploy_script", True, "已准备确认过的部署步骤，尚未执行"))
+        elif project.docker_config:
+            _atomic_write_private_text(script_path, _deploy_script_text(project))
+            os.chmod(script_path, 0o700)
+            results.append(_bootstrap_result("deploy_script", True, f"已准备面板托管脚本：{script_path}"))
+        else:
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with script_path.open("x", encoding="utf-8", newline="\n") as stream:
+                    stream.write(_deploy_script_text(project))
+                os.chmod(script_path, 0o755)
+                results.append(_bootstrap_result("deploy_script", True, f"已写入 {script_path}"))
+            except FileExistsError:
+                results.append(_bootstrap_result("deploy_script", True, f"保留已有文件：{script_path}"))
 
         project.deploy_log_file.parent.mkdir(parents=True, exist_ok=True)
         project.deploy_log_file.touch(exist_ok=True)
         results.append(_bootstrap_result("log_file", True, f"已准备 {project.deploy_log_file}"))
 
-        if write_service and project.template in {"python", "go", "java"}:
+        if write_service and not adopting and project.template in {"python", "go", "java"}:
             service_path = Path("/etc/systemd/system") / f"{project.service_name}.service"
             try:
                 with service_path.open("x", encoding="utf-8", newline="\n") as stream:
@@ -2189,6 +2479,37 @@ def _nginx_payload(*, discover: bool = False) -> dict[str, Any]:
         if discover:
             data["detected"] = settings.discover()
         return data
+
+
+def _nginx_requests_payload(limit: int = 100) -> dict[str, Any]:
+    if not 1 <= limit <= nginx_requests.MAX_RECORDS:
+        raise ValueError("请求数量必须在 1-300 之间")
+    with _config_transaction_lock, _nginx_lock:
+        settings = _nginx_settings()
+        data = settings.read()
+        if not data["configured"] or data["profile"]["mode"] == "none":
+            return {"mode": "none", "enabled": False, "records": [], "limit": limit,
+                    "notice": "请先在域名与证书页接入本机或 Docker Nginx。"}
+        return nginx_requests.recent(settings.runtime(), limit)
+
+
+@_nginx_serialized
+def _enable_nginx_requests() -> dict[str, Any]:
+    settings = _nginx_settings()
+    data = settings.read()
+    if not data["configured"] or data["profile"]["mode"] == "none":
+        raise ValueError("请先接入本机或 Docker Nginx")
+    runtime = settings.runtime()
+    nginx_requests.enable(runtime)
+    return nginx_requests.recent(runtime)
+
+
+@_nginx_serialized
+def _disable_nginx_requests() -> dict[str, Any]:
+    settings = _nginx_settings()
+    runtime = settings.runtime()
+    nginx_requests.disable(runtime)
+    return nginx_requests.recent(runtime)
 
 
 def _nginx_http_url(domain: str, profile: dict[str, Any]) -> str:
@@ -2349,6 +2670,8 @@ def _save_nginx_settings(data: dict[str, Any]) -> dict[str, Any]:
                 raise certificates.CertificateError("请先停用并删除已有证书，再切换 Nginx 实例")
             if old["profile"].get("mode") != "none":
                 old_runtime = settings.runtime(live=False)
+                if nginx_requests.enabled(old_runtime):
+                    raise certificates.CertificateError("请先在请求记录页关闭记录，再切换 Nginx 实例")
                 if any(old_runtime.conf_root.glob("mini-deploy-*.conf")):
                     raise certificates.CertificateError("旧实例仍有 mini-deploy 站点配置，请先移除这些站点再切换实例")
         settings.save(profile, old["upstreams"] if old["profile"] == profile else {})
@@ -3495,8 +3818,12 @@ def _preflight_payload(project: DeployProject) -> dict[str, Any]:
             code, output = _run_command(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=4.0)
             if code != 0:
                 items.append(_preflight_item("critical", "Docker daemon is unavailable", output or "docker info failed", "systemctl status docker --no-pager"))
-            if not any((project.workdir / name).exists() for name in entrypoint_checks.COMPOSE_FILES):
+            if not project.docker_config and not any((project.workdir / name).exists() for name in entrypoint_checks.COMPOSE_FILES):
                 items.append(_preflight_item("warning", "docker-compose file was not found", str(project.workdir), f"ls -lh {shlex.quote(str(project.workdir))}"))
+        if project.docker_config:
+            for check in _docker_readiness(project):
+                if not check["ok"]:
+                    items.append(_preflight_item("critical", check["title"], check["message"], ""))
 
     ingress = entrypoint_checks.inspect_directory(project.workdir)
     for advice in entrypoint_checks.entry_advice(ingress):
@@ -3883,6 +4210,8 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
     diagnostic_error = ""
 
     try:
+        if project.deployment_plan.get("method") == "commands" and not (action == "rollback" and project.rollback_script):
+            _prepare_command_script(project)
         env = _deploy_subprocess_environment(project, action, script_path, job)
 
         _log(
@@ -4035,6 +4364,8 @@ UI_ASSET_TYPES = {
     "motion.js": "application/javascript; charset=utf-8",
     "nginx.js": "application/javascript; charset=utf-8",
     "docker-images.js": "application/javascript; charset=utf-8",
+    "onboarding.js": "application/javascript; charset=utf-8",
+    "nginx-requests.js": "application/javascript; charset=utf-8",
     "certificates.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
@@ -4327,6 +4658,14 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "nginx_settings_invalid", "detail": str(exc)})
             return
+        if path == "/nginx-requests":
+            if self._require_auth_json():
+                try:
+                    count = int(parse_qs(parsed.query).get("limit", ["100"])[0])
+                    self._write_json(200, _nginx_requests_payload(count))
+                except (ValueError, OSError) as exc:
+                    self._write_json(400, {"error": "nginx_requests_failed", "detail": str(exc)})
+            return
         if path == "/projects-config/doctor":
             if self._require_auth_json():
                 self._handle_projects_config_doctor(parse_qs(parsed.query))
@@ -4438,6 +4777,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = _nginx_upstream_operation(data)
             elif action == "remove-site":
                 result = _remove_nginx_site(data)
+            elif action == "enable-request-logging":
+                result = _enable_nginx_requests()
+            elif action == "disable-request-logging":
+                result = _disable_nginx_requests()
             else:
                 raise ValueError("未知的 Nginx 操作")
         except (ValueError, OSError, _MaintenanceLockError) as exc:
@@ -4550,12 +4893,17 @@ class Handler(BaseHTTPRequestHandler):
             if action == "inspect":
                 environment = {key: value for key, value in os.environ.items()
                                if key not in _DEPLOY_CONTROL_SECRET_ENV_NAMES}
+                repo = str(raw.get("repo") or "").strip()
+                provider = project_guidance.provider_info(repo, str(raw.get("repository_provider") or "auto"))
                 result = project_guidance.inspect_repository(
-                    str(raw.get("repo") or "").strip(), str(raw.get("branch") or "main").strip(), env=environment,
+                    repo, str(raw.get("branch") or "").strip(), env=environment,
                 )
+                result["provider"] = provider
                 if result.get("ok") and result.get("ingress"):
                     result["warnings"] = list(dict.fromkeys(result.get("warnings", []) +
                         entrypoint_checks.entry_advice(result["ingress"])))
+                if not result.get("ok"):
+                    result["ssh_public_keys"] = _ssh_public_keys()
             else:
                 result = _project_preview(_project_from_form(raw))
         except (ValueError, OSError) as exc:
@@ -4575,9 +4923,14 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(raw_project, dict):
             self._write_json(400, {"error": "invalid_project"})
             return
+        options = data.get("options") if isinstance(data.get("options"), dict) else {}
+        environment = options.get("environment")
         try:
             project_guidance.validate_repository(str(raw_project.get("repo") or ""), str(raw_project.get("branch") or "main"))
-            _project_preview(_project_from_form(raw_project))
+            candidate = _project_from_form(raw_project)
+            _project_preview(candidate)
+            if environment is not None:
+                docker_onboarding.environment_values(environment, candidate.docker_config.get("environment", []))
         except (ValueError, OSError) as exc:
             self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
             return
@@ -4598,9 +4951,9 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
             return
 
-        options = data.get("options") if isinstance(data.get("options"), dict) else {}
         write_service = _bool_config(options.get("write_service"), True)
-        result = _bootstrap_project(project, write_service=write_service)
+        result = (_bootstrap_project(project, write_service=write_service, environment=environment)
+                  if project.docker_config else _bootstrap_project(project, write_service=write_service))
         _log(f"project bootstrap project={project.key} ok={result.get('ok')}")
         _audit_event(
             "projects_config_bootstrap",
@@ -5006,7 +5359,11 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             payload = json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._write_json(400, {"error": "invalid_json"})
+            return
+
+        if not isinstance(payload, dict):
             self._write_json(400, {"error": "invalid_json"})
             return
 
@@ -5025,6 +5382,15 @@ class Handler(BaseHTTPRequestHandler):
             _update_state(last_ignored_webhook=ignored)
             _log(f"webhook ignored project={project.key}: project disabled")
             self._write_json(202, {"status": "ignored", "project": project.key, "reason": "project_disabled"})
+            return
+
+        event_headers = {"X-GitHub-Event": "push", "X-Gitea-Event": "push", "X-Gitee-Event": "Push Hook", "X-Gitlab-Event": "Push Hook"}
+        unsupported_event = any(self.headers.get(header) and self.headers.get(header).lower() != expected.lower()
+                                for header, expected in event_headers.items())
+        if project.trigger_mode == "manual" or unsupported_event:
+            reason = "automatic_updates_disabled" if project.trigger_mode == "manual" else "event_mismatch"
+            _update_state(last_ignored_webhook={"project_key": project.key, "reason": reason, "at": _now_text()})
+            self._write_json(202, {"status": "ignored", "project": project.key, "reason": reason})
             return
 
         ref = _extract_ref(payload)
