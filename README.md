@@ -17,6 +17,7 @@ the product.
 - Sustained alerts, recovery messages, repeat limits and temporary notification mute via WeCom, DingTalk or email.
 - Docker container status, logs and management; image listing, search, pull and removal.
 - Edit existing host Docker mirror settings in the panel, with validation, backups and automatic activation.
+- Discover websites and public certificates from local services, Docker configurations and common certificate directories, without initial proxy selection or path entry.
 - Local or Docker Nginx, business sites and uploaded PEM certificate management.
 - Request collection from supported Nginx/Caddy logs.
 - Independent Docker request gateways for HTTP, SSE and WebSocket traffic.
@@ -25,10 +26,14 @@ Business services must already be running. There is no repository onboarding,
 deployment script form, push-to-deploy WebHook, build pipeline, application rollback
 or automatic generation of business runtime files.
 
-Sites are independent of Git deployment and support create, read, update and delete
-through `/sites`, `/sites/save` and `/sites/delete`. Enter a name, domain and port;
-configure the backend address in the Nginx entry settings. Health checks are optional,
-and the advanced site key is generated automatically when omitted.
+Open **Domains and certificates** to see discovered websites and certificate expiry.
+Scanning starts in the background and repeats every ten minutes without changing
+business configuration. Supported configuration readers are Nginx and Caddy. Other
+certificate files are listed separately and are not assumed to be active websites.
+Automatic renewals stay with the original service. Eligible manually configured
+Nginx certificates can be replaced with validation, backups and rollback; symlinks,
+read-only mounts and single-file container mounts are not overwritten. Legacy site
+registration and managed certificate controls remain under manual settings.
 
 ## Install And Sign In
 

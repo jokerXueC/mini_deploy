@@ -522,7 +522,7 @@ function setView(view) {
     server: ['服务器健康面板', '查看服务器资源、网络吞吐和 Docker 容器运行状态。'],
     events: ['监测与告警', '网站可用性、线上证书与服务器异常。'],
     notify: ['通知配置', '异常提醒与恢复通知。'],
-    certificates: ['域名与证书', '站点访问入口、证书有效期与 HTTPS 状态。'],
+    certificates: ['域名与证书', '已发现的网站、证书有效期与线上状态。'],
     requests: ['请求记录', '网站访问、响应状态与耗时'],
   };
   const [title, subtitle] = titles[activeView];

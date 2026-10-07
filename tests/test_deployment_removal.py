@@ -39,8 +39,16 @@ def http_server(runtime, monkeypatch):
 
     def request(method, path, data=None, *, authenticated=True):
         connection = http.client.HTTPConnection(*server.server_address, timeout=5)
-        connection.request(method, path, json.dumps(data or {}), headers=headers if authenticated else {})
-        response = connection.getresponse()
+        body = json.dumps(data or {}).encode()
+        fields = {"Host": f"127.0.0.1:{server.server_port}", "Content-Length": str(len(body)),
+                  **(headers if authenticated else {})}
+        head = f"{method} {path} HTTP/1.1\r\n" + "".join(f"{key}: {value}\r\n" for key, value in fields.items())
+        connection.connect()
+        # Send the small test body with its headers; early rejection can otherwise
+        # race http.client's separate body write and reset the connection on Windows.
+        connection.sock.sendall(head.encode() + b"\r\n" + body)
+        response = http.client.HTTPResponse(connection.sock)
+        response.begin()
         body = response.read()
         connection.close()
         return response.status, json.loads(body)
@@ -160,7 +168,7 @@ def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
     monkeypatch.setattr(agent.sys, "argv", ["agent.py"])
     agent.main()
     assert started == ["_realtime_metric_sampler", "_system_metric_sampler",
-                       "_docker_log_metric_sampler", "_health_check_sampler"]
+                       "_docker_log_metric_sampler", "_health_check_sampler", "_certificate_discovery_sampler"]
     assert agent.STATE_FILE.read_bytes() == original
 
 
@@ -201,6 +209,7 @@ def test_site_ui_uses_actual_site_api_without_deployment(http_server, runtime):
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(http_server.origin + "/ui?view=certificates")
+            page.locator('#certificateAdvanced > summary').click()
             page.locator("#siteAdd").click()
             page.locator("#siteName").fill("API")
             page.locator("#siteDomain").fill("api.example.test")

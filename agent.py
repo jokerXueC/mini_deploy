@@ -39,6 +39,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 import certificates
+import certificate_discovery
 import caddy_requests
 import nginx_runtime
 import nginx_install
@@ -2204,6 +2205,7 @@ def _health_check_sampler() -> None:
             monitor.evaluate_websites()
             if now >= next_system:
                 _evaluate_resource_alerts(monitor, _system_status_payload())
+                _certificate_discovery().observe(monitor)
                 next_system = now + 15
             if sending and sending[0].done():
                 future, key, message = sending
@@ -2230,6 +2232,33 @@ def _health_check_sampler() -> None:
 
 _monitor_instance: monitoring.Monitor | None = None
 _monitor_lock = threading.Lock()
+_discovery_instance: certificate_discovery.Discovery | None = None
+_discovery_lock = threading.Lock()
+
+
+def _certificate_discovery() -> certificate_discovery.Discovery:
+    global _discovery_instance
+    with _discovery_lock:
+        if _discovery_instance is None or _discovery_instance.home != STATE_FILE.parent:
+            _discovery_instance = certificate_discovery.Discovery(STATE_FILE.parent)
+        return _discovery_instance
+
+
+def _certificate_discovery_sampler() -> None:
+    while True:
+        discovery = _certificate_discovery()
+        if not discovery.running and time.time() - discovery.last_scan >= 600:
+            discovery.request_scan()
+        time.sleep(10)
+
+
+@_maintenance_shared_operation
+def _discovery_replace(data: dict[str, Any]) -> dict[str, Any]:
+    with _config_transaction_lock, _nginx_lock:
+        result = _certificate_discovery().replace(data.get("id"), data.get("fingerprint"),
+                                                  data.get("certificate"), data.get("private_key"))
+    _certificate_discovery().request_scan()
+    return result
 
 
 def _monitor() -> monitoring.Monitor:
@@ -2508,6 +2537,7 @@ UI_ASSET_TYPES = {
     "docker-mirrors.js": "application/javascript; charset=utf-8",
     "nginx-requests.js": "application/javascript; charset=utf-8",
     "certificates.js": "application/javascript; charset=utf-8",
+    "certificate-discovery.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
 }
@@ -2801,6 +2831,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._write_json(401, {"error": "unauthorized"})
             return
+        if path == "/certificate-discovery":
+            if self._require_auth_json():
+                self._write_json(200, {**_certificate_discovery().snapshot(), "csrf_token": self._csrf_token_for_request()})
+            return
         if path == "/certificates":
             if self._require_auth_json():
                 self._write_json(200, _certificates_payload())
@@ -2913,6 +2947,31 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/nginx-settings":
             if self._require_auth_json():
                 self._handle_nginx_settings()
+            return
+        if path == "/certificate-discovery":
+            if self._require_auth_json():
+                action = "invalid"
+                try:
+                    data = _read_json_body(self, max_bytes=300 * 1024)
+                    action = data.get("action")
+                    if not isinstance(action, str):
+                        action = "invalid"
+                    discovery = _certificate_discovery()
+                    if action == "scan":
+                        discovery.request_scan()
+                    elif action == "check":
+                        discovery.check(data.get("id"))
+                    elif action == "replace":
+                        result = _discovery_replace(data)
+                    else:
+                        raise ValueError("不支持的发现操作")
+                    self._write_json(200, result if action == "replace" else discovery.snapshot())
+                    _audit_event("certificate_discovery", actor=self.client_address[0], success=True,
+                                 detail={"action": action})
+                except (ValueError, OSError, _MaintenanceLockError) as exc:
+                    _audit_event("certificate_discovery", actor=self.client_address[0], success=False,
+                                 detail={"action": action if action in {"scan", "check", "replace"} else "invalid"})
+                    self._write_json(400, {"error": "discovery_failed", "detail": str(exc) if isinstance(exc, certificates.CertificateError) else "操作未完成，请刷新扫描结果后重试；如替换失败，请检查服务与证书备份目录"})
             return
         if path == "/certificates":
             if self._require_auth_json():
@@ -3340,6 +3399,7 @@ def main() -> None:
     threading.Thread(target=_system_metric_sampler, name="system-metric-sampler", daemon=True).start()
     threading.Thread(target=_docker_log_metric_sampler, name="docker-log-metric-sampler", daemon=True).start()
     threading.Thread(target=_health_check_sampler, name="health-check-sampler", daemon=True).start()
+    threading.Thread(target=_certificate_discovery_sampler, name="certificate-discovery-sampler", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     _log(f"monitoring agent listening on {HOST}:{PORT}, sites={len(PROJECTS)}")
     server.serve_forever()

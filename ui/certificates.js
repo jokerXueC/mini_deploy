@@ -65,6 +65,8 @@ function renderCertificates(payload, resetForm = false) {
 }
 
 async function refreshCertificates() {
+  window.CertificateDiscovery?.refresh();
+  if (!$('certificateAdvanced')?.open) return;
   if (certificateBusy || nginxBusy) return;
   const request = ++certificateRequest;
   try {
@@ -79,6 +81,10 @@ async function refreshCertificates() {
     certificateMessage(`证书加载失败：${error.message}`, true);
   }
 }
+
+$('certificateAdvanced')?.addEventListener('toggle', () => {
+  if ($('certificateAdvanced').open) refreshCertificates();
+});
 
 async function certificateAction(action) {
   if (certificateBusy || nginxBusy) return;

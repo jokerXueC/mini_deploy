@@ -71,6 +71,8 @@ def dashboard():
                 elif path == "/certificates":
                     result = {"projects": [{"project": item["key"], "name": item["name"],
                         "domain": item["app_domain"]} for item in state["sites"]]}
+                elif path == "/certificate-discovery":
+                    result = {**state.get("discovery", {"items": [], "running": False, "last_scan": 1}), "csrf_token": "test-token"}
                 elif path == "/docker/images":
                     result = {"images": []}
                 elif path == "/docker/logs":
@@ -118,6 +120,7 @@ def test_routes_and_monitoring_only_requests(dashboard, view):
 def test_site_registration_updates_nginx_and_certificates(dashboard):
     page, state, origin = dashboard
     page.goto(f"{origin}/ui?view=certificates")
+    page.locator('#certificateAdvanced > summary').click()
     page.locator("#siteAdd").click()
     playwright.expect(page.locator("#siteKey")).to_be_hidden()
     for field, value in {"siteName": "API", "siteDomain": "api.example.test", "sitePort": "8001"}.items():
@@ -165,6 +168,7 @@ def test_site_form_and_navigation_layout(dashboard, tmp_path, width):
     page, state, origin = dashboard
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(f"{origin}/ui?view=certificates")
+    page.locator('#certificateAdvanced > summary').click()
     page.locator("#siteAdd").click()
     page.locator("#siteName").fill("Long site name for layout verification")
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -174,4 +178,34 @@ def test_site_form_and_navigation_layout(dashboard, tmp_path, width):
     image = tmp_path / f"sites-{width}.png"
     page.screenshot(path=str(image), full_page=True)
     print(f"Screenshot: {image}")
+    assert not state["errors"]
+
+
+@pytest.mark.parametrize("width", [390, 1440])
+def test_discovery_default_view_and_actions(dashboard, tmp_path, width):
+    page, state, origin = dashboard
+    state["discovery"] = {"running": False, "last_scan": 1791356400, "progress": "已发现 3 项", "issues": [], "items": [
+        {"id": "a", "domains": ["meetpeak.tech"], "source": "Docker · aimore-caddy-1", "kind": "caddy",
+         "referenced": True, "active": True, "tls": True, "renewal": "自动管理", "certificate_candidate": True,
+         "certificate": {"days_remaining": 62, "expires_at": 1796713200, "issuer": "Let's Encrypt"}, "can_replace": False},
+        {"id": "b", "domains": ["api.example.test"], "source": "服务器", "kind": "nginx", "referenced": True,
+         "active": True, "tls": True, "renewal": "原服务管理", "can_replace": True,
+         "certificate": {"days_remaining": 7, "expires_at": 1791961200, "issuer": "Example CA", "fingerprint": "abc"}},
+        {"id": "c", "domains": ["old.example.test"], "source": "常见证书目录", "kind": "file", "referenced": False,
+         "active": False, "certificate_path": "/etc/nginx/ssl/old.crt", "certificate": {"days_remaining": -3, "expires_at": 1791097200}}]}
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(f"{origin}/ui?view=certificates")
+    playwright.expect(page.locator("#discoverySites")).to_contain_text("meetpeak.tech")
+    playwright.expect(page.locator("#siteForm")).to_be_hidden()
+    assert not any(path in ("/nginx-settings", "/certificates", "/sites") for path, _, _ in state["calls"])
+    playwright.expect(page.locator("#discoveryFiles")).to_be_hidden()
+    page.locator('[data-discovery-action="check"][data-id="a"]').click()
+    page.wait_for_timeout(100)
+    assert any(path == "/certificate-discovery" and payload == {"action": "check", "id": "a"} for path, _, payload in state["calls"])
+    page.locator('[data-discovery-action="replace"]').click()
+    playwright.expect(page.locator("#discoveryReplace")).to_be_visible()
+    page.locator("#discoveryReplaceCancel").click()
+    playwright.expect(page.locator("#discoveryReplace")).to_be_hidden()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.screenshot(path=str(tmp_path / f"discovery-{width}.png"), full_page=True)
     assert not state["errors"]

@@ -155,10 +155,28 @@
     </div>
 
     <div id="certificatesView" class="dashboard-view">
+      <section class="discovery-panel" aria-labelledby="discoveryTitle">
+        <div class="panel-head"><div><h2 id="discoveryTitle">网站与证书</h2><p id="discoveryProgress" role="status">等待首次扫描</p></div><button id="discoveryScan" class="ghost-button compact-action" type="button">重新扫描</button></div>
+        <p id="discoveryFeedback" class="certificate-feedback" role="status" aria-live="polite"></p>
+        <div id="discoverySites"></div>
+        <details id="discoveryOther" class="discovery-secondary" hidden><summary>其他证书文件 <span id="discoveryOtherCount"></span></summary><div id="discoveryFiles"></div></details>
+        <details id="discoveryIssues" class="discovery-secondary" hidden><summary>部分来源未完成扫描</summary><ul id="discoveryIssueList"></ul></details>
+        <form id="discoveryReplace" class="discovery-replace" hidden autocomplete="off">
+          <div class="panel-head"><h3 id="discoveryReplaceTitle">替换证书</h3><button id="discoveryReplaceCancel" class="ghost-button compact-action" type="button">取消</button></div>
+          <div class="gateway-form-grid">
+            <label class="field"><span>完整证书链（PEM）</span><input id="discoveryCertFile" type="file" accept=".pem,.crt,.cer" required></label>
+            <label class="field"><span>未加密私钥（PEM）</span><input id="discoveryKeyFile" type="file" accept=".pem,.key" required></label>
+          </div>
+          <button id="discoveryReplaceSave" class="danger-button compact-action" type="submit">校验并替换</button>
+        </form>
+      </section>
+      <details class="discovery-secondary"><summary>线上持续监测</summary>
       <section class="panel website-monitor-panel">
         <div class="panel-head"><div><h2>线上证书</h2><p>网站当前提供的证书 · CDN 域名显示边缘证书</p></div><button id="monitorCertificateAdd" class="ghost-button compact-action" type="button">添加网址</button></div>
         <div id="monitorCertificates" class="monitor-rows"></div>
       </section>
+      </details>
+      <details id="certificateAdvanced" class="discovery-secondary"><summary>手动配置与已有托管证书</summary>
       <div class="gateway-toolbar">
         <div class="gateway-tabs" role="tablist" aria-label="域名管理">
           <button id="gatewaySitesTab" class="gateway-tab active" type="button" role="tab" aria-selected="true" aria-controls="gatewaySites">访问入口</button>
@@ -280,6 +298,7 @@
           </form>
         </div>
       </section>
+      </details>
     </div>
 
     <div id="notifyView" class="dashboard-view">
@@ -575,6 +594,7 @@
   <script src="ui/selects.js"></script>
   <script src="ui/app.js"></script>
   <script src="ui/certificates.js"></script>
+  <script src="ui/certificate-discovery.js"></script>
   <script src="ui/nginx.js"></script>
   <script src="ui/sites.js"></script>
   <script src="ui/monitoring.js"></script>
