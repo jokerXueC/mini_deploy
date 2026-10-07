@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Small webhook deploy agent for low-memory servers.
-
-The agent accepts a Gitee/GitHub/GitLab style push webhook, validates a shared
-secret, filters the branch, and runs one fixed deploy script in a background
-thread. It also exposes a tiny read-only dashboard protected by a local
-password hash and signed cookie.
-"""
+"""Server monitoring, container management and website request observability."""
 
 from __future__ import annotations
 
@@ -18,12 +12,10 @@ import html
 import ipaddress
 import json
 import os
-import queue
 import re
 import secrets
 import shlex
 import shutil
-import signal
 import smtplib
 import ssl
 import stat
@@ -33,8 +25,9 @@ import tempfile
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from email.message import EmailMessage
 from functools import wraps
 from http import cookies
@@ -52,9 +45,8 @@ import nginx_install
 import nginx_requests
 import request_gateway
 import gateway_connections
-import project_guidance
-import entrypoint_checks
-import docker_onboarding
+import monitoring
+import docker_mirrors
 
 try:
     import fcntl
@@ -94,19 +86,13 @@ APP_HOME = Path(os.getenv("MINI_DEPLOY_HOME", os.getenv("VIBEPILOT_HOME", "/opt/
 # The dashboard has one fixed public entry point, including on upgrades.
 HOST = "0.0.0.0"
 PORT = 6868
-WEBHOOK_SECRET = os.getenv("DEPLOY_WEBHOOK_SECRET", "")
-ALLOW_QUERY_WEBHOOK_TOKEN = os.getenv("DEPLOY_ALLOW_QUERY_TOKEN", "").strip().lower() in {
-    "1", "true", "yes", "on", "enabled",
-}
 TRUST_LOOPBACK_PROXY_HEADERS = os.getenv(
     "DEPLOY_TRUST_LOOPBACK_PROXY_HEADERS",
     "",
 ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
-DEPLOY_BRANCH = os.getenv("DEPLOY_BRANCH", "main")
-DEPLOY_SCRIPT = os.getenv("DEPLOY_SCRIPT", str(APP_HOME / "scripts" / "deploy.sample.sh"))
-PROJECT_DIR = Path(os.getenv("PROJECT_DIR", str(APP_HOME / "workspace" / "default")))
-HEALTH_URL = os.getenv("HEALTH_URL", "")
 STATE_FILE = _path_from_env("DEPLOY_AGENT_STATE_FILE", "/var/lib/mini-deploy-agent/state.json")
+SITES_CONFIG_FILE = STATE_FILE.with_name("sites.json")
+MONITORING_STATE_FILE = STATE_FILE.with_name("monitoring-state.json")
 DEPLOY_PROJECTS_FILE_TEXT = os.getenv("DEPLOY_PROJECTS_FILE", "").strip()
 DEPLOY_PROJECTS_FILE = Path(DEPLOY_PROJECTS_FILE_TEXT) if DEPLOY_PROJECTS_FILE_TEXT else None
 PROJECTS_CONFIG_FILE, LEGACY_PROJECTS_CONFIG_FILE = _projects_config_paths(
@@ -117,7 +103,6 @@ PROJECTS_CONFIG_FILE, LEGACY_PROJECTS_CONFIG_FILE = _projects_config_paths(
 AGENT_ENV_FILE = _path_from_env("DEPLOY_AGENT_ENV_FILE", "/etc/mini-deploy-agent.env")
 AGENT_SERVICE_NAME = os.getenv("DEPLOY_AGENT_SERVICE_NAME", "").strip() or "mini-deploy-agent"
 LOG_FILE = _path_from_env("DEPLOY_AGENT_LOG", "/var/log/mini_deploy/mini-deploy-agent.log")
-DEPLOY_LOG_FILE = _path_from_env("DEPLOY_LOG_FILE", "/var/log/mini_deploy/mini_deploy.log")
 AUDIT_LOG_FILE = _path_from_env("DEPLOY_AUDIT_LOG_FILE", STATE_FILE.with_name("audit.jsonl"))
 PROJECT_CONFIG_BACKUP_DIR = _path_from_env(
     "DEPLOY_PROJECT_CONFIG_BACKUP_DIR",
@@ -126,20 +111,15 @@ PROJECT_CONFIG_BACKUP_DIR = _path_from_env(
 MAINTENANCE_LOCK_FILE = Path("/run/mini-deploy-agent/maintenance.lock")
 MAINTENANCE_LOCK_OWNER_UID = 0
 MAX_BODY_BYTES = int(os.getenv("DEPLOY_AGENT_MAX_BODY_BYTES", str(1024 * 1024)))
-PROJECT_CONFIG_BACKUP_LIMIT = int(os.getenv("DEPLOY_PROJECT_CONFIG_BACKUP_LIMIT", "20"))
 LOG_TAIL_LINES = int(os.getenv("DEPLOY_LOG_TAIL_LINES", "320"))
 LOG_TAIL_MAX_LINES = int(os.getenv("DEPLOY_LOG_TAIL_MAX_LINES", "5000"))
 LOG_DOWNLOAD_MAX_BYTES = int(os.getenv("DEPLOY_LOG_DOWNLOAD_MAX_BYTES", str(32 * 1024 * 1024)))
 SYSTEM_STATUS_CACHE_SECONDS = int(os.getenv("DEPLOY_SYSTEM_STATUS_CACHE_SECONDS", "5"))
 SYSTEM_METRIC_INTERVAL_SECONDS = int(os.getenv("DEPLOY_SYSTEM_METRIC_INTERVAL_SECONDS", str(30 * 60)))
 DOCKER_LOG_METRIC_INTERVAL_SECONDS = max(15, min(int(os.getenv("DEPLOY_DOCKER_LOG_METRIC_INTERVAL_SECONDS", "30")), 300))
-PROJECT_GIT_STATUS_CACHE_SECONDS = max(1, min(float(os.getenv("DEPLOY_PROJECT_GIT_STATUS_CACHE_SECONDS", "5")), 60))
-STATE_PROGRESS_WRITE_INTERVAL_SECONDS = max(0.2, min(float(os.getenv("DEPLOY_STATE_PROGRESS_WRITE_INTERVAL_SECONDS", "1")), 10))
 SYSTEM_METRIC_MAX_POINTS = int(os.getenv("DEPLOY_SYSTEM_METRIC_MAX_POINTS", "336"))
 NETWORK_MAX_MBPS = float(os.getenv("DEPLOY_NETWORK_MAX_MBPS", "100"))
 DOCKER_LOG_TAIL_MAX_LINES = int(os.getenv("DEPLOY_DOCKER_LOG_TAIL_MAX_LINES", "5000"))
-WEBHOOK_DEDUPE_LIMIT = max(50, min(int(os.getenv("DEPLOY_WEBHOOK_DEDUPE_LIMIT", "500")), 5000))
-WEBHOOK_DEDUPE_TTL_SECONDS = max(300, min(int(os.getenv("DEPLOY_WEBHOOK_DEDUPE_TTL_SECONDS", str(7 * 24 * 60 * 60))), 30 * 24 * 60 * 60))
 HEALTH_CHECK_INTERVAL_SECONDS = max(5, min(int(os.getenv("DEPLOY_HEALTH_CHECK_INTERVAL_SECONDS", "15")), 300))
 HEALTH_CHECK_TIMEOUT_SECONDS = max(1, min(float(os.getenv("DEPLOY_HEALTH_CHECK_TIMEOUT_SECONDS", "5")), 30))
 
@@ -156,55 +136,17 @@ MIN_UI_SESSION_SECRET_UNIQUE_CHARS = 8
 LOGIN_ATTEMPT_LIMIT = 5
 LOGIN_ATTEMPT_WINDOW_SECONDS = 60.0
 LOGIN_FAILURE_MAX_CLIENTS = 4096
-MAX_HISTORY = 60
-
-DEPLOY_PHASE_LABELS = {
-    "starting": "准备部署",
-    "fetch": "拉取代码",
-    "pull": "更新代码",
-    "website_dependencies": "安装前端依赖",
-    "website_build": "构建网站",
-    "docker_build": "构建并重启容器",
-    "nginx_reload": "重载 Nginx",
-    "docker_ps": "检查容器",
-    "health_check": "健康检查",
-    "agent_restart": "重启部署 Agent",
-    "canceling": "正在取消",
-    "canceled": "已取消",
-    "timeout": "部署超时",
-    "interrupted": "服务重启导致中断",
-    "finished": "完成",
-}
 
 
 @dataclass(frozen=True)
-class DeployProject:
+class Site:
     key: str
     name: str
-    template: str
-    repo: str
-    branch: str
-    workdir: Path
-    script: str
-    health_url: str
-    deploy_log_file: Path
-    webhook_secret: str
-    enabled: bool
-    manual_deploy_enabled: bool
-    timeout_seconds: int
-    rollback_script: str
-    service_name: str
-    service_port: int
-    start_command: str
-    app_domain: str
-    app_https: bool
-    entry_kind: str = ""
-    entry_path: str = ""
-    entry_object: str = ""
-    docker_config: dict[str, Any] = field(default_factory=dict)
-    deployment_plan: dict[str, str] = field(default_factory=dict)
-    repository_provider: str = "auto"
-    trigger_mode: str = "webhook"
+    health_url: str = ""
+    enabled: bool = True
+    service_port: int = 8000
+    app_domain: str = ""
+    app_https: bool = False
 
 
 def _safe_project_key(value: str) -> str:
@@ -241,81 +183,16 @@ def _int_config(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-_WEBHOOK_SECRET_PLACEHOLDERS = frozenset({
-    "change-me",
-    "changeme",
-    "replace-me",
-    "replace-with-a-long-random-token",
-})
-
-
-def _is_placeholder_webhook_secret(value: str) -> bool:
-    normalized = str(value or "").strip().lower()
-    return normalized in _WEBHOOK_SECRET_PLACEHOLDERS or normalized.startswith("replace-with-")
-
-
-def _is_strong_webhook_secret(value: str) -> bool:
-    secret = str(value or "").strip()
-    return len(secret) >= 32 and not _is_placeholder_webhook_secret(secret)
-
-
-def _default_project() -> DeployProject:
-    return DeployProject(
-        key="default",
-        name=os.getenv("DEPLOY_PROJECT_NAME", "mini_deploy"),
-        template=os.getenv("DEPLOY_PROJECT_TEMPLATE", "custom"),
-        repo=os.getenv("DEPLOY_REPO", ""),
-        branch=DEPLOY_BRANCH,
-        workdir=PROJECT_DIR,
-        script=DEPLOY_SCRIPT,
-        health_url=HEALTH_URL,
-        deploy_log_file=DEPLOY_LOG_FILE,
-        webhook_secret=WEBHOOK_SECRET,
-        enabled=_bool_config(os.getenv("DEPLOY_PROJECT_ENABLED"), False),
-        manual_deploy_enabled=_bool_config(os.getenv("DEPLOY_MANUAL_DEPLOY_ENABLED"), True),
-        timeout_seconds=_int_config(os.getenv("DEPLOY_TIMEOUT_SECONDS"), 900),
-        rollback_script=os.getenv("DEPLOY_ROLLBACK_SCRIPT", ""),
-        service_name=os.getenv("DEPLOY_SERVICE_NAME", "mini-deploy-app"),
-        service_port=_int_config(os.getenv("DEPLOY_SERVICE_PORT"), 8000),
-        start_command=os.getenv("DEPLOY_START_COMMAND", ""),
-        app_domain=os.getenv("DEPLOY_APP_DOMAIN", ""),
-        app_https=_bool_config(os.getenv("DEPLOY_APP_HTTPS"), False),
-    )
-
-
-def _project_from_config(raw: dict[str, Any], fallback_key: str) -> DeployProject:
+def _project_from_config(raw: dict[str, Any], fallback_key: str) -> Site:
+    # Legacy deployment fields are deliberately ignored during site migration.
     key = _safe_project_key(str(raw.get("key") or fallback_key))
-    branch = str(raw.get("branch") or DEPLOY_BRANCH)
-    workdir = Path(str(raw.get("workdir") or raw.get("project_dir") or PROJECT_DIR))
-    script = str(raw.get("script") or DEPLOY_SCRIPT)
-    service_name = _safe_project_key(str(raw.get("service_name") or raw.get("service") or key))
-    return DeployProject(
-        key=key,
-        name=str(raw.get("name") or key),
-        template=str(raw.get("template") or raw.get("type") or "custom"),
-        repo=str(raw.get("repo") or raw.get("repository") or ""),
-        branch=branch,
-        workdir=workdir,
-        script=script,
-        health_url=str(raw.get("health_url") or HEALTH_URL),
-        deploy_log_file=Path(str(raw.get("deploy_log_file") or raw.get("log_file") or DEPLOY_LOG_FILE)),
-        webhook_secret=str(raw.get("webhook_secret") or raw.get("secret") or ""),
+    return Site(
+        key=key, name=str(raw.get("name") or key),
+        health_url=str(raw.get("health_url") or ""),
         enabled=_bool_config(raw.get("enabled"), True),
-        manual_deploy_enabled=_bool_config(raw.get("manual_deploy_enabled"), True),
-        timeout_seconds=_int_config(raw.get("timeout_seconds"), _int_config(os.getenv("DEPLOY_TIMEOUT_SECONDS"), 900)),
-        rollback_script=str(raw.get("rollback_script") or ""),
-        service_name=service_name,
         service_port=_int_config(raw.get("service_port") or raw.get("port"), 8000),
-        start_command=str(raw.get("start_command") or ""),
         app_domain=str(raw.get("app_domain") or raw.get("domain") or ""),
         app_https=_bool_config(raw.get("app_https") or raw.get("https"), False),
-        entry_kind=str(raw.get("entry_kind") or ""),
-        entry_path=str(raw.get("entry_path") or ""),
-        entry_object=str(raw.get("entry_object") or ""),
-        docker_config=docker_onboarding.normalize(raw.get("docker_config")),
-        deployment_plan=project_guidance.deployment_plan(raw.get("deployment_plan")),
-        repository_provider=str(raw.get("repository_provider") or "auto"),
-        trigger_mode=str(raw.get("trigger_mode") or "webhook"),
     )
 
 
@@ -404,27 +281,31 @@ def _read_selected_projects_config() -> bytes | None:
     return config_payload
 
 
-def _load_projects() -> dict[str, DeployProject]:
-    config_payload = _read_selected_projects_config()
-    if config_payload is not None:
-        try:
-            raw = json.loads(config_payload.decode("utf-8"))
-            items = raw.get("projects") if isinstance(raw, dict) else raw
-            if not isinstance(items, list):
-                raise ValueError("projects must be a list")
-            projects = {}
-            for index, item in enumerate(items):
-                if not isinstance(item, dict):
-                    raise ValueError(f"project at index {index} must be an object")
-                project = _project_from_config(item, f"project-{index + 1}")
-                if project.key in projects:
-                    raise ValueError(f"duplicate project key: {project.key}")
-                projects[project.key] = project
-            return projects
-        except Exception as exc:
-            raise RuntimeError(f"projects config is invalid: {PROJECTS_CONFIG_FILE}: {exc}") from exc
-    project = _default_project()
-    return {project.key: project}
+def _read_site_config() -> bytes | None:
+    payload = _read_regular_projects_config(SITES_CONFIG_FILE, "sites")
+    return payload if payload is not None else _read_selected_projects_config()
+
+
+def _load_projects() -> dict[str, Site]:
+    config_payload = _read_site_config()
+    if config_payload is None:
+        return {}
+    try:
+        raw = json.loads(config_payload.decode("utf-8"))
+        items = raw.get("sites", raw.get("projects")) if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            raise ValueError("sites must be a list")
+        sites = {}
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError(f"site at index {index} must be an object")
+            site = _project_from_config(item, f"site-{index + 1}")
+            if site.key in sites:
+                raise ValueError(f"duplicate site key: {site.key}")
+            sites[site.key] = site
+        return sites
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"sites config is invalid: {exc}") from exc
 
 
 _RUNTIME_CONFIG_ERROR: RuntimeError | None = None
@@ -436,30 +317,13 @@ except RuntimeError as exc:
     # HTTP service itself is started.
     PROJECTS = {}
     _RUNTIME_CONFIG_ERROR = exc
-DEFAULT_PROJECT_KEY = next(iter(PROJECTS), "")
 
-_jobs: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=20)
-_jobs_admin_lock = threading.Lock()
 _projects_lock = threading.Lock()
 _config_transaction_lock = threading.RLock()
-_running_lock = threading.Lock()
 _state_lock = threading.Lock()
 _state_write_lock = threading.Lock()
 _audit_lock = threading.Lock()
-_deploy_process_lock = threading.Lock()
-_deploy_process: subprocess.Popen[str] | None = None
-_deploy_worker_thread: threading.Thread | None = None
-_cancel_requested: dict[str, Any] | None = None
-_state: dict[str, Any] = {
-    "running": False,
-    "queue_size": 0,
-    "last_webhook_at": None,
-    "last_ignored_webhook": None,
-    "current_deploy": None,
-    "last_deploy": None,
-    "history": [],
-    "system_metrics": [],
-}
+_state: dict[str, Any] = {"system_metrics": []}
 _login_failures: dict[str, list[float]] = {}
 _login_failures_lock = threading.Lock()
 _system_status_cache: dict[str, Any] = {"at": 0.0, "payload": {}}
@@ -474,17 +338,6 @@ _health_status_lock = threading.Lock()
 _health_status: dict[str, dict[str, Any]] = {}
 _docker_log_counts_lock = threading.Lock()
 _docker_log_counts: dict[str, dict[str, int]] = {}
-_project_git_status_lock = threading.Lock()
-_project_git_status_cache: dict[str, dict[str, Any]] = {}
-_project_rollback_cache: dict[str, dict[str, Any]] = {}
-_last_progress_state_write = 0.0
-_JOB_MAINTENANCE_LOCK_KEY = "_maintenance_lock_fd"
-_JOB_DEPLOY_LIFECYCLE_OWNER_KEY = "_deploy_lifecycle_owner"
-_JOB_INTERNAL_KEYS = frozenset({_JOB_MAINTENANCE_LOCK_KEY, _JOB_DEPLOY_LIFECYCLE_OWNER_KEY})
-_ORPHAN_REAPER_WAIT_SECONDS = 60.0
-_ORPHAN_REAPER_LOG_SECONDS = 300.0
-_DEPLOY_LOCK_WAIT_SECONDS = 0.2
-_DEPLOY_LOCK_WAIT_LOG_SECONDS = 30.0
 
 
 class _MaintenanceLockError(RuntimeError):
@@ -522,7 +375,7 @@ def _log(message: str) -> None:
     try:
         print(line, end="", flush=True)
     except (OSError, UnicodeError, ValueError):
-        # Logging is diagnostic and must never change deployment lifecycle
+        # Logging is diagnostic and must never change operation results
         # behavior when stdout is closed or cannot encode a message.
         pass
     try:
@@ -715,205 +568,13 @@ def _constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
-def _valid_signature(headers: Any, body: bytes, query: dict[str, list[str]]) -> bool:
-    if not _is_strong_webhook_secret(WEBHOOK_SECRET):
-        return False
-
-    token_candidates = [
-        headers.get("X-Gitee-Token", ""),
-        headers.get("X-Gitlab-Token", ""),
-        headers.get("X-Webhook-Token", ""),
-        headers.get("X-Hook-Token", ""),
-    ]
-    if ALLOW_QUERY_WEBHOOK_TOKEN:
-        token_candidates.extend([
-            query.get("token", [""])[0],
-            query.get("secret", [""])[0],
-        ])
-    if any(token and _constant_time_equal(token, WEBHOOK_SECRET) for token in token_candidates):
-        return True
-
-    signature = headers.get("X-Hub-Signature-256", "")
-    if signature.startswith("sha256="):
-        digest = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
-        return _constant_time_equal(signature, f"sha256={digest}")
-
-    signature = headers.get("X-Gitea-Signature", "")
-    if re.fullmatch(r"[0-9a-fA-F]{64}", signature):
-        digest = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
-        return _constant_time_equal(signature.lower(), digest)
-
-    return False
-
-
-def _extract_ref(payload: dict[str, Any]) -> str:
-    ref = payload.get("ref")
-    if isinstance(ref, str):
-        return ref
-    return ""
-
-
-def _extract_commit(payload: dict[str, Any], key: str) -> str:
-    value = payload.get(key)
-    if isinstance(value, str):
-        return value
-    if key == "after":
-        head = payload.get("head_commit")
-        if isinstance(head, dict) and isinstance(head.get("id"), str):
-            return head["id"]
-    return ""
-
-
-def _extract_changed_files(payload: dict[str, Any], limit: int = 80) -> tuple[list[str], int]:
-    files: list[str] = []
-    seen: set[str] = set()
-    commits = payload.get("commits")
-    commit_items = commits if isinstance(commits, list) else []
-    head = payload.get("head_commit")
-    if isinstance(head, dict):
-        commit_items = [head, *commit_items]
-    for commit in commit_items:
-        if not isinstance(commit, dict):
-            continue
-        for key in ("added", "modified", "removed"):
-            values = commit.get(key)
-            if not isinstance(values, list):
-                continue
-            for value in values:
-                text = str(value or "").strip()
-                if text and text not in seen:
-                    seen.add(text)
-                    files.append(text)
-    return files[:limit], len(files)
-
-
-def _extract_commit_details(payload: dict[str, Any]) -> dict[str, Any]:
-    head = payload.get("head_commit")
-    changed_files, changed_file_count = _extract_changed_files(payload)
-    if not isinstance(head, dict):
-        return {
-            "commit_message": "",
-            "commit_author": "",
-            "changed_files": changed_files,
-            "changed_file_count": changed_file_count,
-        }
-    message = head.get("message") if isinstance(head.get("message"), str) else ""
-    author = head.get("author")
-    author_name = ""
-    if isinstance(author, dict):
-        for key in ("name", "username", "email"):
-            value = author.get(key)
-            if isinstance(value, str) and value:
-                author_name = value
-                break
-    return {
-        "commit_message": message,
-        "commit_author": author_name,
-        "changed_files": changed_files,
-        "changed_file_count": changed_file_count,
-    }
-
-
-def _repo_candidates(payload: dict[str, Any]) -> set[str]:
-    candidates: set[str] = set()
-    repository = payload.get("repository")
-    if isinstance(repository, dict):
-        for key in ("full_name", "path_with_namespace", "name", "url", "html_url", "ssh_url", "git_ssh_url", "clone_url", "git_http_url"):
-            value = repository.get(key)
-            if isinstance(value, str) and value:
-                candidates.add(value)
-    project = payload.get("project")
-    if isinstance(project, dict):
-        for key in ("path_with_namespace", "web_url", "ssh_url_to_repo", "http_url_to_repo"):
-            value = project.get(key)
-            if isinstance(value, str) and value:
-                candidates.add(value)
-    return candidates
-
-
-def _normalize_repo(value: str) -> str:
-    text = value.strip().lower()
-    for prefix in ("git@", "https://", "http://", "ssh://"):
-        if text.startswith(prefix):
-            text = text[len(prefix) :]
-            break
-    text = text.replace(":", "/")
-    if text.endswith(".git"):
-        text = text[:-4]
-    return text.strip("/")
-
-
-def _project_matches_repo(project: DeployProject, candidates: set[str]) -> bool:
-    if not project.repo:
-        return len(PROJECTS) == 1
-    expected = _normalize_repo(project.repo)
-    for candidate in candidates:
-        normalized = _normalize_repo(candidate)
-        if normalized == expected or expected.endswith(f"/{normalized}") or normalized.endswith(f"/{expected}"):
-            return True
-    return False
-
-
-def _project_for_webhook(payload: dict[str, Any], query: dict[str, list[str]]) -> DeployProject | None:
-    requested = query.get("project", [""])[0] or query.get("project_key", [""])[0]
-    if requested:
-        return PROJECTS.get(_safe_project_key(requested))
-
-    candidates = _repo_candidates(payload)
-    for project in PROJECTS.values():
-        if _project_matches_repo(project, candidates):
-            return project
-    if len(PROJECTS) == 1:
-        return PROJECTS.get(DEFAULT_PROJECT_KEY)
-    return None
-
-
-def _project_for_manual(query: dict[str, list[str]]) -> DeployProject | None:
-    requested = query.get("project", [""])[0] or query.get("project_key", [""])[0]
-    if requested:
-        return PROJECTS.get(_safe_project_key(requested))
-    return PROJECTS.get(DEFAULT_PROJECT_KEY)
-
-
-def _valid_signature_for_project(project: DeployProject, headers: Any, body: bytes, query: dict[str, list[str]]) -> bool:
-    secret = project.webhook_secret
-    if not _is_strong_webhook_secret(secret):
-        return False
-
-    token_candidates = [
-        headers.get("X-Gitee-Token", ""),
-        headers.get("X-Gitlab-Token", ""),
-        headers.get("X-Webhook-Token", ""),
-        headers.get("X-Hook-Token", ""),
-    ]
-    if ALLOW_QUERY_WEBHOOK_TOKEN:
-        token_candidates.extend([
-            query.get("token", [""])[0],
-            query.get("secret", [""])[0],
-        ])
-    if any(token and _constant_time_equal(token, secret) for token in token_candidates):
-        return True
-
-    signature = headers.get("X-Hub-Signature-256", "")
-    if signature.startswith("sha256="):
-        digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-        return _constant_time_equal(signature, f"sha256={digest}")
-
-    signature = headers.get("X-Gitea-Signature", "")
-    if re.fullmatch(r"[0-9a-fA-F]{64}", signature):
-        digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-        return _constant_time_equal(signature.lower(), digest)
-
-    return False
-
-
 def _clean_config_text(value: Any, default: str = "", max_length: int = 1024) -> str:
     text = str(value if value is not None else default).strip()
     return text[:max_length]
 
 
 def _load_config_file() -> dict[str, Any]:
-    config_payload = _read_selected_projects_config()
+    config_payload = _read_site_config()
     if config_payload is None:
         return {}
     try:
@@ -1004,37 +665,10 @@ else:
     NOTIFICATIONS = _default_notification_config()
 
 
-def _project_to_config(project: DeployProject, include_secret: bool = True) -> dict[str, Any]:
-    data: dict[str, Any] = {
-        "key": project.key,
-        "name": project.name,
-        "template": project.template,
-        "repo": project.repo,
-        "branch": project.branch,
-        "workdir": str(project.workdir),
-        "script": project.script,
-        "rollback_script": project.rollback_script,
-        "health_url": project.health_url,
-        "deploy_log_file": str(project.deploy_log_file),
-        "enabled": project.enabled,
-        "manual_deploy_enabled": project.manual_deploy_enabled,
-        "timeout_seconds": project.timeout_seconds,
-        "service_name": project.service_name,
-        "service_port": project.service_port,
-        "start_command": project.start_command,
-        "entry_kind": project.entry_kind,
-        "entry_path": project.entry_path,
-        "entry_object": project.entry_object,
-        "docker_config": project.docker_config,
-        "deployment_plan": project.deployment_plan,
-        "repository_provider": project.repository_provider,
-        "trigger_mode": project.trigger_mode,
-        "app_domain": project.app_domain,
-        "app_https": project.app_https,
-    }
-    if include_secret:
-        data["webhook_secret"] = project.webhook_secret
-    return data
+def _project_to_config(project: Site, include_secret: bool = False) -> dict[str, Any]:
+    return {"key": project.key, "name": project.name, "health_url": project.health_url,
+            "enabled": project.enabled, "service_port": project.service_port,
+            "app_domain": project.app_domain, "app_https": project.app_https}
 
 
 def _projects_config_items(include_secret: bool = True) -> list[dict[str, Any]]:
@@ -1054,158 +688,22 @@ def _notification_config_payload(include_secret: bool = True) -> dict[str, Any]:
     return payload
 
 
-def _projects_config_payload(include_secret: bool = True) -> dict[str, Any]:
+def _sites_config_payload() -> dict[str, Any]:
     with _config_transaction_lock:
-        return {
-            "config_file": str(PROJECTS_CONFIG_FILE),
-            "config_exists": PROJECTS_CONFIG_FILE.exists(),
-            "projects": _projects_config_items(include_secret=include_secret),
-            "notifications": _notification_config_payload(include_secret=include_secret),
-        }
+        return {"sites": _projects_config_items(),
+                "notifications": _notification_config_payload(include_secret=True)}
 
 
-def _project_from_form(raw: dict[str, Any], existing: DeployProject | None = None) -> DeployProject:
-    fallback_key = existing.key if existing else raw.get("name") or "project"
-    key = _safe_project_key(_clean_config_text(raw.get("key") or fallback_key, max_length=80))
-    name = _clean_config_text(raw.get("name"), existing.name if existing else key, max_length=120) or key
-    template = _clean_config_text(raw.get("template") or raw.get("type"), existing.template if existing else "custom", max_length=40) or "custom"
-    repo = _clean_config_text(raw.get("repo") or raw.get("repository"), existing.repo if existing else "", max_length=512)
-    branch = _clean_config_text(raw.get("branch"), existing.branch if existing else DEPLOY_BRANCH, max_length=120) or DEPLOY_BRANCH
-    workdir_text = _clean_config_text(raw.get("workdir") or raw.get("project_dir"), str(existing.workdir) if existing else str(PROJECT_DIR), max_length=512)
-    script = _clean_config_text(raw.get("script"), existing.script if existing else DEPLOY_SCRIPT, max_length=512) or DEPLOY_SCRIPT
-    health_url = _clean_config_text(raw.get("health_url"), existing.health_url if existing else HEALTH_URL, max_length=512)
-    log_file = _clean_config_text(
-        raw.get("deploy_log_file") or raw.get("log_file"),
-        str(existing.deploy_log_file) if existing else str(DEPLOY_LOG_FILE),
-        max_length=512,
-    )
-    service_name = _clean_config_text(
-        raw.get("service_name") or raw.get("service"),
-        existing.service_name if existing else key,
-        max_length=80,
-    ) or key
-    start_command = _clean_config_text(
-        raw.get("start_command"),
-        existing.start_command if existing else "",
-        max_length=1024,
-    )
-    plan = project_guidance.deployment_plan(raw.get("deployment_plan", existing.deployment_plan if existing else {}))
-    if plan.get("method") in {"commands", "script"}:
-        template = "custom"
-        start_command = ""
-    entry_kind = str(raw.get("entry_kind", existing.entry_kind if existing else "") or "")
-    entry_path = str(raw.get("entry_path", existing.entry_path if existing else "") or "").strip()
-    entry_object = str(raw.get("entry_object", existing.entry_object if existing else "") or "").strip()
-    if plan.get("method") in {"commands", "script"}:
-        entry_kind = entry_path = entry_object = ""
-    if "entry_kind" not in raw and existing and (start_command != existing.start_command or template != existing.template):
-        entry_kind = entry_path = entry_object = ""
-    if entry_kind:
-        start_command = project_guidance.entry_command(template, entry_kind, entry_path, entry_object,
-            workdir_text, _int_config(raw.get("service_port"), existing.service_port if existing else 8000))
-        entry_path = entry_path.removeprefix("./") if entry_path != "." else entry_path
-    else:
-        entry_path = entry_object = ""
-    docker_config = docker_onboarding.normalize(raw.get("docker_config", existing.docker_config if existing else {})) if template == "docker" else {}
-    provider = str(raw.get("repository_provider", existing.repository_provider if existing else "auto"))
-    project_guidance.provider_info(repo, provider)
-    trigger = str(raw.get("trigger_mode", existing.trigger_mode if existing else "webhook"))
-    if trigger not in {"manual", "webhook"}:
-        raise ValueError("请选择手动更新或 Push WebHook，未实现的触发方式不能启用")
-    if plan.get("method") == "template" and template in {"custom", "static"}:
-        raise ValueError("该项目需要已有部署脚本或明确的部署步骤，不会生成占位方案")
-    if plan.get("situation") == "existing" and plan.get("method") == "template":
-        if template != "docker" or docker_config.get("mode") != "compose":
-            raise ValueError("接入已有服务请选择现有 Compose、部署脚本或实际重启步骤，不会生成新的业务服务")
-    if template != "docker":
-        docker_config = {}
-    if docker_config:
-        script = str(_docker_project_directory(key) / "deploy.sh")
-        if docker_config["mode"] == "dockerfile":
-            service_port = docker_config["published_port"]
-        else:
-            service_port = _int_config(raw.get("service_port"), existing.service_port if existing else 8000)
-    else:
-        service_port = _int_config(raw.get("service_port") or raw.get("port"), existing.service_port if existing else 8000)
-    if plan.get("method") == "commands":
-        script = str(STATE_FILE.parent / "command-plans" / key / "deploy.sh")
-    if plan.get("method") == "script" and not str(raw.get("script") or (existing.script if existing else "")).strip():
-        raise ValueError("请提供已有部署脚本的路径")
-    app_https_raw = raw["app_https"] if "app_https" in raw else raw.get("https")
-    app_domain = _clean_config_text(
-        raw.get("app_domain") or raw.get("domain"),
-        existing.app_domain if existing else "",
-        max_length=253,
-    )
-    webhook_secret = _clean_config_text(raw.get("webhook_secret") or raw.get("secret"), existing.webhook_secret if existing else "", max_length=256)
-    if not webhook_secret or _is_placeholder_webhook_secret(webhook_secret):
-        webhook_secret = secrets.token_hex(32)
-    elif not _is_strong_webhook_secret(webhook_secret):
-        raise ValueError("WebHook Token/Secret 至少需要 32 位")
-    return DeployProject(
-        key=key,
-        name=name,
-        template=template,
-        repo=repo,
-        branch=branch,
-        workdir=Path(workdir_text or str(PROJECT_DIR)),
-        script=script,
-        health_url=health_url,
-        deploy_log_file=Path(log_file or str(DEPLOY_LOG_FILE)),
-        webhook_secret=webhook_secret,
-        enabled=_bool_config(raw.get("enabled"), existing.enabled if existing else True),
-        manual_deploy_enabled=_bool_config(
-            raw.get("manual_deploy_enabled"),
-            existing.manual_deploy_enabled if existing else True,
-        ),
-        timeout_seconds=_int_config(raw.get("timeout_seconds"), existing.timeout_seconds if existing else 900),
-        rollback_script=_clean_config_text(raw.get("rollback_script"), existing.rollback_script if existing else "", max_length=512),
-        service_name=_safe_project_key(service_name),
-        service_port=service_port,
-        start_command=start_command,
-        app_domain=_normalize_domain(app_domain),
-        app_https=_bool_config(app_https_raw, existing.app_https if existing else False),
-        entry_kind=entry_kind,
-        entry_path=entry_path,
-        entry_object=entry_object,
-        docker_config=docker_config,
-        deployment_plan=plan,
-        repository_provider=provider,
-        trigger_mode=trigger,
-    )
-
-
-def _backup_projects_config(*, prune: bool = True) -> str:
-    if not PROJECTS_CONFIG_FILE.exists():
-        return ""
-    backup_dir = PROJECT_CONFIG_BACKUP_DIR
-    backup_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-    os.chmod(backup_dir, 0o700)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    descriptor, raw_backup_path = tempfile.mkstemp(
-        prefix=f"{PROJECTS_CONFIG_FILE.name}.{stamp}.",
-        suffix=".bak",
-        dir=backup_dir,
-    )
-    os.close(descriptor)
-    backup_path = Path(raw_backup_path)
-    try:
-        shutil.copyfile(PROJECTS_CONFIG_FILE, backup_path)
-        os.chmod(backup_path, 0o600)
-    except Exception:
-        backup_path.unlink(missing_ok=True)
-        raise
-    backups = sorted(
-        backup_dir.glob(f"{PROJECTS_CONFIG_FILE.name}.*.bak"),
-        key=lambda item: item.stat().st_mtime,
-        reverse=True,
-    )
-    for old in backups[max(PROJECT_CONFIG_BACKUP_LIMIT, 1):] if prune else []:
-        try:
-            old.unlink()
-        except OSError:
-            pass
-    return str(backup_path)
+def _backup_projects_config() -> None:
+    payload = _read_regular_projects_config(SITES_CONFIG_FILE, "sites")
+    if payload is None:
+        return
+    PROJECT_CONFIG_BACKUP_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(PROJECT_CONFIG_BACKUP_DIR, 0o700)
+    descriptor, backup = tempfile.mkstemp(prefix="sites.json.", suffix=".bak", dir=PROJECT_CONFIG_BACKUP_DIR)
+    with os.fdopen(descriptor, "wb") as handle:
+        os.chmod(backup, 0o600)
+        handle.write(payload)
 
 
 def _atomic_write_private_text(path: Path, text: str) -> None:
@@ -1235,35 +733,83 @@ def _atomic_write_private_text(path: Path, text: str) -> None:
 
 
 @_maintenance_shared_operation
-def _write_projects_config(projects: dict[str, DeployProject], notifications: dict[str, Any] | None = None, *, preserve_backups: bool = False) -> None:
-    backup_path = _backup_projects_config(prune=False) if preserve_backups else _backup_projects_config()
-    PROJECTS_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+def _write_projects_config(projects: dict[str, Site], notifications: dict[str, Any] | None = None) -> None:
+    # Keep the original deployment configuration untouched, including its secrets.
+    _backup_projects_config()
     payload = {
-        "projects": [_project_to_config(project, include_secret=True) for project in projects.values()],
+        "sites": [_project_to_config(project) for project in projects.values()],
         "notifications": _notification_config_from_raw(
-            notifications if notifications is not None else _notification_config_payload(include_secret=True),
-        ),
+            notifications if notifications is not None else _notification_config_payload(include_secret=True)),
     }
-    _atomic_write_private_text(
-        PROJECTS_CONFIG_FILE,
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-    )
-    if backup_path:
-        _log(f"projects config backup created file={backup_path}")
+    _atomic_write_private_text(SITES_CONFIG_FILE, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
-def _replace_projects(projects: dict[str, DeployProject]) -> None:
-    global PROJECTS, DEFAULT_PROJECT_KEY
+def _replace_projects(projects: dict[str, Site]) -> None:
+    global PROJECTS
     with _projects_lock:
         PROJECTS = dict(projects)
-        DEFAULT_PROJECT_KEY = next(iter(PROJECTS), "")
-    _invalidate_project_git_status_cache()
 
 
-def _save_and_reload_projects(projects: dict[str, DeployProject]) -> None:
+def _save_and_reload_projects(projects: dict[str, Site]) -> None:
     with _config_transaction_lock:
         _write_projects_config(projects)
         _replace_projects(projects)
+
+
+@_maintenance_shared_operation
+def _save_site(data: dict[str, Any]) -> None:
+    with _config_transaction_lock, _nginx_lock:
+        raw = data.get("site")
+        if not isinstance(raw, dict):
+            raise ValueError("请填写站点信息")
+        original_key = str(data.get("original_key") or "")
+        key = str(raw.get("key") or original_key or f"site-{secrets.token_hex(6)}")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", key):
+            raise ValueError("站点标识只能使用小写字母、数字、短横线和下划线，最多 80 位")
+        if original_key and (original_key != key or key not in PROJECTS):
+            raise ValueError("站点不存在或标识已变化，请刷新后重试")
+        existing = PROJECTS.get(key)
+        if existing and not original_key:
+            raise ValueError("站点标识已存在")
+        name = _clean_config_text(raw.get("name"), max_length=120)
+        domain = str(raw.get("app_domain") or "").strip().lower()
+        port = raw.get("service_port", 8000)
+        health_url = str(raw.get("health_url") or "").strip()
+        if not name:
+            raise ValueError("请填写站点名称")
+        if domain and not _valid_domain(domain):
+            raise ValueError("请填写纯域名，例如 api.example.com")
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise ValueError("后端端口必须在 1-65535 之间")
+        if domain and any(site.key != key and site.app_domain == domain for site in PROJECTS.values()):
+            raise ValueError("域名已用于其他站点")
+        if health_url:
+            parsed = urlparse(health_url)
+            if (len(health_url) > 2048 or parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.fragment
+                    or any(ord(ch) < 32 for ch in health_url)):
+                raise ValueError("健康检查地址需为不含账号密码的 HTTP 或 HTTPS 地址")
+        candidate = Site(key=key, name=name, health_url=health_url,
+                         enabled=_bool_config(raw.get("enabled"), True),
+                         service_port=port, app_domain=domain,
+                         app_https=existing.app_https if existing else False)
+        protected = _nginx_project_has_site(candidate) or (STATE_FILE.parent / "certificates" / key).exists()
+        if protected and (existing is None or (domain, port) != (existing.app_domain, existing.service_port)):
+            raise ValueError("此标识已有站点配置或证书；请先处理原入口，不能覆盖其域名和后端端口")
+        sites = {**PROJECTS, key: candidate}
+        _save_and_reload_projects(sites)
+
+
+@_maintenance_shared_operation
+def _delete_site(data: dict[str, Any]) -> None:
+    with _config_transaction_lock, _nginx_lock:
+        key = str(data.get("key") or "")
+        existing = PROJECTS.get(key)
+        if existing is None:
+            raise ValueError("站点不存在，请刷新后重试")
+        if _nginx_project_has_site(existing) or (STATE_FILE.parent / "certificates" / key).exists():
+            raise ValueError("此站点仍有关联的 Nginx 配置或证书，请先处理关联；删除登记不会删除服务器文件")
+        _save_and_reload_projects({name: site for name, site in PROJECTS.items() if name != key})
 
 
 def _replace_notifications(notifications: dict[str, Any]) -> None:
@@ -1282,111 +828,6 @@ def _save_and_reload_notifications(notifications: dict[str, Any]) -> None:
         _replace_notifications(parsed)
 
 
-class _ProjectKeyExistsError(ValueError):
-    pass
-
-
-class _ProjectNotFoundError(ValueError):
-    pass
-
-
-class _ProjectRunningError(ValueError):
-    pass
-
-
-def _save_project_transaction(raw_project: dict[str, Any], original_key: str = "") -> DeployProject:
-    with _config_transaction_lock:
-        projects = dict(PROJECTS)
-        existing = projects.get(original_key) if original_key else None
-        project = _project_from_form(raw_project, existing=existing)
-        if project.key not in projects and (
-            any((STATE_FILE.parent / directory / project.key).exists()
-                for directory in ("certificates", "managed-projects", "command-plans"))
-            or (STATE_FILE.parent / "bootstrap-sources" / f"{project.key}.json").exists()
-            or _nginx_project_has_site(project)
-        ):
-            raise ValueError("该项目标识关联的服务器资源已保留，请在高级设置中使用其他项目标识；不会覆盖或删除旧资源")
-        if existing and existing.docker_config and project.key != existing.key:
-            raise ValueError("面板托管的容器项目不能修改标识，以免丢失原数据目录和容器归属")
-        if existing and (STATE_FILE.parent / "certificates" / existing.key).exists():
-            if (project.key, project.app_domain, project.service_port) != (existing.key, existing.app_domain, existing.service_port):
-                raise ValueError("请先在证书管理中停用并删除证书，再修改项目标识、域名或端口")
-        if existing and (project.key, project.app_domain, project.service_port) != (existing.key, existing.app_domain, existing.service_port):
-            if _nginx_project_has_site(existing):
-                raise ValueError("请先在 Nginx 接入中移除域名入口，再修改项目标识、域名或端口")
-        if original_key and original_key != project.key:
-            projects.pop(original_key, None)
-        if project.key in projects and original_key != project.key:
-            raise _ProjectKeyExistsError(project.key)
-        projects[project.key] = project
-        _save_and_reload_projects(projects)
-        return project
-
-
-def _delete_project_transaction(key: str) -> None:
-    with _config_transaction_lock:
-        projects = dict(PROJECTS)
-        if key not in projects:
-            raise _ProjectNotFoundError(key)
-        with _state_lock:
-            current = _state.get("current_deploy")
-        if (
-            isinstance(current, dict)
-            and (current.get("project_key") or "default") == key
-            and current.get("status") == "running"
-        ):
-            raise _ProjectRunningError(key)
-        if any(job.get("project_key") == key for job in _queued_jobs_snapshot()):
-            raise _ProjectRunningError(key)
-        # Removing registration must never clean up files, containers or services.
-        projects.pop(key)
-        _write_projects_config(projects, preserve_backups=True)
-        _replace_projects(projects)
-
-
-def _reset_project_secret_transaction(key: str) -> DeployProject:
-    with _config_transaction_lock:
-        projects = dict(PROJECTS)
-        project = projects.get(key)
-        if not project:
-            raise _ProjectNotFoundError(key)
-        projects[key] = DeployProject(
-            key=project.key,
-            name=project.name,
-            template=project.template,
-            repo=project.repo,
-            branch=project.branch,
-            workdir=project.workdir,
-            script=project.script,
-            health_url=project.health_url,
-            deploy_log_file=project.deploy_log_file,
-            webhook_secret=secrets.token_hex(32),
-            enabled=project.enabled,
-            manual_deploy_enabled=project.manual_deploy_enabled,
-            timeout_seconds=project.timeout_seconds,
-            rollback_script=project.rollback_script,
-            service_name=project.service_name,
-            service_port=project.service_port,
-            start_command=project.start_command,
-            entry_kind=project.entry_kind,
-            entry_path=project.entry_path,
-            entry_object=project.entry_object,
-            docker_config=project.docker_config,
-            deployment_plan=project.deployment_plan,
-            repository_provider=project.repository_provider,
-            trigger_mode=project.trigger_mode,
-            app_domain=project.app_domain,
-            app_https=project.app_https,
-        )
-        _save_and_reload_projects(projects)
-        return projects[key]
-
-
-def _initialize_projects_config_transaction() -> None:
-    with _config_transaction_lock:
-        _write_projects_config(PROJECTS, notifications=_notification_config_payload(include_secret=True))
-
-
 def _notification_result(channel: str, enabled: bool, ok: bool, detail: str) -> dict[str, Any]:
     return {"channel": channel, "enabled": enabled, "ok": ok, "detail": detail}
 
@@ -1403,6 +844,12 @@ def _http_post_json(url: str, payload: dict[str, Any], timeout: float = 8.0) -> 
         text = response.read(1024).decode("utf-8", errors="replace")
         if response.status >= 400:
             raise RuntimeError(f"http {response.status}: {text}")
+        try:
+            result = json.loads(text)
+        except ValueError as exc:
+            raise RuntimeError("通知平台未返回有效 JSON，无法确认送达") from exc
+        if not isinstance(result, dict) or str(result.get("errcode")) != "0":
+            raise RuntimeError("通知平台拒绝了请求，请检查 Webhook、加签和机器人设置")
         return text
 
 
@@ -1463,14 +910,16 @@ def _send_email_notification(config: dict[str, Any], title: str, body: str) -> s
         with smtplib.SMTP_SSL(host, port, timeout=8, context=context) as smtp:
             if username:
                 smtp.login(username, password)
-            smtp.send_message(message)
+            if smtp.send_message(message):
+                raise RuntimeError("部分收件人被 SMTP 服务器拒绝")
     else:
         with smtplib.SMTP(host, port, timeout=8) as smtp:
             if _bool_config(config.get("use_starttls"), False):
                 smtp.starttls(context=context)
             if username:
                 smtp.login(username, password)
-            smtp.send_message(message)
+            if smtp.send_message(message):
+                raise RuntimeError("部分收件人被 SMTP 服务器拒绝")
     return f"sent to {len(recipients)} recipient(s)"
 
 
@@ -1500,34 +949,6 @@ def _any_notification_enabled(config: dict[str, Any]) -> bool:
     return any(_bool_config((config.get(key) if isinstance(config.get(key), dict) else {}).get("enabled"), False) for key in ("wecom", "dingtalk", "email"))
 
 
-def _send_notifications_async(title: str, body: str) -> None:
-    config = _notification_config_payload(include_secret=True)
-    if not _any_notification_enabled(config):
-        return
-
-    def worker() -> None:
-        for result in _send_notifications(config, title, body):
-            if result.get("enabled") and not result.get("ok"):
-                _log(f"notification failed channel={result.get('channel')} detail={result.get('detail')}")
-
-    threading.Thread(target=worker, name="deploy-notification", daemon=True).start()
-
-
-def _notify_deploy_finished(entry: dict[str, Any]) -> None:
-    status = str(entry.get("status") or "")
-    project_name = str(entry.get("project_name") or entry.get("project_key") or "project")
-    title = f"mini_deploy deployment {'succeeded' if status == 'success' else 'failed'}: {project_name}"
-    lines = [
-        f"- Status: {status}",
-        f"- Project: {project_name}",
-        f"- Commit: {_short_sha(entry.get('after'))}",
-        f"- Duration: {entry.get('duration_seconds', '-')}s",
-        f"- Actor: {entry.get('actor') or entry.get('source') or '-'}",
-    ]
-    message = str(entry.get("commit_message") or "").strip()
-    if message:
-        lines.append(f"- Message: {message}")
-    _send_notifications_async(title, "\n".join(lines))
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler, max_bytes: int = 64 * 1024) -> dict[str, Any]:
@@ -1542,31 +963,15 @@ def _read_json_body(handler: BaseHTTPRequestHandler, max_bytes: int = 64 * 1024)
 
 
 def _read_state() -> None:
-    global _state
+    path = MONITORING_STATE_FILE if MONITORING_STATE_FILE.exists() else STATE_FILE
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return
-    if isinstance(data, dict):
+    if isinstance(data, dict) and isinstance(data.get("system_metrics"), list):
         with _state_lock:
-            interrupted = data.get("current_deploy")
-            history = list(data.get("history") or []) if isinstance(data.get("history"), list) else []
-            if isinstance(interrupted, dict) and interrupted.get("status") == "running":
-                interrupted = {
-                    **interrupted,
-                    "status": "interrupted",
-                    "phase": "interrupted",
-                    "phase_label": _phase_label("interrupted"),
-                    "finished_at": _now_text(),
-                    "exit_code": None,
-                    "error": "Agent 在部署执行期间重启，任务未自动续跑，请人工确认后重试",
-                }
-                history.insert(0, interrupted)
-            _state.update(data)
-            _state["history"] = history[:MAX_HISTORY]
-            _state["running"] = False
-            _state["current_deploy"] = None
-            _state["queue_size"] = 0
+            _state.clear()
+            _state["system_metrics"] = data["system_metrics"][-SYSTEM_METRIC_MAX_POINTS:]
 
 
 @_maintenance_shared_operation
@@ -1574,241 +979,17 @@ def _write_state() -> None:
     try:
         with _state_write_lock:
             with _state_lock:
-                data = dict(_state)
-                data["queue_size"] = _jobs.qsize()
-                data["queued_jobs"] = _queued_jobs_snapshot()
+                data = {"system_metrics": list(_state.get("system_metrics", []))}
             _atomic_write_private_text(
-                STATE_FILE,
-                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            )
+                MONITORING_STATE_FILE, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     except OSError as exc:
-        _log(f"state write failed: {exc}")
+        _log(f"monitoring state write failed: {exc}")
 
 
 def _update_state(**changes: Any) -> None:
     with _state_lock:
         _state.update(changes)
-        _state["queue_size"] = _jobs.qsize()
     _write_state()
-
-
-def _webhook_delivery_id(headers: Any, payload: dict[str, Any]) -> str:
-    for name in ("X-GitHub-Delivery", "X-Gitlab-Event-UUID", "X-Gitea-Delivery", "X-Gitee-Delivery"):
-        value = str(headers.get(name, "") or "").strip()
-        if value:
-            return value[:200]
-    for key in ("delivery", "delivery_id", "event_id"):
-        value = str(payload.get(key, "") or "").strip()
-        if value:
-            return value[:200]
-    return ""
-
-
-def _webhook_dedupe_key(project_key: str, ref: str, before: str, after: str,
-                        delivery_id: str, body: bytes) -> str:
-    identity = delivery_id or after or hashlib.sha256(body).hexdigest()
-    return f"{project_key}:{ref}:{identity}"
-
-
-def _prune_webhook_dedupe_locked(now: float | None = None) -> list[dict[str, Any]]:
-    current = time.time() if now is None else now
-    raw = _state.get("webhook_dedupe")
-    entries = raw if isinstance(raw, list) else []
-    fresh = [item for item in entries if isinstance(item, dict) and
-             isinstance(item.get("key"), str) and
-             isinstance(item.get("at"), (int, float)) and
-             0 <= current - float(item["at"]) <= WEBHOOK_DEDUPE_TTL_SECONDS]
-    fresh.sort(key=lambda item: float(item.get("at", 0)), reverse=True)
-    return fresh[:WEBHOOK_DEDUPE_LIMIT]
-
-
-def _reserve_webhook_delivery(key: str, job: dict[str, Any]) -> dict[str, Any] | None:
-    with _state_lock:
-        entries = _prune_webhook_dedupe_locked()
-        duplicate = next((item for item in entries if item.get("key") == key), None)
-        if duplicate:
-            _state["webhook_dedupe"] = entries
-            return dict(duplicate)
-        entries.insert(0, {"key": key, "at": time.time(), "status": "queued",
-                           "project_key": job.get("project_key", ""), "after": job.get("after", "")})
-        _state["webhook_dedupe"] = entries[:WEBHOOK_DEDUPE_LIMIT]
-    _write_state()
-    return None
-
-
-def _remove_webhook_delivery(key: str) -> None:
-    with _state_lock:
-        _state["webhook_dedupe"] = [item for item in _prune_webhook_dedupe_locked()
-                                     if item.get("key") != key]
-    _write_state()
-
-
-def _set_webhook_delivery_status(key: str, status: str) -> None:
-    if not key:
-        return
-    with _state_lock:
-        entries = _prune_webhook_dedupe_locked()
-        for item in entries:
-            if item.get("key") == key:
-                item["status"] = status
-                item["updated_at"] = time.time()
-                break
-        _state["webhook_dedupe"] = entries
-    _write_state()
-
-
-def _phase_label(phase: str | None) -> str:
-    return DEPLOY_PHASE_LABELS.get(str(phase or "").strip(), str(phase or "") or "-")
-
-
-def _update_current_deploy(**changes: Any) -> None:
-    global _last_progress_state_write
-    should_write = False
-    with _state_lock:
-        current = _state.get("current_deploy")
-        if not isinstance(current, dict) or current.get("status") != "running":
-            return
-        now = time.time()
-        old_phase = current.get("phase")
-        new_phase = changes.get("phase", old_phase)
-        if new_phase and old_phase and new_phase != old_phase:
-            phase_started_ts = current.get("phase_started_ts")
-            if isinstance(phase_started_ts, (int, float)):
-                durations = list(current.get("phase_durations") or [])
-                durations.append({
-                    "phase": old_phase,
-                    "label": _phase_label(str(old_phase)),
-                    "duration_seconds": round(max(now - float(phase_started_ts), 0), 1),
-                })
-                current["phase_durations"] = durations
-            current["phase_started_ts"] = now
-        current.update(changes)
-        if current.get("phase"):
-            current["phase_label"] = _phase_label(current.get("phase"))
-        started_ts = current.get("started_ts")
-        if isinstance(started_ts, (int, float)):
-            current["duration_seconds"] = round(max(time.time() - float(started_ts), 0), 1)
-        _state["queue_size"] = _jobs.qsize()
-        phase_changed = bool(new_phase and old_phase and new_phase != old_phase)
-        force_write = phase_changed or new_phase in {"canceled", "timeout"}
-        monotonic_now = time.monotonic()
-        should_write = force_write or monotonic_now - _last_progress_state_write >= STATE_PROGRESS_WRITE_INTERVAL_SECONDS
-        if should_write:
-            _last_progress_state_write = monotonic_now
-    if should_write:
-        _write_state()
-
-
-def _close_current_phase(current: dict[str, Any], finished_ts: float) -> None:
-    phase = current.get("phase")
-    phase_started_ts = current.get("phase_started_ts")
-    if not phase or not isinstance(phase_started_ts, (int, float)):
-        return
-    durations = list(current.get("phase_durations") or [])
-    if durations and durations[-1].get("phase") == phase:
-        return
-    durations.append({
-        "phase": phase,
-        "label": _phase_label(str(phase)),
-        "duration_seconds": round(max(finished_ts - float(phase_started_ts), 0), 1),
-    })
-    current["phase_durations"] = durations
-
-
-def _phase_from_deploy_line(line: str) -> tuple[str, str] | None:
-    text = str(line or "").strip()
-    marker = "phase="
-    if marker not in text:
-        return None
-    phase = text.split(marker, 1)[1].split(None, 1)[0].strip()
-    if not phase:
-        return None
-    return phase, text
-
-
-def _build_progress_detail(line: str) -> str | None:
-    """Map stable BuildKit/Compose output to a concise dashboard detail."""
-    text = str(line or "").strip().lower()
-    if not text:
-        return None
-    if "apt-get install" in text:
-        return "安装系统依赖"
-    if "pip install" in text or "-r requirements.txt" in text:
-        return "安装 Python 依赖"
-    if "exporting layers" in text:
-        return "导出镜像层"
-    if "exporting manifest" in text or "exporting config" in text:
-        return "写入镜像元数据"
-    if "unpacking to docker.io" in text or "unpacking to " in text:
-        return "写入 Docker 镜像"
-    if "container " in text and (" recreat" in text or " restart" in text):
-        return "重建容器"
-    if "container " in text and (" starting" in text or " started" in text):
-        return "启动容器"
-    if "container " in text and (" running" in text or " healthy" in text):
-        return "容器已启动"
-    return None
-
-
-def _append_history(entry: dict[str, Any]) -> None:
-    with _state_lock:
-        history = list(_state.get("history") or [])
-        history.insert(0, entry)
-        _state["history"] = history[:MAX_HISTORY]
-        _state["last_deploy"] = entry
-        _state["running"] = False
-        _state["current_deploy"] = None
-        _state["queue_size"] = _jobs.qsize()
-    _write_state()
-
-
-def _run_git(args: list[str], project: DeployProject | None = None) -> str:
-    target = project or PROJECTS.get(DEFAULT_PROJECT_KEY)
-    if target is None:
-        return ""
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=str(target.workdir),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-            check=False,
-        )
-    except Exception:
-        return ""
-    return (proc.stdout or "").strip()
-
-
-def _project_git_status(project: DeployProject) -> dict[str, str]:
-    identity = (str(project.workdir), project.repo, project.branch)
-    now = time.monotonic()
-    with _project_git_status_lock:
-        cached = _project_git_status_cache.get(project.key)
-        if (cached and cached.get("identity") == identity and
-                now - float(cached.get("at") or 0) < PROJECT_GIT_STATUS_CACHE_SECONDS):
-            return dict(cached.get("value") or {})
-        revisions = _run_git(["rev-parse", "HEAD", "--short", "HEAD"], project).splitlines()
-        value = {
-            "head": revisions[0] if revisions else "",
-            "short_head": revisions[1] if len(revisions) > 1 else "",
-            "branch": _run_git(["branch", "--show-current"], project),
-        }
-        _project_git_status_cache[project.key] = {"at": now, "identity": identity, "value": value}
-        return dict(value)
-
-
-def _invalidate_project_git_status_cache(project_key: str | None = None) -> None:
-    with _project_git_status_lock:
-        if project_key:
-            _project_git_status_cache.pop(project_key, None)
-            _project_rollback_cache.pop(project_key, None)
-        else:
-            _project_git_status_cache.clear()
-            _project_rollback_cache.clear()
 
 
 def _system_metric_history() -> list[dict[str, Any]]:
@@ -2007,7 +1188,7 @@ def _read_log_text(path: Path, lines: int | None = None, all_lines: bool = False
 
 def _safe_download_name(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in value.strip())
-    return cleaned.strip("-") or "deploy-log"
+    return cleaned.strip("-") or "agent-log"
 
 
 def _audit_tail(lines: int = 200) -> list[dict[str, Any]]:
@@ -2022,630 +1203,14 @@ def _audit_tail(lines: int = 200) -> list[dict[str, Any]]:
     return events
 
 
-def _doctor_item(key: str, title: str, ok: bool, message: str, level: str | None = None) -> dict[str, Any]:
-    return {
-        "key": key,
-        "title": title,
-        "ok": ok,
-        "level": level or ("ok" if ok else "fail"),
-        "message": message,
-    }
-
-
-def _project_doctor(project: DeployProject) -> dict[str, Any]:
-    checks: list[dict[str, Any]] = []
-    if project.entry_kind in {"fastapi", "python", "go"}:
-        entry = project.workdir / project.entry_path
-        exists = entry.is_dir() if project.entry_kind == "go" else entry.is_file()
-        checks.append(_doctor_item("startup_entry", "启动入口", exists,
-            f"{project.entry_path} {'已找到' if exists else '不存在，请在项目仓库中确认入口路径'}"))
-    checks.append(_doctor_item(
-        "workdir",
-        "项目目录",
-        project.workdir.is_dir(),
-        f"{project.workdir} {'存在' if project.workdir.is_dir() else '不存在，请先 clone 项目或执行面板生成的服务器指令'}",
-    ))
-
-    git_dir = project.workdir / ".git"
-    checks.append(_doctor_item(
-        "git",
-        "Git 仓库",
-        git_dir.exists(),
-        f"{git_dir} {'存在' if git_dir.exists() else '不存在，部署前需要先 clone 仓库'}",
-    ))
-
-    script_path = _project_script_path(project)
-    script_exists = script_path.is_file()
-    script_executable = os.access(script_path, os.X_OK) if script_exists else False
-    checks.append(_doctor_item(
-        "script",
-        "部署脚本",
-        script_exists,
-        f"{script_path} {'存在' if script_exists else '不存在，请先创建 deploy.sh'}",
-    ))
-    checks.append(_doctor_item(
-        "script_executable",
-        "脚本权限",
-        script_executable,
-        "脚本可执行" if script_executable else f"需要执行 chmod +x {script_path}",
-        level="warn" if script_exists and not script_executable else None,
-    ))
-
-    command_map = {
-        "docker": ["docker"],
-        "node": ["node", "npm"],
-        "python": ["python3"],
-        "java": ["java"],
-        "go": ["go"],
-        "static": ["node", "npm"],
-        "custom": [],
-    }
-    for command in command_map.get(project.template, []):
-        found = shutil.which(command)
-        checks.append(_doctor_item(
-            f"cmd_{command}",
-            f"运行环境：{command}",
-            bool(found),
-            found or f"未找到 {command} 命令，请先安装或改用自定义脚本",
-        ))
-    if project.docker_config:
-        checks.extend(_docker_readiness(project))
-
-    if project.template in {"python", "go", "java"}:
-        service_path = Path("/etc/systemd/system") / f"{project.service_name}.service"
-        checks.append(_doctor_item(
-            "systemd_service",
-            "systemd 服务",
-            service_path.is_file(),
-            f"{service_path} {'存在' if service_path.is_file() else '不存在，可点击自动初始化生成初版 service'}",
-            level="warn" if not service_path.is_file() else None,
-        ))
-
-    if project.health_url:
-        code, output = _run_command(["curl", "-fsS", "--max-time", "5", project.health_url], timeout=6.0)
-        checks.append(_doctor_item(
-            "health_url",
-            "健康检查",
-            code == 0,
-            "健康检查可访问" if code == 0 else (output or "健康检查失败，项目未启动时这是正常的"),
-            level="warn" if code != 0 else None,
-        ))
-    else:
-        checks.append(_doctor_item(
-            "health_url",
-            "健康检查",
-            False,
-            "未填写 health_url，可以稍后补充",
-            level="warn",
-        ))
-
-    ingress = entrypoint_checks.inspect_directory(project.workdir)
-    for index, advice in enumerate(entrypoint_checks.entry_advice(ingress)):
-        checks.append(_doctor_item(f"ingress_{index}", "项目访问入口", False, advice, level="warn"))
-    ok = all(item["ok"] or item.get("level") == "warn" for item in checks)
-    return {
-        "project": project.key,
-        "ok": ok,
-        "checks": checks,
-    }
-
-
-def _template_deploy_steps(project: DeployProject) -> list[str]:
-    if project.entry_kind:
-        project_guidance.entry_command(project.template, project.entry_kind, project.entry_path,
-                                      project.entry_object, str(project.workdir), project.service_port)
-    service = project.service_name or project.key
-    health_line = [f"curl -fsS --max-time 10 {shlex.quote(project.health_url)}"] if project.health_url else [
-        "# 可选：在项目配置里填写 health_url 后，这里会自动检查",
-    ]
-    template = project.template
-    if project.deployment_plan.get("method") == "commands":
-        return [f"(\n{command}\n)" for command in (project.deployment_plan.get("build"), project.deployment_plan["restart"]) if command] + health_line
-    if template == "docker":
-        if project.docker_config:
-            arguments = [sys.executable, str(APP_HOME / "docker_onboarding.py"),
-                         "--workdir", str(project.workdir), "--directory", str(_docker_project_directory(project.key)),
-                         "--key", project.key]
-            return [shlex.join(arguments), *health_line]
-        return ["docker compose up -d --build", "docker compose ps", *health_line]
-    if template == "node":
-        return [
-            "if command -v pnpm >/dev/null 2>&1; then pnpm install --frozen-lockfile; else npm ci; fi",
-            "if [ -f package.json ]; then npm run build --if-present; fi",
-            f"pm2 restart {shlex.quote(service)} || pm2 start npm --name {shlex.quote(service)} -- start",
-            *health_line,
-        ]
-    if template == "python":
-        return [
-            "python3 -m venv .venv",
-            ". .venv/bin/activate",
-            "pip install --upgrade pip",
-            "if [ -f requirements.txt ]; then pip install -r requirements.txt; fi" if project.entry_kind == "python" else "pip install -r requirements.txt",
-            f"systemctl restart {shlex.quote(service)}",
-            *health_line,
-        ]
-    if template == "java":
-        artifact_steps = [
-            "mapfile -t jars < <(find \"$jar_dir\" -maxdepth 1 -type f -name '*.jar' ! -name '*sources.jar' ! -name '*javadoc.jar' ! -name '*-plain.jar')",
-            'if [ "${#jars[@]}" -ne 1 ]; then echo "需要唯一的可执行 JAR，请检查构建产物"; exit 1; fi',
-            'cp "${jars[0]}" target/deploy/app.jar',
-        ]
-        if project.entry_kind == "java" and project.entry_path.removeprefix("./") != "target/deploy/app.jar":
-            artifact_steps = [f"test -f {shlex.quote(project.entry_path)}", f"cp -- {shlex.quote(project.entry_path)} target/deploy/app.jar"]
-        return [
-            "if [ -f ./gradlew ]; then bash ./gradlew clean build -x test; jar_dir=build/libs; elif [ -f ./mvnw ]; then bash ./mvnw clean package -DskipTests; jar_dir=target; else mvn clean package -DskipTests; jar_dir=target; fi",
-            "mkdir -p target/deploy",
-            *artifact_steps,
-            f"systemctl restart {shlex.quote(service)}",
-            *health_line,
-        ]
-    if template == "go":
-        return [
-            "mkdir -p bin",
-            f"go build -o bin/app {shlex.quote('./' + project.entry_path)}" if project.entry_kind == "go" else
-            "if [ -d cmd/server ]; then go build -o bin/app ./cmd/server; else go build -o bin/app .; fi",
-            f"systemctl restart {shlex.quote(service)}",
-            *health_line,
-        ]
-    if template == "static":
-        return [
-            "if command -v pnpm >/dev/null 2>&1; then pnpm install --frozen-lockfile; else npm ci; fi",
-            "npm run build",
-            "# TODO: 把 dist/ 同步到你的 Nginx 静态目录，例如：",
-            f"# rsync -a --delete dist/ /var/www/{service}/",
-            *health_line,
-        ]
-    return ["# TODO: 在这里填写项目自己的部署步骤", "# 示例：docker compose up -d --build", *health_line]
-
-
-def _deploy_script_text(project: DeployProject) -> str:
-    lines = [
-        "#!/usr/bin/env bash",
-        *(["# mini-deploy-managed: command-plan-v1"] if project.deployment_plan.get("method") == "commands" else []),
-        "set -Eeuo pipefail",
-        "",
-        f"cd {shlex.quote(str(project.workdir))}",
-        f"BRANCH=${{DEPLOY_BRANCH:-{shlex.quote(project.branch)}}}",
-        f"LOG_FILE=${{DEPLOY_LOG_FILE:-{shlex.quote(str(project.deploy_log_file))}}}",
-        "",
-        'mkdir -p "$(dirname "$LOG_FILE")"',
-        "log() {",
-        "  printf '%s %s\\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" \"$*\" | tee -a \"$LOG_FILE\"",
-        "}",
-        "",
-        'log "phase=starting prepare deploy workspace"',
-        'log "phase=fetch git fetch origin $BRANCH"',
-        'git fetch origin "$BRANCH"',
-        'log "phase=pull git checkout and fast-forward pull"',
-        'git checkout "$BRANCH"',
-        'git pull --ff-only origin "$BRANCH"',
-        "",
-        'log "phase=docker_build build or restart service"',
-        *_template_deploy_steps(project),
-        "",
-        'log "phase=finished deploy completed"',
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def _default_start_command(project: DeployProject) -> str:
-    if project.entry_kind:
-        return project_guidance.entry_command(project.template, project.entry_kind, project.entry_path,
-                                             project.entry_object, project.workdir.as_posix(), project.service_port)
-    if project.start_command:
-        return project.start_command
-    port = project.service_port or 8000
-    if project.template == "python":
-        return f"{project.workdir}/.venv/bin/uvicorn main:app --host 127.0.0.1 --port {port}"
-    if project.template == "go":
-        return f"{project.workdir}/bin/app"
-    if project.template == "java":
-        return f"/usr/bin/java -jar {project.workdir}/target/deploy/app.jar --server.port={port}"
-    return project.start_command
-
-
-def _systemd_service_text(project: DeployProject) -> str:
-    command = _default_start_command(project)
-    if not command:
-        raise ValueError("start_command_required")
-    return "\n".join([
-        "[Unit]",
-        f"Description={project.name} service",
-        "After=network.target",
-        "",
-        "[Service]",
-        "Type=simple",
-        f"WorkingDirectory={project.workdir}",
-        f"ExecStart={command}",
-        "Restart=always",
-        "RestartSec=3",
-        "KillSignal=SIGINT",
-        "",
-        "[Install]",
-        "WantedBy=multi-user.target",
-        "",
-    ])
-
-
-def _ssh_public_keys() -> list[str]:
-    keys: list[str] = []
-    for name in ("id_ed25519.pub", "id_rsa.pub"):
-        path = Path.home() / ".ssh" / name
-        try:
-            text = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if text:
-            keys.append(text)
-    return keys
-
-
-def _bootstrap_result(step: str, ok: bool, detail: str, output: str = "") -> dict[str, Any]:
+def _nginx_step_result(step: str, ok: bool, detail: str, output: str = "") -> dict[str, Any]:
     return {"step": step, "ok": ok, "detail": detail, "output": output,
-            "diagnosis": [] if ok else project_guidance.diagnose(output or detail)}
+            "diagnosis": []}
 
 
-def _source_receipt_path(project: DeployProject) -> Path:
-    return STATE_FILE.parent / "bootstrap-sources" / f"{project.key}.json"
-
-
-def _source_identity(project: DeployProject) -> dict[str, Any]:
-    git = project.workdir / ".git"
-    if git.is_symlink() or project.workdir.is_symlink():
-        raise ValueError("代码目录或 Git 元数据为符号链接，请人工核对")
-    info = git.stat()
-    return {"workdir": str(project.workdir.resolve()), "repo": list(project_guidance.repository_identity(project.repo)),
-            "branch": project.branch, "device": info.st_dev, "inode": info.st_ino}
-
-
-def _source_was_initialized(project: DeployProject) -> bool:
-    path = _source_receipt_path(project)
-    try:
-        if path.parent.is_symlink() or path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
-            return False
-        return json.loads(path.read_text(encoding="utf-8")) == _source_identity(project)
-    except (OSError, ValueError):
-        return False
-
-
-def _remember_initialized_source(project: DeployProject) -> None:
-    path = _source_receipt_path(project)
-    if path.parent.is_symlink() or path.is_symlink():
-        raise ValueError("初始化记录目录不安全，请人工核对")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    _atomic_write_private_text(path, json.dumps(_source_identity(project)))
-
-
-def _new_project_directory_conflict(project: DeployProject) -> dict[str, Any] | None:
-    if project.deployment_plan.get("situation") != "new":
-        return None
-    directory = project.workdir
-    if _source_was_initialized(project):
-        return None
-    if not directory.exists() and not directory.is_symlink():
-        return None
-    if directory.is_dir() and not directory.is_symlink() and not next(directory.iterdir(), None):
-        return None
-    git_exists = (directory / ".git").exists()
-    return {"path": str(directory), "can_adopt": git_exists,
-            "message": "该目录已有代码，请改为接入已有项目，或选择新的空目录。尚未拉取、切换或合并代码。" if git_exists else
-                       "该目录已被占用，请选择新的空目录；不会覆盖或删除里面的文件。"}
-
-
-def _project_preview(project: DeployProject) -> dict[str, Any]:
-    if project.template not in {"docker", "python", "go", "java", "node", "static", "custom"}:
-        raise ValueError("请选择支持的项目类型")
-    if not 1 <= project.service_port <= 65535:
-        raise ValueError("业务端口必须在 1 到 65535 之间")
-    if not project.workdir.is_absolute():
-        raise ValueError("服务器目录必须是绝对路径")
-    conflict = _new_project_directory_conflict(project)
-    if conflict:
-        return {"directory_conflict": conflict, "files": []}
-    files = []
-    paths = [("deploy.sh", _project_script_path(project), _deploy_script_text(project))]
-    if project.docker_config:
-        directory = _docker_project_directory(project.key)
-        if project.docker_config["mode"] == "dockerfile":
-            paths.append(("compose", directory / "compose.yaml",
-                          docker_onboarding.compose_text(project.docker_config, project.workdir, directory)))
-    if project.template in {"python", "go", "java"}:
-        paths.append(("systemd", Path("/etc/systemd/system") / f"{project.service_name}.service",
-                      _systemd_service_text(project)))
-    for kind, path, generated in paths:
-        if path.is_symlink():
-            raise ValueError(f"文件是符号链接，请人工核对：{path}")
-        exists = path.exists()
-        managed = ((bool(project.docker_config) and path.parent == _docker_project_directory(project.key)) or
-                   (project.deployment_plan.get("method") == "commands" and path.parent == STATE_FILE.parent / "command-plans" / project.key))
-        if exists:
-            if not path.is_file() or path.stat().st_size > 128 * 1024:
-                raise ValueError(f"文件不是普通小型配置文件，请人工核对：{path}")
-            content = generated if managed else path.read_text(encoding="utf-8", errors="replace")
-        else:
-            content = "# 准备时检查指定脚本是否存在；不会生成占位脚本。\n" if project.deployment_plan.get("method") == "script" else generated
-        files.append({"kind": kind, "path": str(path), "exists": exists, "content": content, "managed": managed})
-    plan_steps = ["读取已有代码目录（不拉取、不重启）"] if project.deployment_plan.get("situation") == "existing" else ["拉取指定仓库和分支"]
-    if project.deployment_plan.get("method") == "commands":
-        plan_steps += ["准备用户确认的构建和重启步骤（此时不执行）"]
-    elif project.deployment_plan.get("method") == "script":
-        plan_steps += ["检查并保留现有部署脚本，不生成占位脚本"]
-    else:
-        plan_steps += ["保留已有文件，补齐确认过的部署文件"]
-    external_script = project.deployment_plan.get("method") == "script" or (files[0]["exists"] and not files[0]["managed"])
-    execution_steps = ["执行部署时：运行已有脚本，代码更新和重启以该脚本内容为准"] if external_script else [
-        f"执行部署时：fetch origin {project.branch}、切换分支并 fast-forward 更新代码（遇到冲突停止）",
-        "按所选方案执行构建和启动 / 重启步骤",
-    ]
-    if project.health_url:
-        execution_steps.append(f"健康地址通过 HEALTH_URL 传给已有脚本，是否检查需核对脚本内容：{project.health_url}" if external_script else
-                               f"执行部署后：检查 {project.health_url}")
-    return {"files": files, "start_command": _default_start_command(project), "script": project.script, "plan_steps": plan_steps,
-            "execution_steps": execution_steps,
-            "docker_environment": project.docker_config.get("environment", [])}
-
-
-def _existing_repository_check(project: DeployProject) -> dict[str, Any]:
-    if not project.workdir.is_dir():
-        return _bootstrap_result("existing_directory", False, "已有代码目录不存在，请填写正在运行项目的实际目录；不会自动创建或重新 clone")
-    code, root = _run_command(["git", "-C", str(project.workdir), "rev-parse", "--show-toplevel"], timeout=5)
-    if code or Path(root.strip()).resolve() != project.workdir.resolve():
-        return _bootstrap_result("existing_repository", False, "请填写 Git 仓库根目录，而不是父目录或仓库内的子目录")
-    code, origin = _run_command(["git", "-C", str(project.workdir), "remote", "get-url", "origin"], timeout=5)
-    if code or not origin.strip():
-        return _bootstrap_result("existing_repository", False, "无法读取已有目录的 Git origin，请确认目录和 Git 读取权限")
-    try:
-        matches = project_guidance.repository_identity(origin.strip()) == project_guidance.repository_identity(project.repo)
-    except ValueError:
-        matches = False
-    if not matches:
-        return _bootstrap_result("existing_repository", False, "该目录的 origin 与填写仓库不一致，请核对地址；不会改写远程地址或切换代码")
-    return _bootstrap_result("existing_repository", True, "已有 Git 仓库匹配，接入阶段不修改代码或重启服务")
-
-
-def _prepare_command_script(project: DeployProject) -> None:
-    directory = STATE_FILE.parent / "command-plans" / project.key
-    for path in (directory.parent, directory):
-        if path.is_symlink() or (path.exists() and not path.is_dir()):
-            raise ValueError("自定义步骤目录不安全")
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if os.name != "nt" and path.stat().st_uid != os.geteuid():
-            raise ValueError("自定义步骤目录不属于面板运行用户")
-        os.chmod(path, 0o700)
-    script = directory / "deploy.sh"
-    marker = "# mini-deploy-managed: command-plan-v1\n"
-    if script.is_symlink() or (script.exists() and (not script.is_file() or script.stat().st_size > 128 * 1024)):
-        raise ValueError("自定义步骤文件不安全")
-    if script.exists() and marker not in script.read_text(encoding="utf-8")[:150]:
-        raise ValueError("目标脚本不是面板托管文件，不会覆盖")
-    text = _deploy_script_text(project)
-    _atomic_write_private_text(script, text)
-    os.chmod(script, 0o700)
-
-
-def _docker_project_directory(key: str) -> Path:
-    return STATE_FILE.parent / "managed-projects" / _safe_project_key(key)
-
-
-def _secure_docker_directory(project: DeployProject) -> Path:
-    directory = _docker_project_directory(project.key)
-    for path in (directory.parent, directory):
-        if path.is_symlink() or (path.exists() and not path.is_dir()):
-            raise ValueError("面板容器配置目录不安全，请检查服务器目录")
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if os.name != "nt" and path.stat().st_uid != os.geteuid():
-            raise ValueError("面板容器配置目录不属于面板运行用户")
-        os.chmod(path, 0o700)
-    for filename in ("plan.json", "compose.yaml", "environment.json", "deploy.sh"):
-        path = directory / filename
-        if path.is_symlink() or (path.exists() and not path.is_file()):
-            raise ValueError("面板容器配置文件不安全，请检查服务器目录")
-    plan = directory / "plan.json"
-    if plan.exists():
-        previous = json.loads(plan.read_text(encoding="utf-8"))
-        if (previous.get("mode") != project.docker_config["mode"] or
-                previous.get("volumes", []) != project.docker_config.get("volumes", [])):
-            raise ValueError("已有容器运行计划的数据映射或部署方式不同，请保留原映射，避免覆盖业务数据")
-    return directory
-
-
-def _prepare_docker_files(project: DeployProject, environment: dict[str, str] | None) -> None:
-    source = project.workdir / project.docker_config["file"]
-    if not source.is_file() or source.is_symlink() or not source.resolve().is_relative_to(project.workdir.resolve()):
-        raise ValueError("仓库容器配置文件不存在或路径不安全，请确认已提交对应文件")
-    directory = _secure_docker_directory(project)
-    config = project.docker_config
-    names = config["environment"]
-    if environment is not None:
-        values = docker_onboarding.environment_values(environment, names)
-        _atomic_write_private_text(directory / "environment.json", json.dumps(values, ensure_ascii=False))
-    else:
-        docker_onboarding.execution_environment(directory / "environment.json", names)
-    if config["mode"] == "dockerfile":
-        _atomic_write_private_text(directory / "compose.yaml", docker_onboarding.compose_text(config, project.workdir, directory))
-    _atomic_write_private_text(directory / "plan.json", json.dumps(config, ensure_ascii=False))
-
-
-def _docker_readiness(project: DeployProject) -> list[dict[str, Any]]:
-    config = project.docker_config
-    directory = _docker_project_directory(project.key)
-    checks = []
-    source = project.workdir / config["file"]
-    exists = source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(project.workdir.resolve())
-    checks.append(_doctor_item("docker_source", "仓库容器配置", exists,
-        f"{config['file']} {'已找到' if exists else '不存在，请提交配置文件后重试'}"))
-    plan = directory / "plan.json"
-    try:
-        plan_ok = not plan.is_symlink() and plan.stat().st_size <= 64 * 1024 and json.loads(plan.read_text(encoding="utf-8")) == config
-    except (OSError, ValueError):
-        plan_ok = False
-    checks.append(_doctor_item("docker_plan", "部署计划", plan_ok, "运行计划已准备" if plan_ok else "运行计划缺失或已变更，请重新初始化项目"))
-    try:
-        env = docker_onboarding.execution_environment(directory / "environment.json", config["environment"])
-        checks.append(_doctor_item("docker_environment", "环境变量", True, "变量已准备（不显示值）"))
-    except (OSError, ValueError):
-        checks.append(_doctor_item("docker_environment", "环境变量", False, "变量未准备，请返回接入配置填写并重新初始化"))
-        return checks
-    if not shutil.which("docker"):
-        return checks
-    if config["mode"] == "dockerfile":
-        ready = docker_onboarding.port_ready(config, project.key)
-        checks.append(_doctor_item("docker_port", "服务器访问端口", ready,
-            f"端口 {config['published_port']} 可使用" if ready else f"端口 {config['published_port']} 被其他服务占用或无法确认，请选择其他端口；不会自动停止已有服务"))
-    code, _ = _run_command(["docker", "compose", "version"], timeout=5)
-    checks.append(_doctor_item("docker_compose", "Docker Compose", code == 0,
-        "Compose 可用" if code == 0 else "需要安装 Docker Compose 插件；可运行 SETUP_DOCKER=yes bash install.sh"))
-    if code == 0 and exists:
-        try:
-            result = subprocess.run(docker_onboarding.command(project.workdir, config, directory, project.key) + ["config", "--quiet"],
-                                    env=env, cwd=project.workdir, capture_output=True, timeout=10, check=False)
-            checks.append(_doctor_item("docker_config", "容器运行配置", result.returncode == 0,
-                "配置校验通过" if result.returncode == 0 else "配置校验失败：请确认必填变量、引用的文件及 Compose 语法；变量值不会输出"))
-        except (OSError, subprocess.SubprocessError):
-            checks.append(_doctor_item("docker_config", "容器运行配置", False, "无法完成配置校验，请检查 Docker Compose"))
-    return checks
-
-
-def _run_bootstrap_command(command: list[str], *, step: str, timeout: float = 60.0) -> dict[str, Any]:
+def _run_nginx_command(command: list[str], *, step: str, timeout: float = 60.0) -> dict[str, Any]:
     code, output = _run_command(command, timeout=timeout)
-    return _bootstrap_result(step, code == 0, "ok" if code == 0 else f"exit code {code}", output)
-
-
-@_maintenance_shared_operation
-def _bootstrap_project(project: DeployProject, *, write_service: bool = True, environment: dict[str, str] | None = None) -> dict[str, Any]:
-    results: list[dict[str, Any]] = []
-    service_written = False
-    script_path = _project_script_path(project)
-    try:
-        if project.deployment_plan.get("situation") == "unsure":
-            raise ValueError("请先确认首次部署还是接入已有服务，不确定时只能检查仓库")
-        project_guidance.validate_repository(project.repo, project.branch)
-        preview = _project_preview(project)
-        if preview.get("directory_conflict"):
-            conflict = preview["directory_conflict"]
-            return {"ok": False, "project": project.key, "directory_conflict": conflict,
-                    "results": [{"step": "existing_directory", "ok": False, "detail": conflict["message"], "diagnosis": []}]}
-    except (ValueError, OSError) as exc:
-        return {"ok": False, "project": project.key,
-                "results": [_bootstrap_result("configuration", False, str(exc))]}
-
-    if not project.repo:
-        return {
-            "ok": False,
-            "project": project.key,
-            "results": [_bootstrap_result("repo", False, "仓库地址为空，请先填写 repo")],
-            "ssh_public_keys": _ssh_public_keys(),
-        }
-
-    if not shutil.which("git"):
-        return {
-            "ok": False,
-            "project": project.key,
-            "results": [_bootstrap_result("git", False, "服务器未安装 git，请先安装 git")],
-            "ssh_public_keys": _ssh_public_keys(),
-        }
-
-    adopting = project.deployment_plan.get("situation") == "existing"
-    if project.deployment_plan.get("situation") == "new" and (project.workdir / ".git").exists():
-        local_check = _existing_repository_check(project)
-        results.append(local_check)
-        if not local_check["ok"]:
-            return {"ok": False, "project": project.key, "results": results}
-    initialized = project.deployment_plan.get("situation") == "new" and _source_was_initialized(project)
-    ls_remote = (_existing_repository_check(project) if adopting or initialized else
-                 _run_bootstrap_command(["git", "ls-remote", project.repo, "HEAD"], step="repo_access", timeout=30.0))
-    results.append(ls_remote)
-    if not ls_remote["ok"]:
-        return {
-            "ok": False,
-            "project": project.key,
-            "results": results,
-            "ssh_public_keys": _ssh_public_keys(),
-            "message": "服务器无法访问仓库，请查看下方原因和建议。",
-        }
-
-    try:
-        if adopting or initialized:
-            pass
-        elif (project.workdir / ".git").exists():
-            if project.deployment_plan.get("situation") == "new":
-                conflict = {"path": str(project.workdir), "can_adopt": True,
-                            "message": "目录在检查后出现了已有代码，请重新检查或改为接入已有项目。尚未更新代码。"}
-                return {"ok": False, "project": project.key, "directory_conflict": conflict,
-                        "results": [{"step": "existing_directory", "ok": False, "detail": conflict["message"], "diagnosis": []}]}
-            for step, args in (("git_fetch", ["fetch", "origin", project.branch]),
-                               ("git_checkout", ["checkout", project.branch]),
-                               ("git_pull", ["pull", "--ff-only", "origin", project.branch])):
-                result = _run_bootstrap_command(["git", "-C", str(project.workdir), *args], step=step, timeout=60.0)
-                results.append(result)
-                if not result["ok"]:
-                    break
-        else:
-            project.workdir.parent.mkdir(parents=True, exist_ok=True)
-            results.append(_run_bootstrap_command(["git", "clone", "--branch", project.branch, project.repo, str(project.workdir)], step="git_clone", timeout=180.0))
-            if results[-1]["ok"] and project.deployment_plan.get("situation") == "new":
-                _remember_initialized_source(project)
-        if not all(item["ok"] for item in results):
-            return {"ok": False, "project": project.key, "results": results, "ssh_public_keys": _ssh_public_keys()}
-
-        if project.docker_config:
-            _prepare_docker_files(project, environment)
-            results.append(_bootstrap_result("docker_configuration", True, "容器运行配置已准备；仓库原文件保持不变，变量已单独保存"))
-
-        if project.deployment_plan.get("method") == "script":
-            if not script_path.is_file() or script_path.is_symlink():
-                raise ValueError("指定的部署脚本不存在或是符号链接，请选择已有文件；不会生成占位脚本")
-            results.append(_bootstrap_result("deploy_script", True, f"保留已有脚本：{script_path}"))
-        elif project.deployment_plan.get("method") == "commands":
-            _prepare_command_script(project)
-            results.append(_bootstrap_result("deploy_script", True, "已准备确认过的部署步骤，尚未执行"))
-        elif project.docker_config:
-            _atomic_write_private_text(script_path, _deploy_script_text(project))
-            os.chmod(script_path, 0o700)
-            results.append(_bootstrap_result("deploy_script", True, f"已准备面板托管脚本：{script_path}"))
-        else:
-            script_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with script_path.open("x", encoding="utf-8", newline="\n") as stream:
-                    stream.write(_deploy_script_text(project))
-                os.chmod(script_path, 0o755)
-                results.append(_bootstrap_result("deploy_script", True, f"已写入 {script_path}"))
-            except FileExistsError:
-                results.append(_bootstrap_result("deploy_script", True, f"保留已有文件：{script_path}"))
-
-        project.deploy_log_file.parent.mkdir(parents=True, exist_ok=True)
-        project.deploy_log_file.touch(exist_ok=True)
-        results.append(_bootstrap_result("log_file", True, f"已准备 {project.deploy_log_file}"))
-
-        if write_service and not adopting and project.template in {"python", "go", "java"}:
-            service_path = Path("/etc/systemd/system") / f"{project.service_name}.service"
-            try:
-                with service_path.open("x", encoding="utf-8", newline="\n") as stream:
-                    stream.write(_systemd_service_text(project))
-                os.chmod(service_path, 0o644)
-                service_written = True
-                results.append(_bootstrap_result("systemd_service", True, f"已写入 {service_path}"))
-                reload_result = _run_bootstrap_command(["systemctl", "daemon-reload"], step="systemd_daemon_reload", timeout=30.0)
-                results.append(reload_result)
-                if reload_result["ok"]:
-                    results.append(_run_bootstrap_command(["systemctl", "enable", project.service_name], step="systemd_enable", timeout=30.0))
-            except FileExistsError:
-                results.append(_bootstrap_result("systemd_service", True, f"保留已有服务：{service_path}"))
-    except Exception as exc:  # noqa: BLE001 - return actionable bootstrap failure to UI
-        results.append(_bootstrap_result("bootstrap", False, str(exc)))
-
-    ok = all(item["ok"] for item in results)
-    return {
-        "ok": ok,
-        "project": project.key,
-        "results": results,
-        "service_written": service_written,
-        "service_name": project.service_name,
-        "script": str(script_path),
-        "doctor": _project_doctor(project),
-        "preflight": _preflight_payload(project),
-    }
+    return _nginx_step_result(step, code == 0, "ok" if code == 0 else f"exit code {code}", output)
 
 
 _nginx_lock = threading.RLock()
@@ -2678,7 +1243,7 @@ def _nginx_settings() -> nginx_runtime.Settings:
     return nginx_runtime.Settings(STATE_FILE.parent)
 
 
-def _nginx_project_has_site(project: DeployProject) -> bool:
+def _nginx_project_has_site(project: Site) -> bool:
     settings = _nginx_settings()
     if settings.read()["profile"].get("mode") == "none":
         return False
@@ -2750,7 +1315,7 @@ def _nginx_install_operation(data: dict[str, Any]) -> dict[str, Any]:
             if docker["reserve_https"]:
                 steps.insert(2, "预留 HTTPS 443 端口，暂不启用 TLS")
             return {"plan": {"token": token, "mode": mode, "port": port, "installed": False,
-                             "steps": steps, "notice": "无需项目、域名或证书。请在云安全组放行 HTTP 端口。"}}
+                             "steps": steps, "notice": "无需站点、域名或证书。请在云安全组放行 HTTP 端口。"}}
         if not _constant_time_equal(str(data.get("token") or ""), token):
             raise certificates.CertificateError("安装参数或环境已变化，请重新检查后确认")
         result = nginx_install.install_docker(STATE_FILE.parent, docker)
@@ -2777,31 +1342,31 @@ def _nginx_install_operation(data: dict[str, Any]) -> dict[str, Any]:
     token = hashlib.sha256(json.dumps(local, sort_keys=True).encode()).hexdigest()
     if data.get("action") == "plan-install":
         return {"plan": {"token": token, "steps": steps, "installed": local["installed"],
-                         "notice": "独立准备本机 Nginx，业务项目与域名可稍后配置。"}}
+                         "notice": "独立准备本机 Nginx，站点与域名可稍后配置。"}}
     if not _constant_time_equal(str(data.get("token") or ""), token):
         raise certificates.CertificateError("安装环境已变化，请重新检查后确认")
     nginx_runtime.prepare_local(local)
     status = nginx_install.check_http(80)
-    return {"ok": True, "settings": _nginx_payload(), "message": "本机 Nginx 已安装并运行，HTTP 检查通过，可随后添加项目和域名入口。",
+    return {"ok": True, "settings": _nginx_payload(), "message": "本机 Nginx 已安装并运行，HTTP 检查通过，可随后添加站点和域名入口。",
             "access_port": 80, "http_status": status}
 
 
-def _nginx_site_plan(data: dict[str, Any]) -> tuple[DeployProject, dict[str, Any]]:
+def _nginx_site_plan(data: dict[str, Any]) -> tuple[Site, dict[str, Any]]:
     existing = PROJECTS.get(str(data.get("project") or ""))
     if not existing:
-        raise certificates.CertificateError("请先添加并保存业务项目")
+        raise certificates.CertificateError("请先添加并保存站点")
     domain = str(data.get("domain") or "").strip().lower()
     port = data.get("port")
     if not _valid_domain(domain) or not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise certificates.CertificateError("请填写纯域名和 1-65535 之间的业务端口")
     if any(p.key != existing.key and p.app_domain == domain for p in PROJECTS.values()):
-        raise certificates.CertificateError("此域名已分配给其他项目")
+        raise certificates.CertificateError("此域名已分配给其他站点")
     settings = _nginx_settings()
     saved = settings.read()
     if (STATE_FILE.parent / "certificates" / existing.key).exists():
-        raise certificates.CertificateError("此项目已有上传证书，请在证书页管理；修改入口前请先停用并删除证书")
+        raise certificates.CertificateError("此站点已有上传证书，请在证书页管理；修改入口前请先停用并删除证书")
     if _nginx_project_has_site(existing) and (domain != existing.app_domain or port != existing.service_port):
-        raise certificates.CertificateError("该项目已有访问入口，请先移除旧入口，再修改域名或端口")
+        raise certificates.CertificateError("该站点已有访问入口，请先移除旧入口，再修改域名或端口")
     project = replace(existing, app_domain=domain, service_port=port)
     configured = saved["configured"] and saved["profile"].get("mode") != "none"
     profile = saved["profile"] if configured else {"mode": "local"}
@@ -2902,7 +1467,7 @@ def _nginx_upstream_operation(data: dict[str, Any]) -> dict[str, Any]:
         saved = settings.read()
         key = data.get("project")
         if not isinstance(key, str) or key not in PROJECTS:
-            raise certificates.CertificateError("请选择已保存的业务项目")
+            raise certificates.CertificateError("请选择已保存的站点")
         project = PROJECTS[key]
         runtime = settings.runtime()
         host = runtime.upstream(data.get("host"))
@@ -2921,7 +1486,7 @@ def _remove_nginx_site(data: dict[str, Any]) -> dict[str, Any]:
     with _config_transaction_lock, _nginx_lock:
         key = data.get("project")
         if not isinstance(key, str) or key not in PROJECTS:
-            raise certificates.CertificateError("请选择已保存的项目")
+            raise certificates.CertificateError("请选择已保存的站点")
         project = PROJECTS[key]
         runtime = _nginx_settings().runtime()
         store = certificates.CertificateStore(STATE_FILE.parent / "certificates", runtime)
@@ -2958,7 +1523,7 @@ def _certificate_operation(data: dict[str, Any]) -> None:
     with _config_transaction_lock, _nginx_lock:
         key = data.get("project")
         if not isinstance(key, str) or key not in PROJECTS:
-            raise certificates.CertificateError("请选择已登记的项目")
+            raise certificates.CertificateError("请选择已登记的站点")
         project = PROJECTS[key]
         settings = _nginx_settings()
         if not settings.read()["configured"]:
@@ -2976,11 +1541,11 @@ def _certificate_operation(data: dict[str, Any]) -> None:
                                      _project_nginx_conf_path(project), _project_nginx_config_text(project))
 
 
-def _project_nginx_conf_path(project: DeployProject) -> Path:
+def _project_nginx_conf_path(project: Site) -> Path:
     return _nginx_settings().runtime(live=False).conf_root / f"mini-deploy-{project.key}.conf"
 
 
-def _project_nginx_config_text(project: DeployProject) -> str:
+def _project_nginx_config_text(project: Site) -> str:
     domain = _normalize_domain(project.app_domain)
     port = project.service_port or 8000
     settings = _nginx_settings()
@@ -3013,7 +1578,7 @@ def _nginx_http_config_text(domain: str, upstream: str, port: int) -> str:
 
 @_maintenance_shared_operation
 @_nginx_serialized
-def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None = None) -> dict[str, Any]:
+def _configure_project_nginx(project: Site, *, issue_https: bool | None = None) -> dict[str, Any]:
     domain = _normalize_domain(project.app_domain)
     https_requested = project.app_https if issue_https is None else bool(issue_https)
     results: list[dict[str, Any]] = []
@@ -3032,26 +1597,26 @@ def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None
         previous = store.config(conf_path)
         record = store.read(project)
         if record and store.active(project, record, previous):
-            raise certificates.CertificateError("此项目已使用上传证书，请到证书管理中操作 HTTPS")
+            raise certificates.CertificateError("此站点已使用上传证书，请到证书管理中操作 HTTPS")
         config = _project_nginx_config_text(project)
         marker = "# mini-deploy-managed: project-http-v1\n"
         if previous and previous != config and not previous.startswith(marker):
             raise certificates.CertificateError("已有站点不是本面板托管的 HTTP 配置，拒绝覆盖")
         runtime.probe(settings.read()["upstreams"].get(project.key), project.service_port)
         store.commit_config(conf_path, marker + config, previous)
-        results.append(_bootstrap_result("nginx_reload", True, "Nginx 配置已校验并重载"))
+        results.append(_nginx_step_result("nginx_reload", True, "Nginx 配置已校验并重载"))
         if https_requested:
             if runtime.mode == "docker":
-                results.append(_bootstrap_result("certbot_https", False, "Docker Nginx 请在证书页上传证书并启用 HTTPS；不会在宿主机运行 certbot --nginx"))
+                results.append(_nginx_step_result("certbot_https", False, "Docker Nginx 请在证书页上传证书并启用 HTTPS；不会在宿主机运行 certbot --nginx"))
             elif not shutil.which("certbot"):
-                results.append(_bootstrap_result("certbot_https", False, "未安装 Certbot，HTTP 已可用；也可上传证书"))
+                results.append(_nginx_step_result("certbot_https", False, "未安装 Certbot，HTTP 已可用；也可上传证书"))
             else:
-                results.append(_run_bootstrap_command([
+                results.append(_run_nginx_command([
                     "certbot", "--nginx", "-d", domain, "--non-interactive",
                     "--agree-tos", "--register-unsafely-without-email",
                 ], step="certbot_https", timeout=180.0))
     except (ValueError, OSError) as exc:
-        results.append(_bootstrap_result("nginx", False, str(exc)))
+        results.append(_nginx_step_result("nginx", False, str(exc)))
     http_ready = any(item["step"] == "nginx_reload" and item["ok"] for item in results)
     https_ok = any(item["step"] == "certbot_https" and item["ok"] for item in results)
     return {
@@ -3059,139 +1624,6 @@ def _configure_project_nginx(project: DeployProject, *, issue_https: bool | None
         "https_ok": https_ok, "project": project.key, "domain": domain,
         "url": f"https://{domain}" if https_ok else _nginx_http_url(domain, profile), "results": results,
     }
-
-
-def _queued_jobs_snapshot() -> list[dict[str, Any]]:
-    with _jobs_admin_lock:
-        return [
-            {key: value for key, value in job.items() if key not in _JOB_INTERNAL_KEYS}
-            for job in _jobs.queue
-        ]
-
-
-def _release_job_maintenance_lock(job: dict[str, Any]) -> None:
-    descriptor = job.pop(_JOB_MAINTENANCE_LOCK_KEY, None)
-    _release_maintenance_lock(descriptor)
-
-
-def _enqueue_job(job: dict[str, Any]) -> None:
-    descriptor = _acquire_maintenance_shared_lock(blocking=False)
-    try:
-        with _jobs_admin_lock:
-            if _JOB_MAINTENANCE_LOCK_KEY in job:
-                raise RuntimeError("deploy job already owns a maintenance lock")
-            job[_JOB_MAINTENANCE_LOCK_KEY] = descriptor
-            try:
-                _jobs.put_nowait(job)
-            except Exception:
-                job.pop(_JOB_MAINTENANCE_LOCK_KEY, None)
-                raise
-        descriptor = None
-    finally:
-        _release_maintenance_lock(descriptor)
-
-
-def _restore_queued_jobs() -> int:
-    with _state_lock:
-        queued = list(_state.get("queued_jobs") or []) if isinstance(_state.get("queued_jobs"), list) else []
-        _state["queued_jobs"] = []
-    restored = 0
-    for job in queued[:_jobs.maxsize]:
-        if not isinstance(job, dict) or not job.get("project_key"):
-            continue
-        try:
-            _enqueue_job(dict(job))
-            restored += 1
-        except (_MaintenanceActiveError, _MaintenanceLockError, queue.Full, RuntimeError) as exc:
-            _log(f"queued deploy restore skipped: {exc}")
-    if restored or queued:
-        _update_state(queue_size=_jobs.qsize())
-    return restored
-
-
-def _dequeue_job() -> dict[str, Any]:
-    while True:
-        with _jobs_admin_lock:
-            try:
-                return _jobs.get_nowait()
-            except queue.Empty:
-                pass
-        time.sleep(0.2)
-
-
-def _cancel_queued_jobs(project: DeployProject | None = None) -> list[dict[str, Any]]:
-    canceled: list[dict[str, Any]] = []
-    kept: list[dict[str, Any]] = []
-    with _jobs_admin_lock:
-        while True:
-            try:
-                job = _jobs.get_nowait()
-            except queue.Empty:
-                break
-            _jobs.task_done()
-            if project is None or (job.get("project_key") or DEFAULT_PROJECT_KEY) == project.key:
-                canceled.append(job)
-            else:
-                kept.append(job)
-        for job in kept:
-            try:
-                _jobs.put_nowait(job)
-            except queue.Full:
-                canceled.append(job)
-    for job in canceled:
-        _release_job_maintenance_lock(job)
-    _update_state(queue_size=_jobs.qsize())
-    return canceled
-
-
-def _terminate_process(proc: subprocess.Popen[str]) -> None:
-    try:
-        if os.name == "nt":
-            proc.terminate()
-        else:
-            os.killpg(proc.pid, signal.SIGTERM)
-    except Exception:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-
-
-def _kill_process(proc: subprocess.Popen[str]) -> None:
-    try:
-        if os.name == "nt":
-            proc.kill()
-        else:
-            os.killpg(proc.pid, signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-
-def _read_process_output(proc: subprocess.Popen[str], stop_event: threading.Event) -> None:
-    if proc.stdout is None:
-        return
-    try:
-        for line in proc.stdout:
-            clean_line = line.rstrip()
-            diagnostic_tail = getattr(proc, "_mini_deploy_diagnostic_tail", None)
-            if diagnostic_tail is not None:
-                diagnostic_tail.append(clean_line[-1024:])
-            if clean_line:
-                _log(f"deploy: {clean_line}")
-                phase = _phase_from_deploy_line(clean_line)
-                if phase:
-                    _update_current_deploy(phase=phase[0], phase_detail=phase[1])
-                else:
-                    build_detail = _build_progress_detail(clean_line)
-                    if build_detail:
-                        _update_current_deploy(phase="docker_build", phase_detail=build_detail)
-            if stop_event.is_set() and proc.poll() is not None:
-                break
-    except Exception as exc:  # noqa: BLE001 - output reading must not orphan the deploy process
-        _log(f"deploy output read failed: {exc}")
 
 
 def _percent(value: float | int | str | None) -> float | None:
@@ -3560,6 +1992,23 @@ def _docker_images() -> list[dict[str, Any]]:
     return list(images.values())
 
 
+_docker_mirror_manager: docker_mirrors.Manager | None = None
+_docker_mirror_lock = threading.Lock()
+
+
+def _docker_mirrors_manager() -> docker_mirrors.Manager:
+    global _docker_mirror_manager
+    with _docker_mirror_lock:
+        if _docker_mirror_manager is None or _docker_mirror_manager.home != STATE_FILE.parent:
+            _docker_mirror_manager = docker_mirrors.Manager(STATE_FILE.parent)
+        return _docker_mirror_manager
+
+
+@_maintenance_shared_operation
+def _apply_docker_mirrors(operation: Any) -> None:
+    operation()
+
+
 @_maintenance_shared_operation
 def _docker_image_action(action: str, reference: str) -> str:
     if action == "pull":
@@ -3654,438 +2103,6 @@ def _system_metric_sampler() -> None:
         time.sleep(max(60, SYSTEM_METRIC_INTERVAL_SECONDS))
 
 
-def _project_history(state: dict[str, Any], project: DeployProject) -> list[dict[str, Any]]:
-    history = []
-    current = state.get("current_deploy")
-    if isinstance(current, dict):
-        history.append(current)
-    raw_history = state.get("history") if isinstance(state.get("history"), list) else []
-    history.extend(item for item in raw_history if isinstance(item, dict))
-    return [item for item in history if (item.get("project_key") or "default") == project.key]
-
-
-def _usable_commit(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text or set(text) == {"0"}:
-        return ""
-    return text
-
-
-def _commit_exists(project: DeployProject, commit: str) -> bool:
-    return commit in _commits_exist(project, [commit])
-
-
-def _commits_exist(project: DeployProject, commits: list[str]) -> set[str]:
-    candidates = []
-    seen = set()
-    for commit in commits:
-        value = _usable_commit(commit)
-        if value and value not in seen:
-            seen.add(value)
-            candidates.append(value)
-    if not candidates:
-        return set()
-    try:
-        proc = subprocess.run(
-            ["git", "cat-file", "--batch-check"],
-            cwd=str(project.workdir),
-            input="".join(f"{commit}^{{commit}}\n" for commit in candidates),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=3,
-            check=False,
-        )
-        if proc.returncode != 0:
-            return set()
-        result = set()
-        for commit, line in zip(candidates, (proc.stdout or "").splitlines()):
-            fields = line.split(maxsplit=2)
-            if len(fields) >= 2 and fields[1] == "commit":
-                result.add(commit)
-        return result
-    except Exception:
-        return set()
-
-
-def _project_rollback_target(state: dict[str, Any], project: DeployProject, head: str | None = None) -> str:
-    try:
-        head = _usable_commit(_run_git(["rev-parse", "HEAD"], project) if head is None else head)
-    except Exception:
-        head = ""
-    successful = [
-        item for item in _project_history(state, project)
-        if item.get("status") == "success" and _usable_commit(item.get("after"))
-    ]
-    if not successful:
-        return ""
-    latest = successful[0]
-    before = _usable_commit(latest.get("before"))
-    candidates = []
-    if before and before != head:
-        candidates.append(before)
-    candidates.extend(
-        after for item in successful[1:]
-        if (after := _usable_commit(item.get("after"))) and after != head
-    )
-    existing = _commits_exist(project, candidates)
-    for candidate in candidates:
-        if candidate in existing:
-            return candidate
-    return ""
-
-
-def _project_rollback_target_cached(state: dict[str, Any], project: DeployProject, head: str | None = None) -> str:
-    history_identity = tuple(
-        (item.get("status"), item.get("before"), item.get("after"))
-        for item in _project_history(state, project)
-    )
-    identity = (str(project.workdir), project.repo, project.branch, head or "", history_identity)
-    now = time.monotonic()
-    with _project_git_status_lock:
-        cached = _project_rollback_cache.get(project.key)
-        if (cached and cached.get("identity") == identity and
-                now - float(cached.get("at") or 0) < PROJECT_GIT_STATUS_CACHE_SECONDS):
-            return str(cached.get("value") or "")
-        value = _project_rollback_target(state, project, head=head)
-        _project_rollback_cache[project.key] = {"at": now, "identity": identity, "value": value}
-        return value
-
-
-def _project_runtime_status(state: dict[str, Any], project: DeployProject,
-                            queued_jobs: list[dict[str, Any]], head: str | None = None) -> dict[str, Any]:
-    history = _project_history(state, project)
-    current = state.get("current_deploy")
-    running = bool(
-        isinstance(current, dict)
-        and (current.get("project_key") or "default") == project.key
-        and current.get("status") == "running"
-    )
-    queued = sum(1 for job in queued_jobs if (job.get("project_key") or "default") == project.key)
-    last_deploy = next((item for item in history if item.get("status") != "running"), None)
-    rollback_target = _project_rollback_target_cached(state, project, head=head)
-    return {
-        "enabled": project.enabled,
-        "manual_deploy_enabled": project.manual_deploy_enabled,
-        "running": running,
-        "queue_size": queued,
-        "last_deploy": last_deploy,
-        "rollback_available": bool(project.rollback_script or rollback_target),
-        "rollback_target": rollback_target,
-        "timeout_seconds": project.timeout_seconds,
-    }
-
-
-def _deploy_lock_status(state: dict[str, Any]) -> dict[str, Any]:
-    with _deploy_process_lock:
-        proc = _deploy_process
-        active_pid = proc.pid if proc is not None and proc.poll() is None else None
-        worker_active = bool(_deploy_worker_thread and _deploy_worker_thread.is_alive())
-        locked = _running_lock.locked()
-    current = state.get("current_deploy") if isinstance(state.get("current_deploy"), dict) else {}
-    duration = current.get("duration_seconds")
-    return {
-        "locked": locked,
-        "active_pid": active_pid,
-        "active_process": active_pid is not None,
-        "active_worker": worker_active,
-        "duration_seconds": duration,
-        "project_key": current.get("project_key") or "",
-        "phase": current.get("phase") or "",
-        "phase_label": current.get("phase_label") or "",
-        "can_force_unlock": bool(locked and active_pid is None and not worker_active),
-    }
-
-
-def _force_unlock_deploy() -> tuple[bool, dict[str, Any]]:
-    global _cancel_requested, _deploy_process, _deploy_worker_thread
-    with _deploy_process_lock:
-        proc = _deploy_process
-        active_pid = proc.pid if proc is not None and proc.poll() is None else None
-        worker_active = bool(_deploy_worker_thread and _deploy_worker_thread.is_alive())
-        if active_pid is not None:
-            return False, {
-                "error": "deploy_process_running",
-                "active_pid": active_pid,
-                "suggested_commands": [
-                    f"ps -fp {active_pid}",
-                    f"kill {active_pid}",
-                    f"systemctl restart {shlex.quote(AGENT_SERVICE_NAME)}",
-                ],
-            }
-        if worker_active:
-            return False, {
-                "error": "deploy_worker_active",
-                "active_pid": None,
-                "message": "deployment worker is still starting or cleaning up",
-            }
-        if not _running_lock.locked():
-            return True, {"ok": True, "message": "deploy lock is already clear"}
-        try:
-            # Clear persisted/in-memory state before making the deploy lock
-            # available. Otherwise a newly acquired job can publish running=True
-            # and then be overwritten by this stale unlock request.
-            _update_state(running=False, current_deploy=None, queue_size=_jobs.qsize())
-        finally:
-            try:
-                _running_lock.release()
-            except RuntimeError:
-                pass
-            _deploy_process = None
-            _cancel_requested = None
-            _deploy_worker_thread = None
-    return True, {"ok": True, "message": "stale deploy lock cleared"}
-
-
-def _release_deploy_worker_lifecycle() -> None:
-    global _cancel_requested, _deploy_process, _deploy_worker_thread
-    with _deploy_process_lock:
-        if _deploy_worker_thread is not threading.current_thread():
-            return
-        # The queue worker is long-lived, but its ownership of this job ends
-        # here even if an unresponsive child has not exited yet. Keep the lock
-        # and process while it is active; force-unlock may clear them only after
-        # poll() confirms that the orphaned process is gone.
-        _deploy_worker_thread = None
-        if _deploy_process is not None and _deploy_process.poll() is None:
-            return
-        _deploy_process = None
-        _cancel_requested = None
-        if _running_lock.locked():
-            _running_lock.release()
-
-
-def _clear_completed_orphan_lifecycle(proc: subprocess.Popen[str]) -> None:
-    global _cancel_requested, _deploy_process, _deploy_worker_thread
-    with _deploy_process_lock:
-        if _deploy_process is not proc or _deploy_worker_thread is not None:
-            return
-        try:
-            if proc.poll() is None:
-                return
-        except Exception:  # noqa: BLE001 - unreadable process state must remain fail closed
-            return
-        try:
-            _update_state(running=False, current_deploy=None, queue_size=_jobs.qsize())
-        finally:
-            if _running_lock.locked():
-                _running_lock.release()
-            _deploy_process = None
-            _cancel_requested = None
-            _deploy_worker_thread = None
-
-
-def _reap_orphan_process_maintenance_lock(proc: subprocess.Popen[str], descriptor: int) -> None:
-    try:
-        pid = getattr(proc, "pid", "unknown")
-        _log_without_raising(
-            f"deploy process pid={pid} outlived its worker; maintenance remains blocked until it exits"
-        )
-        last_log_at = time.monotonic()
-        while True:
-            try:
-                if proc.poll() is not None:
-                    return
-                proc.wait(timeout=_ORPHAN_REAPER_WAIT_SECONDS)
-            except subprocess.TimeoutExpired:
-                pass
-            except Exception as exc:  # noqa: BLE001 - fail closed while an orphan may still be mutating files
-                now = time.monotonic()
-                if now - last_log_at >= _ORPHAN_REAPER_LOG_SECONDS:
-                    _log_without_raising(f"still waiting for orphan deploy process pid={pid}: {exc}")
-                    last_log_at = now
-                time.sleep(min(_ORPHAN_REAPER_WAIT_SECONDS, 5.0))
-                continue
-            now = time.monotonic()
-            if now - last_log_at >= _ORPHAN_REAPER_LOG_SECONDS:
-                _log_without_raising(
-                    f"still waiting for orphan deploy process pid={pid}; maintenance remains blocked"
-                )
-                last_log_at = now
-    finally:
-        try:
-            _clear_completed_orphan_lifecycle(proc)
-        finally:
-            _release_maintenance_lock(descriptor)
-
-
-def _retain_job_lock_for_orphan_process(job: dict[str, Any]) -> None:
-    if not job.pop(_JOB_DEPLOY_LIFECYCLE_OWNER_KEY, False):
-        return
-    descriptor = job.get(_JOB_MAINTENANCE_LOCK_KEY)
-    if not isinstance(descriptor, int) or fcntl is None:
-        return
-
-    with _deploy_process_lock:
-        proc = _deploy_process
-        if proc is None:
-            return
-        try:
-            active = proc.poll() is None
-        except Exception:  # noqa: BLE001 - an unreadable process state must fail closed
-            active = True
-        if not active:
-            return
-        # flock(2) locks are shared by dup() descriptors, so unlocking the
-        # worker's original descriptor would also unlock a duplicate. Transfer
-        # the original descriptor to the reaper and remove it from the job.
-        retained_descriptor = job.pop(_JOB_MAINTENANCE_LOCK_KEY)
-
-    try:
-        reaper = threading.Thread(
-            target=_reap_orphan_process_maintenance_lock,
-            args=(proc, retained_descriptor),
-            name=f"deploy-orphan-reaper-{getattr(proc, 'pid', 'unknown')}",
-            daemon=True,
-        )
-        reaper.start()
-    except Exception as exc:  # noqa: BLE001 - synchronous fallback must keep the shared lock held
-        _log_without_raising(f"failed to start orphan deploy reaper: {exc}; waiting synchronously")
-        _reap_orphan_process_maintenance_lock(proc, retained_descriptor)
-
-
-def _acquire_deploy_worker_lifecycle(job: dict[str, Any]) -> None:
-    global _deploy_worker_thread
-    last_log_at = time.monotonic()
-    while True:
-        with _deploy_process_lock:
-            if _running_lock.acquire(blocking=False):
-                _deploy_worker_thread = threading.current_thread()
-                job[_JOB_DEPLOY_LIFECYCLE_OWNER_KEY] = True
-                return
-        now = time.monotonic()
-        if now - last_log_at >= _DEPLOY_LOCK_WAIT_LOG_SECONDS:
-            _log_without_raising("deploy worker is waiting for the previous process lifecycle to clear")
-            last_log_at = now
-        time.sleep(_DEPLOY_LOCK_WAIT_SECONDS)
-
-
-def _alert(level: str, title: str, detail: str, source: str, command: str = "") -> dict[str, Any]:
-    return {"level": level, "title": title, "detail": detail, "source": source, "command": command, "at": _now_text()}
-
-
-def _alerts_payload(system: dict[str, Any], state: dict[str, Any], lock: dict[str, Any]) -> list[dict[str, Any]]:
-    alerts: list[dict[str, Any]] = []
-    server = system.get("server") if isinstance(system.get("server"), dict) else {}
-    memory = server.get("memory") if isinstance(server.get("memory"), dict) else {}
-    disk = server.get("disk") if isinstance(server.get("disk"), dict) else {}
-    network = server.get("network") if isinstance(server.get("network"), dict) else {}
-    docker = system.get("docker") if isinstance(system.get("docker"), dict) else {}
-
-    cpu = _percent(server.get("cpu_percent"))
-    if cpu is not None and cpu >= 90:
-        alerts.append(_alert("critical", "CPU usage is critical", f"CPU {cpu}%", "server", "top -o %CPU"))
-    elif cpu is not None and cpu >= 75:
-        alerts.append(_alert("warning", "CPU usage is high", f"CPU {cpu}%", "server", "top -o %CPU"))
-
-    memory_percent = _percent(memory.get("percent"))
-    if memory_percent is not None and memory_percent >= 90:
-        alerts.append(_alert("critical", "Memory usage is critical", f"Memory {memory_percent}%", "server", "free -h"))
-    elif memory_percent is not None and memory_percent >= 80:
-        alerts.append(_alert("warning", "Memory usage is high", f"Memory {memory_percent}%", "server", "free -h"))
-
-    disk_percent = _percent(disk.get("percent"))
-    if disk_percent is not None and disk_percent >= 90:
-        alerts.append(_alert("critical", "Disk space is critical", f"{disk.get('path') or '/'} used {disk_percent}%", "server", "df -h"))
-    elif disk_percent is not None and disk_percent >= 80:
-        alerts.append(_alert("warning", "Disk space is high", f"{disk.get('path') or '/'} used {disk_percent}%", "server", "df -h"))
-
-    network_percent = _percent(network.get("percent"))
-    if network_percent is not None and network_percent >= 90:
-        alerts.append(_alert("warning", "Network throughput is near limit", f"Network {network_percent}%", "server", "iftop"))
-
-    if not docker.get("available", False):
-        alerts.append(_alert("critical", "Docker is unavailable", str(docker.get("error") or "cannot read Docker status"), "docker", "systemctl status docker --no-pager"))
-    for container in docker.get("containers") or []:
-        if not isinstance(container, dict):
-            continue
-        name = str(container.get("name") or container.get("id") or "container")
-        state_text = str(container.get("state") or "")
-        health = str(container.get("health") or "")
-        if state_text and state_text.lower() != "running":
-            alerts.append(_alert("critical", f"Container is not running: {name}", str(container.get("status") or state_text), "docker", f"docker start {name}"))
-        elif health == "unhealthy":
-            alerts.append(_alert("critical", f"Container health check failed: {name}", str(container.get("status") or ""), "docker", f"docker logs --tail=200 {name}"))
-        error_count = int(container.get("recent_error_count") or 0)
-        if error_count > 0:
-            alerts.append(_alert("warning", f"Container has recent error logs: {name}", f"{error_count} error lines in latest 200 lines", "docker", f"docker logs --tail=200 {name}"))
-
-    with _projects_lock:
-        projects = list(PROJECTS.values())
-    for project in projects:
-        if not project.enabled or not project.health_url:
-            continue
-        health = _health_status_for(project)
-        if health.get("status") != "failed":
-            continue
-        detail = str(health.get("detail") or "健康地址没有返回正常响应")
-        duration = health.get("duration_ms")
-        if isinstance(duration, (int, float)):
-            detail = f"{detail} · {duration:g}ms"
-        alerts.append(_alert("critical", f"健康检查失败：{project.name}", detail, "health"))
-
-    current = state.get("current_deploy") if isinstance(state.get("current_deploy"), dict) else {}
-    duration = current.get("duration_seconds")
-    if lock.get("locked") and isinstance(duration, (int, float)) and duration > 600:
-        alerts.append(_alert("warning", "Deployment has been running for a long time", f"{duration}s at {current.get('phase_label') or '-'}", "deploy", "journalctl -u mini-deploy-agent -f"))
-    if lock.get("locked") and lock.get("can_force_unlock"):
-        alerts.append(_alert(
-            "critical",
-            "Deployment lock may be stale",
-            "No active deploy process was found, but the lock is still held.",
-            "deploy",
-            f"systemctl restart {shlex.quote(AGENT_SERVICE_NAME)}",
-        ))
-    return alerts[:40]
-
-
-def _event_item(kind: str, level: str, title: str, detail: str, at: str, source: str = "") -> dict[str, Any]:
-    return {"kind": kind, "level": level, "title": title, "detail": detail, "at": at, "source": source}
-
-
-def _events_payload(state: dict[str, Any], system: dict[str, Any], alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    current = state.get("current_deploy")
-    if isinstance(current, dict) and current.get("status") == "running":
-        events.append(_event_item(
-            "deploy",
-            "running",
-            f"{current.get('project_name') or current.get('project_key') or 'Project'} deploying",
-            f"{current.get('phase_label') or '-'} · {current.get('duration_seconds') or 0}s",
-            str(current.get("started_at") or _now_text()),
-            "deploy",
-        ))
-    for item in list(state.get("history") or [])[:20]:
-        if not isinstance(item, dict):
-            continue
-        status = str(item.get("status") or "")
-        events.append(_event_item(
-            "deploy",
-            "critical" if status == "failed" else ("warning" if status == "canceled" else "success"),
-            f"{item.get('project_name') or item.get('project_key') or 'Project'} deployment {status or '-'}",
-            f"{_short_sha(item.get('after'))} · {item.get('duration_seconds') or '-'}s · {item.get('commit_message') or '-'}",
-            str(item.get("finished_at") or item.get("started_at") or ""),
-            "deploy",
-        ))
-    ignored = state.get("last_ignored_webhook")
-    if isinstance(ignored, dict):
-        events.append(_event_item("webhook", "warning", "Webhook ignored", str(ignored.get("reason") or ignored.get("ref") or "-"), str(ignored.get("at") or ""), "webhook"))
-    docker = system.get("docker") if isinstance(system.get("docker"), dict) else {}
-    for container in docker.get("containers") or []:
-        if not isinstance(container, dict):
-            continue
-        name = str(container.get("name") or container.get("id") or "container")
-        error_count = int(container.get("recent_error_count") or 0)
-        if error_count:
-            events.append(_event_item("docker", "warning", f"{name} has error logs", f"{error_count} error lines in latest 200 lines", _now_text(), "docker"))
-        state_text = str(container.get("state") or "")
-        if state_text and state_text.lower() != "running":
-            events.append(_event_item("docker", "critical", f"{name} is not running", str(container.get("status") or state_text), _now_text(), "docker"))
-    for alert in alerts[:12]:
-        events.append(_event_item("alert", str(alert.get("level") or "warning"), str(alert.get("title") or "Alert"), str(alert.get("detail") or ""), str(alert.get("at") or ""), str(alert.get("source") or "alert")))
-    return events[:60]
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -4096,7 +2113,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 _HEALTH_OPENER = build_opener(_NoRedirectHandler)
 
 
-def _probe_health_url(project: DeployProject) -> dict[str, Any]:
+def _probe_health_url(project: Site) -> dict[str, Any]:
     url = project.health_url.strip()
     checked_at = _now_text()
     started = time.monotonic()
@@ -4125,7 +2142,7 @@ def _probe_health_url(project: DeployProject) -> dict[str, Any]:
                 "checked_at": checked_at, "detail": str(exc)[:240]}
 
 
-def _health_status_for(project: DeployProject) -> dict[str, Any]:
+def _health_status_for(project: Site) -> dict[str, Any]:
     if not project.health_url:
         return {"status": "not_configured", "code": None, "duration_ms": None,
                 "checked_at": None, "detail": "未配置健康检查地址"}
@@ -4137,218 +2154,155 @@ def _health_status_for(project: DeployProject) -> dict[str, Any]:
         }
 
 
-def _health_transition_notification(project: DeployProject, previous: dict[str, Any] | None,
-                                    current: dict[str, Any]) -> tuple[str, str] | None:
-    old_status = str((previous or {}).get("status") or "")
-    new_status = str(current.get("status") or "")
-    if old_status not in {"healthy", "failed"} or new_status not in {"healthy", "failed"}:
-        return None
-    if old_status == new_status:
-        return None
-    if new_status == "healthy":
-        title = f"mini_deploy 健康检查已恢复：{project.name}"
-        detail = "健康地址已恢复正常响应"
-    else:
-        title = f"mini_deploy 健康检查失败：{project.name}"
-        detail = str(current.get("detail") or "健康地址没有返回正常响应")
-    code = current.get("code")
-    if code is not None:
-        detail += f"；HTTP 状态码 {code}"
-    duration = current.get("duration_ms")
-    if isinstance(duration, (int, float)):
-        detail += f"；耗时 {duration:g}ms"
-    return title, detail
 
 
 def _health_check_sampler() -> None:
+    probes = ThreadPoolExecutor(max_workers=4, thread_name_prefix="website-probe")
+    sender = ThreadPoolExecutor(max_workers=1, thread_name_prefix="alert-delivery")
+    running: dict[Any, dict[str, Any]] = {}
+    sending = None
+    next_system = 0.0
     while True:
-        with _projects_lock:
-            projects = list(PROJECTS.values())
-        for project in projects:
-            if not project.enabled or not project.health_url:
-                continue
-            result = _probe_health_url(project)
-            with _health_status_lock:
-                previous = _health_status.get(project.key)
-                _health_status[project.key] = result
-            notification = _health_transition_notification(project, previous, result)
-            if notification:
-                _send_notifications_async(*notification)
-        time.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
+        try:
+            monitor = _monitor()
+            now = time.time()
+            for future, target in list(running.items()):
+                if future.done():
+                    del running[future]
+                    try:
+                        result = future.result()
+                        if target.get("legacy"):
+                            site = PROJECTS.get(target["site"].key)
+                            if site == target["site"]:
+                                with _health_status_lock:
+                                    _health_status[site.key] = {**result, "sampled_at": now}
+                                monitor.observe(f"health:{site.key}", result["status"] == "failed",
+                                                f"健康检查失败：{site.name}", result["detail"], "health")
+                        else:
+                            monitor.accept(target, result)
+                    except Exception as exc:
+                        _log(f"website probe failed: {type(exc).__name__}")
+            with monitor.lock:
+                busy = {t["key"] for t in running.values()}
+                with _projects_lock:
+                    legacy = [{"key": f"health:{s.key}", "site": s, "legacy": True, "enabled": True}
+                              for s in PROJECTS.values() if s.enabled and s.health_url]
+                candidates = [*monitor.targets.values(), *legacy]
+                for target in sorted(candidates, key=lambda t: monitor.due.get(t["key"], 0)):
+                    key = target["key"]
+                    if len(running) >= 4:
+                        break
+                    if not target["enabled"] or key in busy or monitor.due.get(key, 0) > now:
+                        continue
+                    cert = monitor.results.get(key, {}).get("certificate", {})
+                    check_cert = (monitor.due.get(key, 0) == 0 or cert.get("status") not in {"valid", "not_applicable"}
+                                  or now - cert.get("checked_at", 0) >= 3600)
+                    future = (probes.submit(_probe_health_url, target["site"]) if target.get("legacy")
+                              else probes.submit(monitoring.probe, dict(target), check_cert))
+                    running[future] = dict(target)
+                    monitor.due[key] = now + (HEALTH_CHECK_INTERVAL_SECONDS if target.get("legacy") else 30)
+            monitor.evaluate_websites()
+            if now >= next_system:
+                _evaluate_resource_alerts(monitor, _system_status_payload())
+                next_system = now + 15
+            if sending and sending[0].done():
+                future, key, message = sending
+                sending = None
+                try:
+                    results = future.result()
+                except Exception:
+                    results = [{"enabled": True, "ok": False}]
+                monitor.delivered(key, message, results)
+            if sending is None:
+                config = _notification_config_payload(include_secret=True)
+                notice = monitor.next_notification(_any_notification_enabled(config))
+                if notice:
+                    key, message = notice
+                    # Save retry timing before submitting, including across agent restarts.
+                    monitor.flush()
+                    sending = (sender.submit(_send_notifications, config, "mini_deploy · " + message["title"], message["body"]), key, message)
+            if now - monitor.last_flush >= 30:
+                monitor.flush()
+        except Exception as exc:
+            _log(f"monitoring iteration failed: {type(exc).__name__}: {exc}")
+        time.sleep(1)
 
 
-def _manual_deploy_job(actor: str, project: DeployProject) -> dict[str, str]:
-    head = _run_git(["rev-parse", "HEAD"], project)
-    subject = _run_git(["log", "-1", "--pretty=%s"], project)
-    author = _run_git(["log", "-1", "--pretty=%an"], project)
-    return {
-        "project_key": project.key,
-        "project_name": project.name,
-        "ref": f"refs/heads/{project.branch}",
-        "before": head,
-        "after": head,
-        "source": "manual",
-        "actor": actor,
-        "commit_message": subject,
-        "commit_author": author,
-    }
+_monitor_instance: monitoring.Monitor | None = None
+_monitor_lock = threading.Lock()
 
 
-def _rollback_job(actor: str, project: DeployProject, state: dict[str, Any]) -> dict[str, str]:
-    job = _manual_deploy_job(actor, project)
-    target = _project_rollback_target(state, project)
-    job["source"] = "rollback"
-    job["action"] = "rollback"
-    if target:
-        job["after"] = target
-        job["commit_message"] = f"Rollback to {target[:8]}"
-    return job
+def _monitor() -> monitoring.Monitor:
+    global _monitor_instance
+    with _monitor_lock:
+        path = STATE_FILE.with_name("website-monitoring.json")
+        if _monitor_instance is None or _monitor_instance.path != path:
+            _monitor_instance = monitoring.Monitor(path)
+        return _monitor_instance
 
 
-def _preflight_item(level: str, title: str, detail: str, command: str = "") -> dict[str, Any]:
-    return {"level": level, "title": title, "detail": detail, "command": command}
+@_maintenance_shared_operation
+def _monitoring_operation(data: dict[str, Any]) -> dict[str, Any]:
+    return _monitor().operation(data)
 
 
-def _preflight_payload(project: DeployProject) -> dict[str, Any]:
-    items: list[dict[str, Any]] = []
-    if not project.enabled:
-        items.append(_preflight_item("critical", "Project is disabled", "This project will not respond to webhook or manual deploy.", "Enable the project in the panel"))
-    if not project.workdir.exists():
-        items.append(_preflight_item("critical", "Project directory does not exist", str(project.workdir), f"mkdir -p {shlex.quote(str(project.workdir))}"))
-    elif not (project.workdir / ".git").exists():
-        items.append(_preflight_item("warning", "Project directory is not a Git repository", str(project.workdir), f"cd {shlex.quote(str(project.workdir))} && git status"))
-    else:
-        status = _run_git(["status", "--porcelain"], project)
-        if status:
-            items.append(_preflight_item("warning", "Git working tree has local changes", status.splitlines()[0], f"cd {shlex.quote(str(project.workdir))} && git status --short"))
-        remote = _run_git(["remote", "-v"], project)
-        if not remote:
-            items.append(_preflight_item("warning", "Git remote is not configured", "Deploy may be unable to pull remote code.", f"cd {shlex.quote(str(project.workdir))} && git remote -v"))
+def _evaluate_resource_alerts(monitor: monitoring.Monitor, system: dict[str, Any]) -> None:
+    with _projects_lock:
+        health_keys = {f"health:{s.key}" for s in PROJECTS.values() if s.enabled and s.health_url}
+    with monitor.lock:
+        for key in set(monitor.incidents) | set(monitor.pending):
+            if key.startswith("health:") and key not in health_keys:
+                monitor.incidents.pop(key, None)
+                monitor.pending.pop(key, None)
+    server = system.get("server") or {}
+    values = [("cpu", "CPU 使用率", server.get("cpu_percent"), 90),
+              ("memory", "内存使用率", (server.get("memory") or {}).get("percent"), 90),
+              ("disk", "磁盘使用率", (server.get("disk") or {}).get("percent"), 90)]
+    for key, title, value, threshold in values:
+        value = _percent(value)
+        monitor.observe(f"server:{key}", None if value is None else value >= threshold,
+                        title + "过高", f"当前 {value}% · 阈值 {threshold}%", "server")
+    docker = system.get("docker") or {}
+    installed = docker.get("error") != "docker command not found"
+    monitor.observe("docker:daemon", not docker["available"] if "available" in docker and installed else None,
+                    "Docker 无法连接", "请检查 Docker 服务是否正常运行", "docker")
+    if not docker.get("available"):
+        return
+    observed = set()
+    for container in docker.get("containers") or []:
+        key = "docker:container:" + str(container.get("id") or container.get("name"))
+        observed.add(key)
+        state = str(container.get("state") or "").lower()
+        abnormal_exit = state == "exited" and bool(re.search(r"Exited \([1-9][0-9]*\)", str(container.get("status")), re.I))
+        bad = container.get("health") == "unhealthy" or state in {"restarting", "dead"} or abnormal_exit
+        monitor.observe(key, bad if state else None, "容器异常：" + str(container.get("name") or key),
+                        str(container.get("status") or state), "docker")
+    # Removed containers stop being watched; disappearance is not a recovery event.
+    with monitor.lock:
+        for key in list(monitor.incidents):
+            if key.startswith("docker:container:") and key not in observed:
+                monitor.incidents.pop(key, None)
+                monitor.pending.pop(key, None)
 
-    script_path = _project_script_path(project)
-    if not script_path.is_file():
-        items.append(_preflight_item("critical", "Deploy script does not exist", str(script_path), f"chmod +x {shlex.quote(str(script_path))}"))
-    elif not _script_is_executable(script_path):
-        items.append(_preflight_item("critical", "Deploy script is not executable", str(script_path), f"chmod +x {shlex.quote(str(script_path))}"))
 
-    if project.template == "docker":
-        if not shutil.which("docker"):
-            items.append(_preflight_item("critical", "Docker command was not found", "This Docker project cannot deploy without Docker.", "SETUP_DOCKER=yes bash install.sh"))
-        else:
-            code, output = _run_command(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=4.0)
-            if code != 0:
-                items.append(_preflight_item("critical", "Docker daemon is unavailable", output or "docker info failed", "systemctl status docker --no-pager"))
-            if not project.docker_config and not any((project.workdir / name).exists() for name in entrypoint_checks.COMPOSE_FILES):
-                items.append(_preflight_item("warning", "docker-compose file was not found", str(project.workdir), f"ls -lh {shlex.quote(str(project.workdir))}"))
-        if project.docker_config:
-            for check in _docker_readiness(project):
-                if not check["ok"]:
-                    items.append(_preflight_item("critical", check["title"], check["message"], ""))
-
-    ingress = entrypoint_checks.inspect_directory(project.workdir)
-    for advice in entrypoint_checks.entry_advice(ingress):
-        items.append(_preflight_item("warning", "项目访问入口检查", advice))
-
-    try:
-        usage = shutil.disk_usage(project.workdir if project.workdir.exists() else Path("/"))
-        free_gb = usage.free / 1024 / 1024 / 1024
-        free_percent = usage.free / usage.total * 100 if usage.total else 0
-        if free_gb < 1 or free_percent < 5:
-            items.append(_preflight_item("critical", "Disk free space is low", f"Free {free_gb:.1f}GB / {free_percent:.1f}%", "df -h"))
-    except OSError as exc:
-        items.append(_preflight_item("warning", "Failed to read disk space", str(exc), "df -h"))
-
-    for path, label in ((STATE_FILE.parent, "State directory"), (LOG_FILE.parent, "Agent log directory"), (project.deploy_log_file.parent, "Deploy log directory")):
-        if not path.exists():
-            items.append(_preflight_item("critical", f"{label} does not exist", str(path), f"mkdir -p {shlex.quote(str(path))} && chmod 700 {shlex.quote(str(path))}"))
-        elif not os.access(path, os.W_OK):
-            items.append(_preflight_item("critical", f"{label} is not writable", str(path), f"chmod 700 {shlex.quote(str(path))}"))
-
-    if not project.health_url:
-        items.append(_preflight_item("warning", "Health URL is not configured", "Deploy cannot automatically verify service health.", "Fill health_url in project config"))
-
-    level_order = {"critical": 2, "warning": 1, "ok": 0}
-    worst = "ok"
-    for item in items:
-        if level_order.get(str(item.get("level")), 0) > level_order[worst]:
-            worst = str(item.get("level"))
-    if not items:
-        items.append(_preflight_item("ok", "Preflight passed", "No blocking deployment issues were found."))
-    return {
-        "project": project.key,
-        "project_name": project.name,
-        "ok": worst == "ok",
-        "level": worst,
-        "items": items,
-        "checked_at": _now_text(),
-    }
+def _alerts_payload(system: dict[str, Any]) -> list[dict[str, Any]]:
+    return _monitor().snapshot()["alerts"]
 
 
 def _status_payload() -> dict[str, Any]:
-    with _state_lock:
-        state = json.loads(json.dumps(_state, ensure_ascii=False))
-    state["running"] = _running_lock.locked()
-    state["queue_size"] = _jobs.qsize()
-    current = state.get("current_deploy")
-    if isinstance(current, dict) and current.get("status") == "running":
-        started_ts = current.get("started_ts")
-        if isinstance(started_ts, (int, float)):
-            current["duration_seconds"] = round(max(time.time() - float(started_ts), 0), 1)
-        if current.get("phase"):
-            current["phase_label"] = _phase_label(current.get("phase"))
-    with _projects_lock:
-        projects = dict(PROJECTS)
-        default_key = DEFAULT_PROJECT_KEY
-    default_project = projects.get(default_key)
-    queued_jobs = _queued_jobs_snapshot()
-    project_payloads = []
-    git_by_project: dict[str, dict[str, str]] = {}
-    for project in projects.values():
-        git = _project_git_status(project)
-        head = git["head"]
-        git_by_project[project.key] = git
-        runtime = _project_runtime_status(state, project, queued_jobs, head=head)
-        project_payloads.append({
-            "key": project.key,
-            "name": project.name,
-            "repo": project.repo,
-            "branch": project.branch,
-            "project_dir": str(project.workdir),
-            "deploy_script": project.script,
-            "health_url": project.health_url,
-            "health": _health_status_for(project),
-            **runtime,
-            "head": git["head"],
-            "short_head": git["short_head"],
-            "git_branch": git["branch"],
-        })
-    system_payload = _system_status_payload()
-    lock = _deploy_lock_status(state)
-    alerts = _alerts_payload(system_payload, state, lock)
-    events = _events_payload(state, system_payload, alerts)
+    system = _system_status_payload()
+    try:
+        monitored = _monitor().snapshot()
+    except (OSError, ValueError, TypeError, AttributeError):
+        monitored = {"alerts": [{"level": "critical", "source": "monitoring", "title": "无法读取监测数据",
+                                  "detail": "请检查服务日志及 website-monitoring.json，原文件已保留", "at": _now_text()}],
+                     "events": []}
     return {
-        "agent": {
-            "status": "ok",
-            "branch": default_project.branch if default_project else "",
-            "host": HOST,
-            "port": PORT,
-            "project_dir": str(default_project.workdir) if default_project else "",
-            "deploy_script": default_project.script if default_project else "",
-            "project_count": len(projects),
-            "projects_config_file": str(PROJECTS_CONFIG_FILE),
-            "projects_config_exists": PROJECTS_CONFIG_FILE.exists(),
-            "ui_auth_configured": bool(UI_PASSWORD_HASH and UI_SESSION_SECRET),
-        },
-        "git": git_by_project.get(default_key, {"head": "", "short_head": "", "branch": ""}),
-        "projects": project_payloads,
-        "default_project": default_key,
-        "system": system_payload,
-        "alerts": alerts,
-        "events": events,
-        "lock": lock,
-        "state": state,
-        "csrf_token": "",
-        "generated_at": int(time.time()),
+        "agent": {"status": "ok", "host": HOST, "port": PORT,
+                  "site_count": len(PROJECTS),
+                  "ui_auth_configured": bool(UI_PASSWORD_HASH and UI_SESSION_SECRET)},
+        "system": system, "alerts": monitored["alerts"], "events": monitored["events"],
+        "csrf_token": "", "generated_at": int(time.time()),
     }
 
 
@@ -4533,243 +2487,6 @@ _DEPLOY_CONTROL_SECRET_ENV_NAMES = frozenset({
 })
 
 
-def _deploy_subprocess_environment(
-    project: DeployProject,
-    action: str,
-    script_path: Path,
-    job: dict[str, Any],
-) -> dict[str, str]:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in _DEPLOY_CONTROL_SECRET_ENV_NAMES
-    }
-    env.update({
-        "DEPLOY_PROJECT_KEY": project.key,
-        "DEPLOY_PROJECT_NAME": project.name,
-        "PROJECT_DIR": str(project.workdir),
-        "DEPLOY_BRANCH": project.branch,
-        "DEPLOY_SCRIPT": str(script_path),
-        "DEPLOY_ACTION": action,
-        "HEALTH_URL": project.health_url,
-        "DEPLOY_LOG_FILE": str(project.deploy_log_file),
-        "DEPLOY_SERVICE_NAME": project.service_name,
-        "DEPLOY_SERVICE_PORT": str(project.service_port),
-        "DEPLOY_REF": str(job.get("ref") or ""),
-        "DEPLOY_BEFORE": str(job.get("before") or ""),
-        "DEPLOY_AFTER": str(job.get("after") or ""),
-        "DEPLOY_SOURCE": str(job.get("source") or "webhook"),
-        "DEPLOY_TRIGGERED_AT": str(int(time.time())),
-    })
-    return env
-
-
-def _run_deploy(job: dict[str, Any]) -> None:
-    owns_maintenance_lock = _JOB_MAINTENANCE_LOCK_KEY not in job
-    if owns_maintenance_lock:
-        job[_JOB_MAINTENANCE_LOCK_KEY] = _acquire_maintenance_shared_lock(blocking=True)
-    try:
-        _run_deploy_locked(job)
-    finally:
-        if owns_maintenance_lock:
-            try:
-                _retain_job_lock_for_orphan_process(job)
-            finally:
-                _release_job_maintenance_lock(job)
-
-
-def _run_deploy_locked(job: dict[str, Any]) -> None:
-    global _cancel_requested, _deploy_process, _deploy_worker_thread
-    _acquire_deploy_worker_lifecycle(job)
-
-    project_key = str(job.get("project_key") or DEFAULT_PROJECT_KEY)
-    project = PROJECTS.get(project_key)
-    if not project:
-        _log(f"deploy skipped because project no longer exists project={project_key} after={job.get('after')}")
-        _release_deploy_worker_lifecycle()
-        return
-    dedupe_key = str(job.get("dedupe_key") or "")
-    _set_webhook_delivery_status(dedupe_key, "running")
-    try:
-        action = str(job.get("action") or "deploy")
-        script_path = _project_script_path(project, action=action)
-        started_at = _now_text()
-        started_ts = time.time()
-        current = {
-            "status": "running",
-            "project_key": project.key,
-            "project_name": project.name,
-            "ref": job.get("ref") or "",
-            "before": job.get("before") or "",
-            "after": job.get("after") or "",
-            "source": job.get("source") or "webhook",
-            "action": action,
-            "actor": job.get("actor") or "",
-            "commit_message": job.get("commit_message") or "",
-            "commit_author": job.get("commit_author") or "",
-            "started_at": started_at,
-            "started_ts": started_ts,
-            "finished_at": None,
-            "duration_seconds": None,
-            "exit_code": None,
-            "phase": "starting",
-            "phase_label": _phase_label("starting"),
-            "phase_detail": "",
-            "phase_started_ts": started_ts,
-            "phase_durations": [],
-            "changed_files": job.get("changed_files") or [],
-            "changed_file_count": job.get("changed_file_count") or 0,
-        }
-        _update_state(running=True, current_deploy=current)
-    except Exception:
-        _release_deploy_worker_lifecycle()
-        raise
-    canceled = False
-    exit_code = 1
-    proc: subprocess.Popen[str] | None = None
-    output_stop = threading.Event()
-    output_reader: threading.Thread | None = None
-    diagnostic_tail: deque[str] = deque(maxlen=64)
-    diagnostic_error = ""
-
-    try:
-        if project.deployment_plan.get("method") == "commands" and not (action == "rollback" and project.rollback_script):
-            _prepare_command_script(project)
-        env = _deploy_subprocess_environment(project, action, script_path, job)
-
-        _log(
-            "deploy start "
-            f"project={project.key} action={action} ref={env['DEPLOY_REF']} "
-            f"before={env['DEPLOY_BEFORE']} after={env['DEPLOY_AFTER']}"
-        )
-        popen_kwargs: dict[str, Any] = {}
-        if os.name != "nt":
-            popen_kwargs["start_new_session"] = True
-        proc = subprocess.Popen(
-            [str(script_path)],
-            cwd=str(project.workdir),
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            **popen_kwargs,
-        )
-        proc._mini_deploy_diagnostic_tail = diagnostic_tail
-        with _deploy_process_lock:
-            _deploy_process = proc
-            _cancel_requested = None
-        output_reader = threading.Thread(target=_read_process_output, args=(proc, output_stop), daemon=True)
-        output_reader.start()
-        timed_out = False
-        deadline = time.time() + project.timeout_seconds
-        while True:
-            with _deploy_process_lock:
-                cancel_request = _cancel_requested
-            if cancel_request:
-                canceled = True
-                _log(f"deploy canceled project={project.key} action={action} actor={cancel_request.get('actor', '')}")
-                _update_current_deploy(
-                    phase="canceled",
-                    phase_label=_phase_label("canceled"),
-                    phase_detail=f"取消人 {cancel_request.get('actor', '')}",
-                )
-                if proc.poll() is None:
-                    _terminate_process(proc)
-                break
-            if proc.poll() is not None:
-                break
-            if time.time() > deadline:
-                timed_out = True
-                _log(f"deploy timeout project={project.key} action={action} after {project.timeout_seconds}s")
-                _update_current_deploy(
-                    phase="timeout",
-                    phase_label=_phase_label("timeout"),
-                    phase_detail=f"超过 {project.timeout_seconds}s",
-                )
-                _terminate_process(proc)
-                break
-            time.sleep(0.2)
-        if timed_out:
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _kill_process(proc)
-                proc.wait(timeout=10)
-            exit_code = 124
-        elif canceled:
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _kill_process(proc)
-                proc.wait(timeout=10)
-            exit_code = 130
-        else:
-            exit_code = proc.returncode if proc.returncode is not None else proc.wait(timeout=10)
-        _log(f"deploy finished project={project.key} action={action} code={exit_code} after={env['DEPLOY_AFTER']}")
-    except Exception as exc:  # noqa: BLE001 - top-level worker guard
-        exit_code = 1
-        diagnostic_error = str(exc)
-        if proc is not None and proc.poll() is None:
-            _terminate_process(proc)
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _kill_process(proc)
-                proc.wait(timeout=10)
-        _log(f"deploy failed: {exc}")
-    finally:
-        if output_reader is not None:
-            output_reader.join(timeout=2)
-        output_stop.set()
-        finished_ts = time.time()
-        current_snapshot = dict(current)
-        with _state_lock:
-            live_current = _state.get("current_deploy")
-            if isinstance(live_current, dict):
-                current_snapshot.update(live_current)
-        _close_current_phase(current_snapshot, finished_ts)
-        entry = {
-            **current_snapshot,
-            "status": "canceled" if canceled else ("success" if exit_code == 0 else "failed"),
-            "phase": "canceled" if canceled else current_snapshot.get("phase"),
-            "phase_label": _phase_label("canceled") if canceled else current_snapshot.get("phase_label"),
-            "finished_at": _now_text(),
-            "duration_seconds": round(finished_ts - started_ts, 1),
-            "exit_code": exit_code,
-        }
-        if entry["status"] == "failed":
-            entry["diagnosis"] = project_guidance.diagnose(
-                "\n".join([*list(diagnostic_tail), diagnostic_error]), exit_code=exit_code,
-            )
-        _invalidate_project_git_status_cache(project.key)
-        _append_history(entry)
-        _set_webhook_delivery_status(dedupe_key, entry["status"])
-        _notify_deploy_finished(entry)
-        _release_deploy_worker_lifecycle()
-
-
-def _worker() -> None:
-    while True:
-        job = _dequeue_job()
-        try:
-            _run_deploy(job)
-        except Exception as exc:  # noqa: BLE001 - one failed job must not stop the worker
-            _log(f"deploy worker recovered from unexpected error: {exc}")
-        finally:
-            try:
-                _release_deploy_worker_lifecycle()
-            finally:
-                try:
-                    _retain_job_lock_for_orphan_process(job)
-                finally:
-                    try:
-                        _jobs.task_done()
-                    finally:
-                        _release_job_maintenance_lock(job)
-
-
 def _normal_path(path: str) -> str:
     if path == "/deploy":
         return "/ui"
@@ -4778,20 +2495,17 @@ def _normal_path(path: str) -> str:
     return path
 
 
-def _short_sha(value: Any) -> str:
-    text = str(value or "")
-    return text[:8] if text else "-"
-
-
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "sites.js": "application/javascript; charset=utf-8",
+    "monitoring.js": "application/javascript; charset=utf-8",
     "request-gateway.js": "application/javascript; charset=utf-8",
     "gateway-connect.js": "application/javascript; charset=utf-8",
     "selects.js": "application/javascript; charset=utf-8",
     "motion.js": "application/javascript; charset=utf-8",
     "nginx.js": "application/javascript; charset=utf-8",
     "docker-images.js": "application/javascript; charset=utf-8",
-    "onboarding.js": "application/javascript; charset=utf-8",
+    "docker-mirrors.js": "application/javascript; charset=utf-8",
     "nginx-requests.js": "application/javascript; charset=utf-8",
     "certificates.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
@@ -4841,6 +2555,13 @@ def _render_ui() -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _retired_deployment_route(self, path: str) -> bool:
+        if path not in {"/webhook", "/redeploy", "/rollback", "/cancel", "/force-unlock", "/preflight", "/projects-config"} and not path.startswith("/projects-config/"):
+            return False
+        self.close_connection = True
+        self._write_json(410, {"error": "deployment_removed", "detail": "部署功能已移除，请在原部署工具中管理代码更新；服务器文件和服务保持不变。"})
+        return True
+
     server_version = "mini_deploy_agent/1.1"
 
     def _write_json(self, status: int, payload: dict[str, Any]) -> None:
@@ -4982,27 +2703,13 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _resolve_log_target(self, query: dict[str, list[str]]) -> tuple[Path, str]:
-        kind = (query.get("kind", ["deploy"])[0] or "deploy").strip()
-        project_raw = (query.get("project", [""])[0] or "").strip()
-        project_key = _safe_project_key(project_raw) if project_raw else ""
-        if kind == "agent":
-            return LOG_FILE, "agent"
-        if project_key and project_key in PROJECTS:
-            return PROJECTS[project_key].deploy_log_file, f"{project_key}-deploy"
-        return DEPLOY_LOG_FILE, "deploy"
+        return LOG_FILE, "agent"
 
     def _handle_logs(self, query: dict[str, list[str]]) -> None:
         lines = _log_line_limit(query.get("lines", [LOG_TAIL_LINES])[0], default=LOG_TAIL_LINES)
-        project_logs = {
-            project.key: _tail(project.deploy_log_file, lines=lines)
-            for project in PROJECTS.values()
-        }
         self._write_json(200, {
-            "line_limit": lines,
-            "max_line_limit": LOG_TAIL_MAX_LINES,
-            "deploy_log": _tail(DEPLOY_LOG_FILE, lines=lines),
+            "line_limit": lines, "max_line_limit": LOG_TAIL_MAX_LINES,
             "agent_log": _tail(LOG_FILE, lines=lines),
-            "project_logs": project_logs,
         })
 
     def _handle_logs_download(self, query: dict[str, list[str]]) -> None:
@@ -5017,8 +2724,28 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if self._retired_deployment_route(path):
+            return
+        if path == "/sites":
+            if self._require_auth_json():
+                self._write_json(200, _sites_config_payload())
+            return
+        if path == "/monitoring":
+            if self._require_auth_json():
+                try:
+                    payload = _monitor().snapshot()
+                except (OSError, ValueError, TypeError, AttributeError):
+                    self._write_json(503, {"error": "monitoring_unavailable", "detail": "无法读取监测数据，请检查服务日志；原文件已保留"})
+                    return
+                payload["notifications_enabled"] = _any_notification_enabled(_notification_config_payload())
+                self._write_json(200, payload)
+            return
+        if path == "/notifications":
+            if self._require_auth_json():
+                self._write_json(200, {"notifications": _notification_config_payload(include_secret=True)})
+            return
         if path == "/health":
-            self._write_json(200, {"status": "ok", "queue_size": _jobs.qsize()})
+            self._write_json(200, {"status": "ok"})
             return
         if path in {"/", "/ui", "/ui/"}:
             if self._authenticated():
@@ -5049,10 +2776,6 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._write_json(401, {"error": "unauthorized"})
             return
-        if path == "/preflight":
-            if self._require_auth_json():
-                self._handle_preflight(parse_qs(parsed.query))
-            return
         if path == "/docker/logs":
             if self._require_auth_json():
                 self._handle_docker_logs(parse_qs(parsed.query))
@@ -5064,19 +2787,19 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, ValueError, RuntimeError) as exc:
                     self._write_json(500, {"error": "docker_images_failed", "detail": str(exc)})
             return
+        if path == "/docker/mirrors":
+            if self._require_auth_json():
+                try:
+                    result = _docker_mirrors_manager().status(job_only=parse_qs(parsed.query).get("job") == ["1"])
+                    self._write_json(200, result)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    self._write_json(503, {"error": "docker_mirrors_unavailable", "detail": str(exc)})
+            return
         if path == "/docker/logs/download":
             if self._authenticated():
                 self._handle_docker_logs_download(parse_qs(parsed.query))
             else:
                 self._write_json(401, {"error": "unauthorized"})
-            return
-        if path == "/projects-config":
-            if self._require_auth_json():
-                self._write_json(200, _projects_config_payload(include_secret=True))
-            return
-        if path == "/projects-config/discover":
-            if self._require_auth_json():
-                self._write_json(200, project_guidance.discover_local_projects(_run_command))
             return
         if path == "/certificates":
             if self._require_auth_json():
@@ -5125,10 +2848,6 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "gateway_read_failed", "detail": str(exc)})
             return
-        if path == "/projects-config/doctor":
-            if self._require_auth_json():
-                self._handle_projects_config_doctor(parse_qs(parsed.query))
-            return
         if path == "/audit":
             if self._require_auth_json():
                 query = parse_qs(parsed.query)
@@ -5143,6 +2862,35 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if self._retired_deployment_route(path):
+            return
+        if path == "/monitoring":
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=8192)
+                    result = _monitoring_operation(data)
+                except (ValueError, OSError, _MaintenanceLockError) as exc:
+                    self._write_json(503 if isinstance(exc, _MaintenanceLockError) else 400,
+                                     {"error": "monitoring_failed", "detail": str(exc)})
+                    return
+                _audit_event("monitoring_" + str(data.get("action", "")), actor=self.client_address[0], success=True)
+                self._write_json(200, result)
+            return
+        if path in {"/sites/save", "/sites/delete"}:
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=8192)
+                    if path == "/sites/save":
+                        _save_site(data)
+                    else:
+                        _delete_site(data)
+                except (ValueError, OSError, _MaintenanceLockError) as exc:
+                    self._write_json(503 if isinstance(exc, _MaintenanceLockError) else 400,
+                                     {"error": "site_operation_failed", "detail": str(exc)})
+                    return
+                _audit_event("site_save" if path.endswith("save") else "site_delete", actor=self.client_address[0], success=True)
+                self._write_json(200, _sites_config_payload())
+            return
         if path == "/gateway-connections":
             if self._require_auth_json():
                 action = 'invalid'
@@ -5176,22 +2924,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/login":
             self._handle_login()
             return
-        if path == "/redeploy":
-            if self._require_auth_json():
-                self._handle_redeploy(parse_qs(parsed.query))
-            return
-        if path == "/rollback":
-            if self._require_auth_json():
-                self._handle_rollback(parse_qs(parsed.query))
-            return
-        if path == "/cancel":
-            if self._require_auth_json():
-                self._handle_cancel(parse_qs(parsed.query))
-            return
-        if path == "/force-unlock":
-            if self._require_auth_json():
-                self._handle_force_unlock()
-            return
         if path == "/docker/action":
             if self._require_auth_json():
                 self._handle_docker_action()
@@ -5200,35 +2932,18 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._handle_docker_image_action()
             return
-        if path == "/projects-config/init":
+        if path == "/docker/mirrors":
             if self._require_auth_json():
-                self._handle_projects_config_init()
+                try:
+                    data = _read_json_body(self, max_bytes=48 * 1024)
+                    result = _docker_mirrors_manager().start(data.get("mirrors"), data.get("revision"),
+                        operation=_apply_docker_mirrors,
+                        audit=lambda ok: _audit_event("docker_mirrors_apply", actor=self.client_address[0], success=ok))
+                    self._write_json(202, result)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    self._write_json(400, {"error": "docker_mirrors_failed", "detail": str(exc)})
             return
-        if path == "/projects-config/save":
-            if self._require_auth_json():
-                self._handle_projects_config_save()
-            return
-        if path == "/projects-config/bootstrap":
-            if self._require_auth_json():
-                self._handle_projects_config_bootstrap()
-            return
-        if path in {"/projects-config/inspect", "/projects-config/preview"}:
-            if self._require_auth_json():
-                self._handle_project_guidance(path.rsplit("/", 1)[-1])
-            return
-        if path == "/projects-config/nginx":
-            if self._require_auth_json():
-                self._handle_projects_config_nginx()
-            return
-        if path == "/projects-config/delete":
-            if self._require_auth_json():
-                self._handle_projects_config_delete(parse_qs(parsed.query))
-            return
-        if path == "/projects-config/secret":
-            if self._require_auth_json():
-                self._handle_projects_config_secret(parse_qs(parsed.query))
-            return
-        if path == "/projects-config/notifications":
+        if path == "/notifications":
             if self._require_auth_json():
                 self._handle_notifications_save()
             return
@@ -5236,10 +2951,7 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._handle_notifications_test()
             return
-        if path != "/webhook":
-            self._write_json(404, {"error": "not_found"})
-            return
-        self._handle_webhook(parsed)
+        self._write_json(404, {"error": "not_found"})
 
     def _handle_request_gateway(self) -> None:
         action = "invalid"
@@ -5304,7 +3016,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_login(self) -> None:
         if not UI_PASSWORD_HASH or not UI_SESSION_SECRET:
-            self._write_html(500, _render_login("部署面板密码尚未初始化。"))
+            self._write_html(500, _render_login("面板密码尚未初始化。"))
             return
         ip = _request_client_ip(self)
         if not _reserve_login_attempt(ip):
@@ -5333,223 +3045,6 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_setup_password(self) -> None:
         self._write_html(403, _render_login("网页不允许初始化管理员密码，请在服务器终端执行 set-password。"))
 
-    def _handle_projects_config_init(self) -> None:
-        try:
-            _initialize_projects_config_transaction()
-        except OSError as exc:
-            _log(f"projects config init failed: {exc}")
-            _audit_event("projects_config_init", actor=self.client_address[0], target=str(PROJECTS_CONFIG_FILE), success=False, detail={"error": str(exc)})
-            self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
-            return
-        _log(f"projects config initialized file={PROJECTS_CONFIG_FILE}")
-        _audit_event("projects_config_init", actor=self.client_address[0], target=str(PROJECTS_CONFIG_FILE), success=True)
-        self._write_json(200, _projects_config_payload(include_secret=True))
-
-    def _handle_projects_config_save(self) -> None:
-        try:
-            data = _read_json_body(self)
-        except (ValueError, json.JSONDecodeError) as exc:
-            self._write_json(400, {"error": "invalid_json", "detail": str(exc)})
-            return
-
-        raw_project = data.get("project", data)
-        if not isinstance(raw_project, dict):
-            self._write_json(400, {"error": "invalid_project"})
-            return
-        original_key_raw = data.get("original_key") or raw_project.get("original_key") or ""
-        original_key = _safe_project_key(str(original_key_raw)) if original_key_raw else ""
-        try:
-            project = _save_project_transaction(raw_project, original_key)
-        except _ProjectKeyExistsError:
-            self._write_json(409, {"error": "project_key_exists"})
-            return
-        except OSError as exc:
-            target = original_key or _safe_project_key(str(raw_project.get("key") or "project"))
-            _log(f"projects config save failed: {exc}")
-            _audit_event("projects_config_save", actor=self.client_address[0], target=target, success=False, detail={"error": str(exc)})
-            self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
-            return
-        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
-            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
-            return
-        _log(f"projects config saved project={project.key} file={PROJECTS_CONFIG_FILE}")
-        _audit_event("projects_config_save", actor=self.client_address[0], target=project.key, success=True, detail={"original_key": original_key})
-        self._write_json(200, _projects_config_payload(include_secret=True))
-
-    def _handle_project_guidance(self, action: str) -> None:
-        try:
-            data = _read_json_body(self, max_bytes=128 * 1024)
-            raw = data.get("project")
-            if not isinstance(raw, dict):
-                raise ValueError("请填写项目配置")
-            if action == "inspect":
-                environment = {key: value for key, value in os.environ.items()
-                               if key not in _DEPLOY_CONTROL_SECRET_ENV_NAMES}
-                repo = str(raw.get("repo") or "").strip()
-                provider = project_guidance.provider_info(repo, str(raw.get("repository_provider") or "auto"))
-                result = project_guidance.inspect_repository(
-                    repo, str(raw.get("branch") or "").strip(), env=environment,
-                )
-                result["provider"] = provider
-                if result.get("ok") and result.get("ingress"):
-                    result["warnings"] = list(dict.fromkeys(result.get("warnings", []) +
-                        entrypoint_checks.entry_advice(result["ingress"])))
-                if not result.get("ok"):
-                    result["ssh_public_keys"] = _ssh_public_keys()
-            else:
-                result = _project_preview(_project_from_form(raw))
-        except (ValueError, OSError) as exc:
-            self._write_json(400, {"error": "project_guidance_failed", "detail": str(exc)})
-            return
-        _audit_event(f"project_{action}", actor=self.client_address[0], success=result.get("ok", True))
-        self._write_json(200, result)
-
-    def _handle_projects_config_bootstrap(self) -> None:
-        try:
-            data = _read_json_body(self, max_bytes=128 * 1024)
-        except (ValueError, json.JSONDecodeError) as exc:
-            self._write_json(400, {"error": "invalid_json", "detail": str(exc)})
-            return
-
-        raw_project = data.get("project", data)
-        if not isinstance(raw_project, dict):
-            self._write_json(400, {"error": "invalid_project"})
-            return
-        options = data.get("options") if isinstance(data.get("options"), dict) else {}
-        environment = options.get("environment")
-        try:
-            project_guidance.validate_repository(str(raw_project.get("repo") or ""), str(raw_project.get("branch") or "main"))
-            candidate = _project_from_form(raw_project)
-            preview = _project_preview(candidate)
-            if preview.get("directory_conflict"):
-                conflict = preview["directory_conflict"]
-                self._write_json(409, {"error": "existing_directory", "detail": conflict["message"], "directory_conflict": conflict})
-                return
-            if environment is not None:
-                docker_onboarding.environment_values(environment, candidate.docker_config.get("environment", []))
-        except (ValueError, OSError) as exc:
-            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
-            return
-        original_key_raw = data.get("original_key") or raw_project.get("original_key") or ""
-        original_key = _safe_project_key(str(original_key_raw)) if original_key_raw else ""
-        try:
-            project = _save_project_transaction(raw_project, original_key)
-        except _ProjectKeyExistsError:
-            self._write_json(409, {"error": "project_key_exists"})
-            return
-        except OSError as exc:
-            target = original_key or _safe_project_key(str(raw_project.get("key") or "project"))
-            _log(f"projects bootstrap config save failed: {exc}")
-            _audit_event("projects_config_bootstrap", actor=self.client_address[0], target=target, success=False, detail={"error": str(exc)})
-            self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
-            return
-        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
-            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
-            return
-
-        write_service = _bool_config(options.get("write_service"), True)
-        result = (_bootstrap_project(project, write_service=write_service, environment=environment)
-                  if project.docker_config else _bootstrap_project(project, write_service=write_service))
-        _log(f"project bootstrap project={project.key} ok={result.get('ok')}")
-        _audit_event(
-            "projects_config_bootstrap",
-            actor=self.client_address[0],
-            target=project.key,
-            success=bool(result.get("ok")),
-            detail={"service_written": result.get("service_written"), "results": result.get("results")},
-        )
-        payload = _projects_config_payload(include_secret=True)
-        payload["bootstrap"] = result
-        self._write_json(200, payload)
-
-    def _handle_projects_config_nginx(self) -> None:
-        try:
-            data = _read_json_body(self, max_bytes=128 * 1024)
-        except (ValueError, json.JSONDecodeError) as exc:
-            self._write_json(400, {"error": "invalid_json", "detail": str(exc)})
-            return
-
-        raw_project = data.get("project", data)
-        if not isinstance(raw_project, dict):
-            self._write_json(400, {"error": "invalid_project"})
-            return
-        original_key_raw = data.get("original_key") or raw_project.get("original_key") or ""
-        original_key = _safe_project_key(str(original_key_raw)) if original_key_raw else ""
-        try:
-            project = _save_project_transaction(raw_project, original_key)
-        except _ProjectKeyExistsError:
-            self._write_json(409, {"error": "project_key_exists"})
-            return
-        except OSError as exc:
-            target = original_key or _safe_project_key(str(raw_project.get("key") or "project"))
-            _log(f"projects nginx config save failed: {exc}")
-            _audit_event("projects_config_nginx", actor=self.client_address[0], target=target, success=False, detail={"error": str(exc)})
-            self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
-            return
-        except Exception as exc:  # noqa: BLE001 - normalize validation errors for UI
-            self._write_json(400, {"error": "invalid_project", "detail": str(exc)})
-            return
-
-        options = data.get("options") if isinstance(data.get("options"), dict) else {}
-        issue_https = _bool_config(options.get("issue_https"), project.app_https)
-        result = _configure_project_nginx(project, issue_https=issue_https)
-        _log(f"project nginx config project={project.key} domain={result.get('domain', '')} ok={result.get('ok')}")
-        _audit_event(
-            "projects_config_nginx",
-            actor=self.client_address[0],
-            target=project.key,
-            success=bool(result.get("ok")),
-            detail={"domain": result.get("domain"), "results": result.get("results")},
-        )
-        payload = _projects_config_payload(include_secret=True)
-        payload["nginx"] = result
-        self._write_json(200, payload)
-
-    def _handle_projects_config_doctor(self, query: dict[str, list[str]]) -> None:
-        key = _safe_project_key(query.get("project", [""])[0] or query.get("key", [""])[0])
-        project = PROJECTS.get(key)
-        if not project:
-            self._write_json(404, {"error": "project_not_found"})
-            return
-        self._write_json(200, _project_doctor(project))
-
-    def _handle_projects_config_delete(self, query: dict[str, list[str]]) -> None:
-        key = _safe_project_key(query.get("project", [""])[0] or query.get("key", [""])[0])
-        try:
-            _delete_project_transaction(key)
-        except _ProjectNotFoundError:
-            self._write_json(404, {"error": "project_not_found"})
-            return
-        except _ProjectRunningError:
-            self._write_json(409, {"error": "project_is_running", "detail": "该项目有正在执行或排队的部署任务，请等待任务结束后再删除接入记录；无需停止业务服务"})
-            return
-        except certificates.CertificateError as exc:
-            self._write_json(409, {"error": "certificate_in_use", "detail": str(exc)})
-            return
-        except OSError as exc:
-            _log(f"projects config delete failed: {exc}")
-            _audit_event("projects_config_delete", actor=self.client_address[0], target=key, success=False, detail={"error": str(exc)})
-            self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
-            return
-        _log(f"projects config deleted project={key} file={PROJECTS_CONFIG_FILE}")
-        _audit_event("projects_config_delete", actor=self.client_address[0], target=key, success=True)
-        self._write_json(200, _projects_config_payload(include_secret=True))
-
-    def _handle_projects_config_secret(self, query: dict[str, list[str]]) -> None:
-        key = _safe_project_key(query.get("project", [""])[0] or query.get("key", [""])[0])
-        try:
-            _reset_project_secret_transaction(key)
-        except _ProjectNotFoundError:
-            self._write_json(404, {"error": "project_not_found"})
-            return
-        except OSError as exc:
-            _log(f"projects config secret reset failed: {exc}")
-            _audit_event("projects_config_secret_reset", actor=self.client_address[0], target=key, success=False, detail={"error": str(exc)})
-            self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
-            return
-        _log(f"projects config secret reset project={key}")
-        _audit_event("projects_config_secret_reset", actor=self.client_address[0], target=key, success=True)
-        self._write_json(200, _projects_config_payload(include_secret=True))
 
     def _handle_notifications_save(self) -> None:
         try:
@@ -5569,7 +3064,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         _log(f"notifications config saved file={PROJECTS_CONFIG_FILE}")
         _audit_event("notifications_save", actor=self.client_address[0], target=str(PROJECTS_CONFIG_FILE), success=True)
-        self._write_json(200, _projects_config_payload(include_secret=True))
+        self._write_json(200, {"notifications": _notification_config_payload(include_secret=True)})
 
     def _handle_notifications_test(self) -> None:
         try:
@@ -5592,21 +3087,6 @@ class Handler(BaseHTTPRequestHandler):
         _audit_event("notifications_test", actor=self.client_address[0], success=ok, detail={"results": results})
         self._write_json(200, {"ok": ok, "results": results})
 
-    def _handle_preflight(self, query: dict[str, list[str]]) -> None:
-        project = _project_for_manual(query)
-        if not project:
-            self._write_json(404, {"error": "project_not_found"})
-            return
-        self._write_json(200, _preflight_payload(project))
-
-    def _handle_force_unlock(self) -> None:
-        ok, payload = _force_unlock_deploy()
-        _audit_event("force_unlock", actor=self.client_address[0], success=ok, detail=payload)
-        if ok:
-            _log(f"force unlock requested actor={self.client_address[0]} result={payload.get('message')}")
-            self._write_json(200, payload)
-        else:
-            self._write_json(409, payload)
 
     def _handle_docker_logs(self, query: dict[str, list[str]]) -> None:
         try:
@@ -5705,244 +3185,6 @@ class Handler(BaseHTTPRequestHandler):
                      success=True, detail={"action": action})
         self._write_json(200, {"ok": True, "output": output})
 
-    def _handle_redeploy(self, query: dict[str, list[str]]) -> None:
-        if _jobs.full():
-            self._write_json(429, {"error": "deploy_queue_full"})
-            return
-        project = _project_for_manual(query)
-        if not project:
-            self._write_json(404, {"error": "project_not_found"})
-            return
-        if not project.enabled:
-            self._write_json(403, {"error": "project_disabled"})
-            return
-        if not project.manual_deploy_enabled:
-            self._write_json(403, {"error": "manual_deploy_disabled"})
-            return
-        job = _manual_deploy_job(self.client_address[0], project)
-        try:
-            _enqueue_job(job)
-        except _MaintenanceActiveError:
-            self._write_json(503, {"error": "maintenance_in_progress"})
-            return
-        except _MaintenanceLockError as exc:
-            _log(f"manual deploy rejected because maintenance lock is unavailable: {exc}")
-            self._write_json(503, {"error": "maintenance_lock_unavailable"})
-            return
-        except queue.Full:
-            self._write_json(429, {"error": "deploy_queue_full"})
-            return
-        _update_state(last_manual_trigger_at=_now_text(), queue_size=_jobs.qsize())
-        _log(f"manual deploy queued project={project.key} after={job['after']} actor={job['actor']}")
-        _audit_event("manual_deploy", actor=self.client_address[0], target=project.key, success=True, detail={"after": job["after"]})
-        self._write_json(202, {
-            "status": "queued",
-            "project": project.key,
-            "queue_size": _jobs.qsize(),
-            "after": job["after"],
-        })
-
-    def _handle_rollback(self, query: dict[str, list[str]]) -> None:
-        if _jobs.full():
-            self._write_json(429, {"error": "deploy_queue_full"})
-            return
-        project = _project_for_manual(query)
-        if not project:
-            self._write_json(404, {"error": "project_not_found"})
-            return
-        if not project.enabled:
-            self._write_json(403, {"error": "project_disabled"})
-            return
-        if not project.manual_deploy_enabled:
-            self._write_json(403, {"error": "manual_deploy_disabled"})
-            return
-        with _state_lock:
-            state = json.loads(json.dumps(_state, ensure_ascii=False))
-        rollback_target = _project_rollback_target(state, project)
-        if not project.rollback_script and not rollback_target:
-            self._write_json(400, {"error": "rollback_not_available"})
-            return
-        job = _rollback_job(self.client_address[0], project, state)
-        try:
-            _enqueue_job(job)
-        except _MaintenanceActiveError:
-            self._write_json(503, {"error": "maintenance_in_progress"})
-            return
-        except _MaintenanceLockError as exc:
-            _log(f"rollback rejected because maintenance lock is unavailable: {exc}")
-            self._write_json(503, {"error": "maintenance_lock_unavailable"})
-            return
-        except queue.Full:
-            self._write_json(429, {"error": "deploy_queue_full"})
-            return
-        _update_state(last_manual_trigger_at=_now_text(), queue_size=_jobs.qsize())
-        _log(f"rollback queued project={project.key} after={job['after']} actor={job['actor']}")
-        _audit_event("rollback", actor=self.client_address[0], target=project.key, success=True, detail={"after": job["after"]})
-        self._write_json(202, {
-            "status": "queued",
-            "action": "rollback",
-            "project": project.key,
-            "queue_size": _jobs.qsize(),
-            "after": job["after"],
-        })
-
-    def _handle_cancel(self, query: dict[str, list[str]]) -> None:
-        requested = query.get("project", [""])[0] or query.get("project_key", [""])[0]
-        all_requested = (query.get("all", [""])[0] or "").strip().lower() in {"1", "true", "yes", "all"}
-        if not requested and not all_requested:
-            self._write_json(400, {"error": "project_required"})
-            return
-        project: DeployProject | None = None
-        if requested:
-            project = PROJECTS.get(_safe_project_key(requested))
-            if not project:
-                self._write_json(404, {"error": "project_not_found"})
-                return
-
-        canceled_jobs = _cancel_queued_jobs(project)
-        running_canceled = False
-        running_project_key = ""
-        with _state_lock:
-            current = _state.get("current_deploy")
-        if isinstance(current, dict) and current.get("status") == "running":
-            running_project_key = str(current.get("project_key") or DEFAULT_PROJECT_KEY)
-            if project is None or running_project_key == project.key:
-                with _deploy_process_lock:
-                    proc = _deploy_process
-                    if proc is not None and proc.poll() is None:
-                        global _cancel_requested
-                        _cancel_requested = {
-                            "actor": self.client_address[0],
-                            "project_key": running_project_key,
-                            "at": _now_text(),
-                        }
-                        running_canceled = True
-                if running_canceled and proc is not None:
-                    _update_current_deploy(
-                        phase="canceling",
-                        phase_label=_phase_label("canceling"),
-                        phase_detail=f"取消人 {self.client_address[0]}",
-                    )
-                    _terminate_process(proc)
-
-        target = project.key if project else "all"
-        _audit_event(
-            "deploy_cancel",
-            actor=self.client_address[0],
-            target=target,
-            success=bool(running_canceled or canceled_jobs),
-            detail={
-                "running_canceled": running_canceled,
-                "running_project": running_project_key,
-                "queued_canceled": len(canceled_jobs),
-            },
-        )
-        self._write_json(202, {
-            "status": "cancel_requested" if running_canceled else "queued_canceled",
-            "project": target,
-            "running_canceled": running_canceled,
-            "queued_canceled": len(canceled_jobs),
-            "queue_size": _jobs.qsize(),
-        })
-
-    def _handle_webhook(self, parsed: Any) -> None:
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        if length <= 0 or length > MAX_BODY_BYTES:
-            self._write_json(413, {"error": "invalid_body_size"})
-            return
-
-        body = self.rfile.read(length)
-        query = parse_qs(parsed.query)
-        try:
-            payload = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            self._write_json(400, {"error": "invalid_json"})
-            return
-
-        if not isinstance(payload, dict):
-            self._write_json(400, {"error": "invalid_json"})
-            return
-
-        client_ip = _request_client_ip(self)
-        project = _project_for_webhook(payload, query)
-        if not project:
-            _log(f"webhook rejected from {client_ip}: project not found")
-            self._write_json(403, {"error": "forbidden"})
-            return
-        if not _valid_signature_for_project(project, self.headers, body, query):
-            _log(f"webhook rejected from {client_ip}: invalid secret project={project.key}")
-            self._write_json(403, {"error": "forbidden"})
-            return
-        if not project.enabled:
-            ignored = {"project_key": project.key, "reason": "project_disabled", "at": _now_text()}
-            _update_state(last_ignored_webhook=ignored)
-            _log(f"webhook ignored project={project.key}: project disabled")
-            self._write_json(202, {"status": "ignored", "project": project.key, "reason": "project_disabled"})
-            return
-
-        event_headers = {"X-GitHub-Event": "push", "X-Gitea-Event": "push", "X-Gitee-Event": "Push Hook", "X-Gitlab-Event": "Push Hook"}
-        unsupported_event = any(self.headers.get(header) and self.headers.get(header).lower() != expected.lower()
-                                for header, expected in event_headers.items())
-        if project.trigger_mode == "manual" or unsupported_event:
-            reason = "automatic_updates_disabled" if project.trigger_mode == "manual" else "event_mismatch"
-            _update_state(last_ignored_webhook={"project_key": project.key, "reason": reason, "at": _now_text()})
-            self._write_json(202, {"status": "ignored", "project": project.key, "reason": reason})
-            return
-
-        ref = _extract_ref(payload)
-        expected_ref = f"refs/heads/{project.branch}"
-        if ref != expected_ref:
-            ignored = {"project_key": project.key, "ref": ref, "expected": expected_ref, "at": _now_text()}
-            _update_state(last_ignored_webhook=ignored)
-            _log(f"webhook ignored project={project.key} ref={ref}, expected={expected_ref}")
-            self._write_json(202, {"status": "ignored", "project": project.key, "reason": "branch_mismatch"})
-            return
-
-        job = {
-            "project_key": project.key,
-            "project_name": project.name,
-            "ref": ref,
-            "before": _extract_commit(payload, "before"),
-            "after": _extract_commit(payload, "after"),
-            "source": "webhook",
-            "actor": self.headers.get("X-Gitee-Event", "") or self.client_address[0],
-            **_extract_commit_details(payload),
-        }
-        delivery_id = _webhook_delivery_id(self.headers, payload)
-        dedupe_key = _webhook_dedupe_key(
-            project.key, ref, str(job.get("before") or ""), str(job.get("after") or ""), delivery_id, body,
-        )
-        job["dedupe_key"] = dedupe_key
-        duplicate = _reserve_webhook_delivery(dedupe_key, job)
-        if duplicate:
-            _log(f"webhook duplicate ignored project={project.key} key={dedupe_key[:80]}")
-            self._write_json(202, {"status": "duplicate", "project": project.key,
-                                   "queue_size": _jobs.qsize(), "previous": duplicate.get("status", "queued")})
-            return
-        try:
-            _enqueue_job(job)
-        except _MaintenanceActiveError:
-            _remove_webhook_delivery(dedupe_key)
-            self._write_json(503, {"error": "maintenance_in_progress"})
-            return
-        except _MaintenanceLockError as exc:
-            _remove_webhook_delivery(dedupe_key)
-            _log(f"webhook rejected because maintenance lock is unavailable: {exc}")
-            self._write_json(503, {"error": "maintenance_lock_unavailable"})
-            return
-        except queue.Full:
-            _remove_webhook_delivery(dedupe_key)
-            self._write_json(429, {"error": "deploy_queue_full"})
-            return
-        except RuntimeError as exc:
-            _remove_webhook_delivery(dedupe_key)
-            _log(f"webhook enqueue failed project={project.key}: {exc}")
-            self._write_json(503, {"error": "deploy_queue_unavailable"})
-            return
-
-        _update_state(last_webhook_at=_now_text(), queue_size=_jobs.qsize())
-        _log(f"webhook accepted project={project.key} ref={ref} after={job['after']}")
-        self._write_json(202, {"status": "queued", "project": project.key, "queue_size": _jobs.qsize()})
 
     def log_message(self, fmt: str, *args: Any) -> None:
         message = _redact_http_log_message(fmt % args)
@@ -5957,8 +3199,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _print_password_hash() -> None:
-    first = getpass.getpass("新的部署面板密码: ")
-    second = getpass.getpass("再次输入部署面板密码: ")
+    first = getpass.getpass("新的面板密码: ")
+    second = getpass.getpass("再次输入面板密码: ")
     if not first:
         raise SystemExit("密码不能为空")
     if first != second:
@@ -5978,8 +3220,8 @@ def _write_admin_password(password: str) -> None:
 
 
 def _set_admin_password() -> None:
-    first = getpass.getpass("新的部署面板密码: ")
-    second = getpass.getpass("再次输入部署面板密码: ")
+    first = getpass.getpass("新的面板密码: ")
+    second = getpass.getpass("再次输入面板密码: ")
     if first != second:
         raise SystemExit("两次输入的密码不一致")
     _write_admin_password(first)
@@ -6005,7 +3247,7 @@ def _print_cli_help() -> None:
         "  set-password              set the administrator password and revoke sessions\n"
         "  set-password-stdin        read the new password from stdin (installer use)\n"
         "  reset-session             revoke all administrator sessions\n"
-        "  validate-config           validate projects configuration without starting HTTP\n"
+        "  validate-config           validate site configuration without starting HTTP\n"
         "  validate-auth             validate credentials from the process environment\n"
         "  hash-password             print credentials without writing the env file\n"
         "  admin set-password        alias for set-password\n"
@@ -6048,67 +3290,10 @@ def _validate_ui_auth_config() -> None:
         )
 
 
-def _project_script_path(project: DeployProject, action: str = "deploy") -> Path:
-    script_text = project.rollback_script if action == "rollback" and project.rollback_script else project.script
-    script = Path(script_text)
-    return script if script.is_absolute() else project.workdir / script
-
-
-def _script_is_executable(path: Path) -> bool:
-    if os.name == "nt":
-        return path.is_file()
-    return path.is_file() and os.access(path, os.X_OK)
-
-
-def _validate_projects_runtime_config() -> list[DeployProject]:
+def _validate_projects_runtime_config() -> list[Site]:
     if _RUNTIME_CONFIG_ERROR is not None:
         raise SystemExit(str(_RUNTIME_CONFIG_ERROR))
-    if PROJECTS and (not DEFAULT_PROJECT_KEY or DEFAULT_PROJECT_KEY not in PROJECTS):
-        raise SystemExit("projects config did not load a valid default project")
-
-    enabled_projects = [project for project in PROJECTS.values() if project.enabled]
-    weak_secrets = [
-        project.key
-        for project in enabled_projects
-        if not _is_strong_webhook_secret(project.webhook_secret)
-    ]
-    if weak_secrets:
-        raise SystemExit(
-            "webhook secret missing, too short, or still a placeholder for projects: "
-            f"{', '.join(weak_secrets)}"
-        )
-    missing_scripts = [
-        f"{project.key}:{_project_script_path(project)}"
-        for project in enabled_projects
-        if not _project_script_path(project).is_file()
-    ]
-    if missing_scripts:
-        raise SystemExit(f"deploy script not found: {', '.join(missing_scripts)}")
-    non_executable_scripts = [
-        f"{project.key}:{_project_script_path(project)}"
-        for project in enabled_projects
-        if not _script_is_executable(_project_script_path(project))
-    ]
-    if non_executable_scripts:
-        raise SystemExit(f"deploy script is not executable, run chmod +x: {', '.join(non_executable_scripts)}")
-    missing_rollback_scripts = [
-        f"{project.key}:{_project_script_path(project, action='rollback')}"
-        for project in enabled_projects
-        if project.rollback_script and not _project_script_path(project, action="rollback").is_file()
-    ]
-    if missing_rollback_scripts:
-        raise SystemExit(f"rollback script not found: {', '.join(missing_rollback_scripts)}")
-    non_executable_rollback_scripts = [
-        f"{project.key}:{_project_script_path(project, action='rollback')}"
-        for project in enabled_projects
-        if project.rollback_script and not _script_is_executable(_project_script_path(project, action="rollback"))
-    ]
-    if non_executable_rollback_scripts:
-        raise SystemExit(
-            "rollback script is not executable, run chmod +x: "
-            f"{', '.join(non_executable_rollback_scripts)}"
-        )
-    return enabled_projects
+    return [site for site in PROJECTS.values() if site.enabled]
 
 
 def main() -> None:
@@ -6134,8 +3319,8 @@ def main() -> None:
     if arguments == ["validate-config"]:
         enabled_projects = _validate_projects_runtime_config()
         print(
-            "projects config OK: "
-            f"file={PROJECTS_CONFIG_FILE} projects={len(PROJECTS)} enabled={len(enabled_projects)}"
+            "sites config OK: "
+            f"file={SITES_CONFIG_FILE} sites={len(PROJECTS)} enabled={len(enabled_projects)}"
         )
         return
     if arguments:
@@ -6151,18 +3336,12 @@ def main() -> None:
         raise SystemExit(f"maintenance lock is unavailable: {exc}") from exc
 
     _read_state()
-    restored_jobs = _restore_queued_jobs()
-    if restored_jobs:
-        _log(f"restored queued deploy jobs count={restored_jobs}")
-    if ALLOW_QUERY_WEBHOOK_TOKEN:
-        _log("security warning: query-string webhook tokens are enabled and may leak through access logs")
-    threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_realtime_metric_sampler, name="realtime-metric-sampler", daemon=True).start()
     threading.Thread(target=_system_metric_sampler, name="system-metric-sampler", daemon=True).start()
     threading.Thread(target=_docker_log_metric_sampler, name="docker-log-metric-sampler", daemon=True).start()
     threading.Thread(target=_health_check_sampler, name="health-check-sampler", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    _log(f"deploy agent listening on {HOST}:{PORT}, projects={len(PROJECTS)} default={DEFAULT_PROJECT_KEY}")
+    _log(f"monitoring agent listening on {HOST}:{PORT}, sites={len(PROJECTS)}")
     server.serve_forever()
 
 

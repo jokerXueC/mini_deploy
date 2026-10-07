@@ -37,8 +37,9 @@ def test_project_config_runtime_path_is_data_home() -> None:
     assert 'PROJECTS_FILE="${DEPLOY_PROJECTS_FILE:-}"' in DOCTOR_SCRIPT
     assert 'PROJECTS_FILE="$(env_file_value "DEPLOY_PROJECTS_FILE")"' in DOCTOR_SCRIPT
     assert 'PROJECTS_FILE="${PROJECTS_FILE:-$DATA_HOME/projects.json}"' in DOCTOR_SCRIPT
-    assert 'check_file "$PROJECTS_FILE" "projects config"' in DOCTOR_SCRIPT
-    assert 'nano $DATA_HOME/projects.json' in INSTALLER
+    assert 'SITES_FILE="$(dirname -- "$STATE_FILE")/sites.json"' in DOCTOR_SCRIPT
+    assert 'check_file "$CONFIG_FILE" "sites config (including legacy fallback)"' in DOCTOR_SCRIPT
+    assert 'Site configuration: $DATA_HOME/sites.json' in INSTALLER
 
 
 def test_doctor_uses_agent_service_and_state_layout_with_env_precedence() -> None:
@@ -57,6 +58,7 @@ def test_doctor_delegates_full_config_validation_to_agent_cli() -> None:
     fixed_path = 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
     validation = (
         'MINI_DEPLOY_HOME="$APP_HOME" \\\n'
+        '    DEPLOY_AGENT_ENV_FILE="$ENV_FILE" \\\n'
         '    DEPLOY_AGENT_STATE_FILE="$STATE_FILE" \\\n'
         '    DEPLOY_PROJECTS_FILE="$PROJECTS_FILE" \\\n'
         '    "$PYTHON_BIN" "$APP_HOME/agent.py" validate-config'
@@ -76,7 +78,7 @@ def test_installer_prints_parameterized_admin_commands_for_custom_layouts() -> N
     assert f"{command_prefix}set-password" in INSTALLER
     assert f"{command_prefix}reset-session" in INSTALLER
     assert 'DEPLOY_AGENT_ENV_FILE=$ENV_FILE bash $APP_HOME/scripts/doctor.sh' in INSTALLER
-    assert "Agent validates projects config" in DOCTOR_SCRIPT
+    assert "Agent validates sites config" in DOCTOR_SCRIPT
     assert "json.loads" not in DOCTOR_SCRIPT
 
 
@@ -110,9 +112,9 @@ def test_existing_install_never_replaces_missing_projects_with_example() -> None
     assert '"$PROJECTS_LAYOUT_STATE" == "data"' in plan
     assert "refusing to create an example" in plan
     assert "refusing to silently replace it with an example" in plan
-    assert '"$EXISTING_INSTALLATION" != "true"' in plan
-    assert 'validate_projects_json_structure "$SOURCE_DIR/examples/projects.empty.json" "release"' in plan
-    assert 'atomic_copy_projects_file "$SOURCE_DIR/examples/projects.empty.json" "$data_projects_file" "release"' in INSTALLER
+    assert 'if [[ -f "$DATA_HOME/sites.json" ]]' in plan
+    assert 'examples/projects.empty.json' not in INSTALLER
+    assert 'atomic_copy_projects_file "$empty_config" "$DATA_HOME/sites.json" "private"' in INSTALLER
 
 
 def test_project_config_structure_is_checked_before_backup_and_after_copy() -> None:
@@ -193,7 +195,7 @@ def test_data_home_is_recognized_by_project_config_alone() -> None:
 def test_release_symlinks_are_rejected_before_backup_and_before_chmod() -> None:
     source_validation = INSTALLER.index("\nvalidate_release_source_tree\n")
     backup_call = INSTALLER.index('bash "$SOURCE_DIR/scripts/backup-installation.sh"')
-    copy_block = INSTALLER.index('rsync -a -x --delete')
+    copy_block = INSTALLER.index('rsync -a -x --relative')
     copied_tree_validation = INSTALLER.index("\nsecure_app_release_files\n", copy_block)
     executable_chmod = INSTALLER.index('chmod +x "$APP_HOME/agent.py"', copy_block)
 
@@ -204,8 +206,10 @@ def test_release_symlinks_are_rejected_before_backup_and_before_chmod() -> None:
 def test_installer_never_recursively_changes_persistent_app_tree() -> None:
     assert 'chown -R root:root "$APP_HOME"' not in INSTALLER
     assert 'chmod -R go-w "$APP_HOME"' not in INSTALLER
-    for persistent_name in ("workspace", "projects.json", ".backups", "state.json", "audit.jsonl"):
-        assert persistent_name in INSTALLER
+    manifest = INSTALLER[INSTALLER.index("RELEASE_ENTRIES=("):INSTALLER.index("\n)")]
+    for persistent_name in ("workspace", "projects.json", "sites.json", "monitoring-state.json",
+                            ".backups", "state.json", "audit.jsonl"):
+        assert persistent_name not in manifest
 
 
 def test_control_files_require_exact_managed_markers() -> None:
@@ -292,7 +296,8 @@ def test_nested_mounts_are_rejected_before_recursive_operations() -> None:
     assert 'assert_no_nested_mounts "$APP_HOME" "APP_HOME"' in BACKUP_SCRIPT
     assert 'assert_no_nested_mounts "$DATA_HOME" "DATA_HOME"' in BACKUP_SCRIPT
     assert "--one-file-system -czf" in BACKUP_SCRIPT
-    assert "rsync -a -x --delete" in INSTALLER
+    assert "rsync -a -x --relative" in INSTALLER
+    assert "--delete" not in INSTALLER
     assert "chown -R --one-file-system" not in INSTALLER
     assert 'find "$item" -xdev -exec chown -h -- root:root {} +' in INSTALLER
     assert 'find "$APP_HOME/$name" -xdev -exec chown -h -- root:root {} +' in INSTALLER

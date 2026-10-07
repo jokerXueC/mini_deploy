@@ -1,70 +1,50 @@
 # mini_deploy
 
-Lightweight self-hosted deploy panel for small servers.
+Lightweight, self-hosted server operations and request monitoring panel for Linux.
+The name stays mini_deploy; Git-based application deployment is no longer part of
+the product.
 
-mini_deploy receives Git webhooks, runs your project deploy script, and shows deploy history, logs, server status, and Docker status in a simple web panel.
+- [中文快速上手](docs/QUICKSTART.zh-CN.md)
+- [首次使用与升级说明](docs/BEGINNER_DEPLOY_FLOW.zh-CN.md)
+- [Linux 验收清单](docs/LINUX_TEST.zh-CN.md)
+- [独立请求网关](docs/REQUEST_GATEWAY.zh-CN.md)
+- [Roadmap](docs/ROADMAP.zh-CN.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
-- 中文快速上手：[docs/QUICKSTART.zh-CN.md](docs/QUICKSTART.zh-CN.md)
-- Linux 实测清单：[docs/LINUX_TEST.zh-CN.md](docs/LINUX_TEST.zh-CN.md)
-- 统一请求网关：[docs/REQUEST_GATEWAY.zh-CN.md](docs/REQUEST_GATEWAY.zh-CN.md)
-- 开源开发路线图：[docs/ROADMAP.zh-CN.md](docs/ROADMAP.zh-CN.md)
-- 安全策略：[SECURITY.md](SECURITY.md)
-- 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
-- 变更记录：[CHANGELOG.md](CHANGELOG.md)
+## Scope
 
-## What It Does
+- CPU, memory, disk and network monitoring.
+- Website availability, response latency and live TLS certificate checks: enter a URL; no proxy changes required.
+- Sustained alerts, recovery messages, repeat limits and temporary notification mute via WeCom, DingTalk or email.
+- Docker container status, logs and management; image listing, search, pull and removal.
+- Edit existing host Docker mirror settings in the panel, with validation, backups and automatic activation.
+- Local or Docker Nginx, business sites and uploaded PEM certificate management.
+- Request collection from supported Nginx/Caddy logs.
+- Independent Docker request gateways for HTTP, SSE and WebSocket traffic.
 
-- Receives Gitee / GitHub / GitLab / Gitea push webhooks
-- Runs one deploy script per project
-- Supports multiple projects
-- Guides repository access, deployment plans, and update triggers separately; no LLM required
-- Supports existing scripts, user-defined build/restart steps, Compose, Dockerfile, and optional runtime templates
-- Adopts an existing service without fetching, checking out code, or restarting it during preparation
-- Provides manual deploy, rollback, cancel, logs, and history
-- Shows CPU, memory, disk, network, and Docker container status
-- Generates per-project Nginx reverse proxy config for business domains
-- Manages uploaded PEM certificates for project domains from the UI: expiry, replacement, HTTPS activation and removal
-- Detects local and Docker Nginx, saves a shared runtime selection and checks each project's upstream connectivity
-- Reads request records from the selected Nginx or a local Docker Caddy container when JSON access logging is enabled
-- Optionally runs independent Docker request gateways: forward HTTP traffic, SSE and WebSocket, and record status and duration without configuring the existing proxy's access logs
-- Guides supported Caddy/Nginx traffic connections in the UI: detect, preview, back up, apply and disconnect; provides diagnostic commands and field guidance when detection is insufficient
-- Deduplicates retried webhook deliveries and persists queued jobs across Agent restarts
-- Continuously probes configured health URLs and shows the latest result without automatically restarting business services
-- Uses a password-protected web UI
-- Requires no database
+Business services must already be running. There is no repository onboarding,
+deployment script form, push-to-deploy WebHook, build pipeline, application rollback
+or automatic generation of business runtime files.
 
-## What It Does Not Do
+Sites are independent of Git deployment and support create, read, update and delete
+through `/sites`, `/sites/save` and `/sites/delete`. Enter a name, domain and port;
+configure the backend address in the Nginx entry settings. Health checks are optional,
+and the advanced site key is generated automatically when omitted.
 
-mini_deploy does not automatically understand every application.
+## Install And Sign In
 
-For each business project, you still need to confirm:
+Requirements: Linux with root/sudo, systemd, Python 3.10+ and Git to download
+mini_deploy itself. Docker and Nginx are optional, depending on the features used.
+No business repository or deployment credentials are needed.
 
-- how to build it
-- how to start or restart it
-- which port it listens on
-- which health URL means it is running correctly
-
-Choose first deployment or an already-running service, connect the repository, then confirm its actual deployment method and review the execution plan. The panel can prepare missing files for selected templates; it does not require every project to use Docker or systemd. Existing scripts are preserved, and custom commands run only during deployment, with the Agent user's privileges.
-
-New wizard projects default to manual updates. For push-to-deploy, explicitly select Push WebHook and configure the URL and Secret in your code platform. Self-hosted GitLab/Gitea can be selected manually; other Git hosts can use manual updates without changing repositories.
-
-## Requirements
-
-- Linux server with root / sudo access
-- Python 3.10 or newer; CI currently verifies Python 3.10-3.13
-- `git` installed before running the installer
-- systemd
-- Optional: Docker, if your projects use Docker. The installer can help install it.
-- Optional: Nginx / Certbot, which the installer can help set up
-
-## Install
+Optional Docker installation supports container management, Docker Nginx and request
+gateways. `SETUP_DOCKER=ask` prompts interactively with a default of No and skips
+installation without a terminal; it never automatically selects Yes. Neither Docker
+Compose nor PyYAML is required.
 
 > [!WARNING]
-> This repository is still preparing its first public test release. The default
-> installer runs the Agent as `root`, and privilege separation, automatic failed
-> upgrade rollback, restore, version rollback, and uninstall are not complete.
-> Use only a dedicated, controlled Linux test server; do not treat the current
-> branch as production-ready.
+> This is a pre-release project. The default installer runs the Agent as root;
+> privilege separation and complete restore/version rollback are unfinished.
+> Use a dedicated, controlled Linux test server.
 
 ```bash
 git clone https://gitee.com/XC1960/mini_deploy.git /root/mini_deploy
@@ -72,236 +52,71 @@ cd /root/mini_deploy
 bash install.sh
 ```
 
-After installation, open `http://<server-public-ip>:6868` and sign in with the
-password you set during installation. No domain, Nginx, or certificate is required.
-The Agent always listens on `0.0.0.0:6868`; the port cannot be overridden. The
-installer updates old host/port settings and its existing Nginx upstreams on upgrade.
-It opens TCP 6868 in active UFW/firewalld installations; allow this port in your
-cloud security group as well. If public-IP detection fails, use the IP shown in
-your cloud console, or set `DEPLOY_PUBLIC_IP` for the printed address.
+Set the administrator password in the installer, then open
+`http://<server-public-ip>:6868`. The Agent listens on `0.0.0.0:6868`; allow TCP
+6868 in the cloud security group and restrict sources. The installer can adjust
+active UFW/firewalld rules. Use HTTPS or an SSH tunnel before sending sensitive
+values. A domain is optional; `DEPLOY_DOMAIN` configures the panel's additional
+Nginx entry point.
 
-Domain/HTTPS access remains optional: provide `DEPLOY_DOMAIN=deploy.example.com`
-when installing to configure the additional Nginx entry point.
+Start with server metrics and Docker status. For an existing website, select a
+supported proxy log source or follow the [request gateway guide](docs/REQUEST_GATEWAY.zh-CN.md).
+Monitoring does not require adding a Git project.
 
-`scripts/bootstrap_server.sh` is an equivalent server-oriented entry point. Copy
-`server.env.example` to `server.env` first if you want to preconfigure the
-installer's location, domain, language, or Docker/Nginx choices.
-Create that file as root (for example,
-`sudo install -m 600 server.env.example server.env`) because the bootstrap
-intentionally requires a root-owned, non-symlink file with mode `0600` or stricter.
+## Upgrade Boundary
 
-Installer-managed paths must be absolute, use the supported characters shown in
-`server.env.example`, point to dedicated directories, and must not overlap. On an
-upgrade, reuse the existing `server.env`; the installer stops instead of silently
-migrating a conflicting state, log, project-config, or service path.
+Deployment pages, queues, script execution and repository detection adapters have
+been removed. Old deployment APIs, including manual deployment, deployment rollback
+and WebHook triggers, return HTTP `410 Gone`.
 
-An unmarked `APP_HOME`, systemd unit, or Nginx configuration that only resembles an
-older mini_deploy installation is rejected by default. After verifying every path and
-taking an independent server snapshot, set
-`DEPLOY_ALLOW_LEGACY_INSTALL_ADOPTION=true` for that reviewed migration only. The
-installer must atomically publish its original-state backup bundle before it adopts
-the files and writes managed markers; return the option to `false` afterwards.
+Sites are saved in `sites.json`. Legacy `projects.json` is read only to extract site
+settings and is not modified. Monitoring writes `monitoring-state.json`; the original
+`state.json` is retained and its deployment queue is never loaded or resumed,
+including after Agent restarts.
 
-The installer asks for language first. Chinese is the default; enter `en` for English.
+Existing server business files, configurations, scripts, services, containers and
+persistent data are retained. Removing deployment support does not uninstall,
+stop or recreate business services. Application releases remain the owner's
+responsibility outside this panel.
 
-During an interactive install, it also asks twice for the administrator password. The
-password hash and an independent Session Secret are written before the service or
-public Nginx route is started. Browser-based administrator initialization is not
-available.
+Reuse the existing installation paths and environment file. Preserve a server
+snapshot and the installer backup before upgrading. Do not remove old
+`projects.json`, state, scripts or business directories to bypass a migration error.
 
-If your projects use Docker Compose and Docker is not installed, the installer will ask whether to install Docker. The default is no.
+## Maintenance
 
-For a non-interactive install, provide a root-readable password file and delete it
-after the installer succeeds:
-
-```bash
-install -m 600 /dev/null /root/.mini-deploy-password
-read -r -s -p "Administrator password: " MINI_DEPLOY_PASSWORD; echo
-printf '%s\n' "$MINI_DEPLOY_PASSWORD" > /root/.mini-deploy-password
-unset MINI_DEPLOY_PASSWORD
-DEPLOY_UI_PASSWORD_FILE=/root/.mini-deploy-password \
-  INSTALL_LANG=en SETUP_NGINX=false SETUP_HTTPS=no SETUP_DOCKER=no bash install.sh
-rm -f /root/.mini-deploy-password
-```
-
-Change the explicit language and setup switches if the unattended environment should
-also configure HTTPS or Docker.
-
-HTTP works without HTTPS:
-
-```text
-http://<server-public-ip>:6868
-```
-
-Use HTTPS for public access when DNS is ready.
-
-## First Project
-
-In the web panel:
-
-1. Click “添加仓库”, paste the repository URL, then connect. Leave the branch empty to detect the default branch.
-2. Confirm the detected runtime. Existing Compose files are preserved. For a Dockerfile, confirm the application and public ports, add required variables and optionally select persistent data directories. Common non-container backends use structured startup entries instead of a full command.
-3. Review the plan and confirm. Click “部署并检查” to prepare files, check prerequisites, and submit the first deployment if checks pass. Missing prerequisites stop the flow so you can fix them and retry using the same project.
-4. Follow progress in deployment logs. For an existing service, use “检测本机项目” to discover Compose metadata, verify the original update arguments, and choose “完成接入（不更新服务）” to register it without restarting it. Directory and service query commands are available when discovery cannot identify the project.
-5. For future automatic deployments, copy the webhook URL and secret from the wizard into your Git platform's webhook settings and select push events. Use Gitee's password/Token field, GitLab's Secret token field, or GitHub's Secret field.
-
-Generated Dockerfile run configuration is kept outside the business repository.
-Environment values are stored in a separate private server file, not project JSON
-or configuration previews. Persistent directories use independent Docker volumes;
-panel configuration backups do not back up those volumes. Databases, additional
-Compose runtime files, repository access and cloud firewall rules still need to
-be ready. Use HTTPS or an SSH tunnel before submitting sensitive values.
-
-New installations start with no projects. The files under `examples/` are reference
-templates only; they are not imported into the active project configuration.
-
-After that, every `git push` to the configured branch can trigger deployment.
-
-For a business domain, open Domains and Certificates, select the project, enter its
-domain and port, then check the preview and confirm. The wizard can install local
-Nginx using apt-get/dnf/yum when absent, and validates the backend before applying an
-HTTP site. The independent Install Nginx form also supports creating a Docker
-container with an HTTP port, automatic directory mounts and optional port 443
-reservation. No project, domain or certificate is required to start HTTP; Docker
-must already be available. Existing containers are never overwritten or recreated.
-DNS and cloud firewall rules remain manual. Existing Nginx instances can
-be selected under Advanced. Docker mode
-requires a local Docker Unix socket and directory bind mounts for `/etc/nginx/conf.d`
-and `/etc/mini-deploy/certificates`; bridge networks need a reachable backend service
-name or host address, not `127.0.0.1`. Existing containers are never recreated automatically.
-See [the quickstart](docs/QUICKSTART.zh-CN.md) and [new-container example](examples/nginx.compose.yml).
-
-If the server already uses Docker Caddy, do not install a second Nginx just for
-request monitoring. Select Docker Caddy in the panel's Request Records view and
-enable JSON access logging in the host-mounted Caddyfile. The panel reads
-`docker logs` and never rewrites an existing Caddy configuration.
-
-## Important Boundary
-
-`deploy.sh` is your project’s deployment recipe.
-
-It usually does:
-
-```text
-git pull
-install dependencies / build
-restart service
-health check
-```
-
-If your service is managed by systemd, the service file is still part of your business project setup. mini_deploy can provide examples and checks, but it cannot guarantee a correct service file for every possible application.
-
-## Common Commands
-
-The following examples assume the default layout. For a custom installation, copy
-the parameterized diagnostic, administrator, and backup commands printed by
-`install.sh`; those commands include the actual environment file, paths, and service
-name.
+Default-layout commands (custom installations must use the parameterized commands
+printed by their installer):
 
 ```bash
 systemctl status mini-deploy-agent
-journalctl -u mini-deploy-agent -f
-curl http://127.0.0.1:6868/health
+journalctl -u mini-deploy-agent -n 100 --no-pager
+curl -fsS http://127.0.0.1:6868/health
 bash /opt/mini_deploy/scripts/doctor.sh
 python3 /opt/mini_deploy/agent.py admin set-password
 python3 /opt/mini_deploy/agent.py admin reset-session
-systemctl restart mini-deploy-agent
-bash /opt/mini_deploy/scripts/backup-installation.sh
-nano /var/lib/mini-deploy-agent/projects.json
 ```
 
-For a custom installation backup, do not only replace the script path: copy the
-complete `Manual safety backup` command printed by `install.sh`, including its
-`APP_HOME`, `DATA_HOME`, `LOG_HOME`, service, Nginx, and backup-directory values.
+Restart the Agent after changing administrator credentials.
 
-The active project configuration is mutable data, not a release file. Its default
-location is `/var/lib/mini-deploy-agent/projects.json`; configuration backups remain
-under `/var/lib/mini-deploy-agent/backups`. During an upgrade, the installer copies
-the old default `/opt/mini_deploy/projects.json` to the data directory only after a
-verified original-state backup. During that first migration, if old and new files
-both exist with different content, or `DEPLOY_PROJECTS_FILE` points outside the two
-managed locations, the installer stops instead of guessing which copy contains the
-current Tokens. Once the environment file already declares the data-directory copy
-authoritative, a root-private legacy copy may remain in `APP_HOME` as stale recovery
-evidence and is no longer used for conflict selection.
-
-Prefer the web panel for project changes. If you edit the file directly, keep it
-root-owned and `0600`, validate the exact file, and restart the Agent because it does
-not watch external file changes:
+The default data directory is `/var/lib/mini-deploy-agent`, logs are in
+`/var/log/mini_deploy`, and installation backups are in
+`/var/backups/mini-deploy-agent`. Keep legacy configuration and backups private:
+they can still contain credentials. A complete backup bundle contains
+`installation.tar.gz`, `manifest` and `complete`. Validate a retained bundle with:
 
 ```bash
-chown root:root /var/lib/mini-deploy-agent/projects.json
-chmod 600 /var/lib/mini-deploy-agent/projects.json
-DEPLOY_PROJECTS_FILE=/var/lib/mini-deploy-agent/projects.json \
-  python3 /opt/mini_deploy/agent.py validate-config
-systemctl restart mini-deploy-agent
+python3 /opt/mini_deploy/scripts/verify_backup.py <bundle-directory>
 ```
 
-When `install.sh` recognizes an existing installation, it first atomically publishes
-a root-private backup bundle under the configured backup directory (default:
-`/var/backups/mini-deploy-agent`). Each `mini-deploy-<timestamp>-<suffix>/` bundle
-contains `installation.tar.gz`, a SHA-256 `manifest`, and a `complete` marker; only a
-bundle with all three files is complete. The backup command prints the
-`<bundle>/installation.tar.gz` path; its sibling `manifest` and `complete` files are
-part of the same backup and must be retained with it. Before changing an existing
-installation, `install.sh` automatically runs the read-only `format=2` validator on
-the new bundle and stops if validation fails. You can also run that validator as
-root, passing either the bundle directory or its archive:
+Validation is read-only and does not restore anything. Panel backups do not replace
+backups of business databases, Docker volumes or external proxy configuration.
+For manual backups and custom paths, use the complete backup command printed by
+the installer. See [Security](SECURITY.md) for remaining limitations.
 
-```bash
-python3 /opt/mini_deploy/scripts/verify_backup.py \
-  /var/backups/mini-deploy-agent/mini-deploy-YYYYmmddTHHMMSSZ-suffix
-```
+## Validation Status
 
-The validator checks the private bundle/control files, manifest and archive digest,
-managed archive roots, hard-link resolution, and Agent release fingerprint without
-extracting or modifying the archive. It counts symbolic links without following them
-and rejects archive members that descend through a link, but it does not approve a
-symbolic link's eventual restore target. A successful result is an integrity and
-structure check; it does not restore anything or prove that a future restore will
-succeed.
-
-The archive contains the Agent program, project configuration, state, environment
-file, old in-tree backups, and the systemd unit or Nginx configuration when those
-control files exist. The
-installer-managed log directory (default: `/var/log/mini_deploy`) remains in place
-and is not selected as a separate archive input. Because the backup script archives
-`APP_HOME` and `DATA_HOME` as complete trees, legacy or manually placed log files
-inside either tree can still be included; treat every archive as sensitive.
-
-The Agent, installer, and standalone backup use
-`/run/mini-deploy-agent/maintenance.lock` to coordinate access. Accepted deploy and
-project rollback jobs keep a shared lock from queue admission until completion. While an
-installer or backup holds the exclusive maintenance lock, new WebHook/manual deploy
-and rollback triggers return HTTP `503`; configuration, state, and audit writes wait
-for maintenance to finish. systemd keeps the root-private runtime directory across
-service restarts with `RuntimeDirectoryPreserve=yes`, and recreates it after a host
-reboot. `/run/mini-deploy-agent` is still ephemeral runtime state and must not hold
-persistent data.
-
-Versioned release rollback and restore commands are still planned; check the roadmap
-before using this pre-release project in production.
-
-For Docker projects, `scripts/deploy.sample.sh` can optionally manage Docker
-registry mirrors. Set `DOCKER_REGISTRY_MIRRORS` in the agent environment only
-when you want the deploy script to update `/etc/docker/daemon.json`; it is
-disabled by default.
-
-## Security
-
-- The default entry point is HTTP on TCP 6868. Restrict allowed sources where practical;
-  optional domain/HTTPS access provides transport encryption.
-- Use a strong UI password.
-- Use a different webhook token for every project.
-- Never append a WebHook Token to the URL. Query-string authentication is disabled
-  by default because URLs leak through proxies, browser history, and logs.
-- Forwarded client-IP headers are ignored by default. Set
-  `DEPLOY_TRUST_LOOPBACK_PROXY_HEADERS=true` in the Agent environment, then restart
-  the service, only when local reverse proxies are trusted and overwrite `X-Real-IP`; headers
-  from non-loopback peers are never trusted. Nginx configuration generated by the
-  installer satisfies those conditions and enables the option automatically.
-- Keep `DEPLOY_UI_SESSION_SECRET` independent from every WebHook Secret.
-- Review deploy scripts before enabling automatic deployment.
-- The default installer currently runs the Agent as `root`. Read
-  [SECURITY.md](SECURITY.md) and use a dedicated controlled test server until
-  privilege separation is implemented.
+The full automated suite passed 476 tests, with 19 skipped because Linux/Docker
+environments were unavailable. Site creation, editing and deletion also passed a UI
+test against the real backend. Linux server acceptance has not yet been performed;
+see the [checklist](docs/LINUX_TEST.zh-CN.md) and [roadmap](docs/ROADMAP.zh-CN.md).

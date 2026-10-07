@@ -1,6 +1,6 @@
 # mini_deploy-managed: agent-systemd-v1
 [Unit]
-Description=mini_deploy lightweight deploy agent
+Description=mini_deploy operations and sites agent
 After=network-online.target
 Wants=network-online.target
 

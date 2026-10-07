@@ -17,13 +17,13 @@ function setup() {
   const timers = new Map();
   let timerId = 0;
   const context = {
-    activeView: 'deploy', eventsRefreshTimer: null, csrfToken: '', lastConfig: null,
+    activeView: 'server', eventsRefreshTimer: null, csrfToken: '', lastConfig: null,
     $: id => {
       if (!elements.has(id)) elements.set(id, {textContent: '', classList: {toggle() {}}});
       return elements.get(id);
     },
     window: {setTimeout: callback => {timers.set(++timerId, callback); return timerId;}, clearTimeout: id => timers.delete(id)},
-    clearRefresh() {}, clearServerRefresh() {}, refresh() {}, refreshServerStatus() {}, refreshCertificates() {},
+    clearServerRefresh() {}, refreshServerStatus() {}, refreshCertificates() {},
     renderAlerts() {}, renderEvents() {}, renderNotificationConfig() {},
     fetchJson: async () => ({csrf_token: 'new-csrf', notifications: {}}),
   };
@@ -36,7 +36,7 @@ function setup() {
 
 test('every tab switches without an undefined refresh function', async () => {
   const {context} = setup();
-  for (const view of ['server', 'events', 'notify', 'certificates', 'deploy']) {
+  for (const view of ['server', 'events', 'notify', 'certificates', 'requests']) {
     context.setView(view);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(context.activeView, view);
@@ -74,14 +74,38 @@ test('events fetch failure is visible and retries', async () => {
   assert.equal(timers.size, 1);
 });
 
-test('webhook URLs retain fixed port for direct IP access and optional proxy prefix', () => {
-  for (const [origin, pathname, expected] of [
-    ['http://203.0.113.10:6868', '/', 'http://203.0.113.10:6868/webhook?project=api'],
-    ['http://203.0.113.10:6868', '/ui', 'http://203.0.113.10:6868/webhook?project=api'],
-    ['https://deploy.example.test', '/deploy/ui', 'https://deploy.example.test/deploy/webhook?project=api'],
-  ]) {
-    const context = vm.createContext({URL, location: {origin, pathname}});
-    vm.runInContext(functionSource('webhookBaseUrl') + '\n' + functionSource('projectWebhookUrl'), context);
-    assert.equal(context.projectWebhookUrl('api'), expected);
+test('removed deployment view and unknown routes fall back to server', () => {
+  const {context} = setup();
+  for (const view of ['deploy', 'unknown', '', null]) {
+    context.setView(view);
+    assert.equal(context.activeView, 'server');
   }
+});
+
+test('notification settings use an independent endpoint and refresh CSRF', async () => {
+  const {context} = setup();
+  const calls = [];
+  context.fetchJson = async path => {
+    calls.push(path);
+    return path === 'status' ? {csrf_token: 'site-token'} : {notifications: {email: {enabled: true}}};
+  };
+  context.activeView = 'notify';
+  await context.refreshNotificationConfig();
+  assert.deepEqual(calls, ['notifications', 'status']);
+  assert.equal(context.csrfToken, 'site-token');
+  assert.equal(context.lastConfig.notifications.email.enabled, true);
+});
+
+test('server status accepts monitoring-only payloads and supplies CSRF to Docker actions', async () => {
+  const {context} = setup();
+  Object.assign(context, {serverRefreshInFlight: false, systemStatusRequestId: 0,
+    document: {hidden: false}, renderSystemStatus() {}, updateLiveIndicator() {}, scheduleServerRefresh() {}});
+  vm.runInContext(functionSource('refreshServerStatus'), context);
+  context.fetchJson = async path => {
+    assert.equal(path, 'status');
+    return {agent: {}, system: {}, alerts: [], events: [], csrf_token: 'docker-token'};
+  };
+  await context.refreshServerStatus();
+  assert.equal(context.csrfToken, 'docker-token');
+  assert.equal(context.serverRefreshInFlight, false);
 });

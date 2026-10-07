@@ -1,32 +1,13 @@
 # mini_deploy 快速上手
 
-这是一套轻量部署面板。它负责接收 WebHook、执行你的部署脚本、展示日志和部署状态。
-
-它不会自动理解所有业务代码。第一次接入项目时，你需要确认项目怎么构建、怎么重启、健康检查地址是什么。
+mini_deploy 是轻量的服务器运维与请求监控面板，名称保持不变。保留服务器监控、Docker 容器与镜像管理、Nginx/证书、请求采集和独立网关；不再提供 Git 部署、脚本执行、WebHook 自动发布或业务运行环境生成。
 
 > [!WARNING]
-> 当前默认安装器以 `root` 运行 Agent，权限拆分、自动失败回滚和恢复命令尚未完成。现阶段只应部署到受控的专用测试服务器，不要把它当作已经达到生产安全基线的面板。
+> 当前为公开测试前版本，默认安装器以 root 运行 Agent，权限拆分及完整恢复/版本回滚尚未完成。请使用受控的专用 Linux 测试服务器。
 
-## 你需要准备
+## 安装与登录
 
-- 一台 Linux 服务器，能用 root 或 sudo。
-- Agent 运行所需的 Python 3.10 或更高版本，当前 CI 覆盖 3.10-3.13。这个要求与业务项目是否使用 Python 无关；安装器会拒绝低于 3.10 的解释器，但不会代替你升级或选择解释器。
-- 服务器已安装 `git`。这个需要你自己先装，因为第一步 clone 项目就要用。
-- 服务器能访问你的代码仓库，通常需要配置 SSH Deploy Key。
-- 一个业务项目仓库，例如 FastAPI、Go API、Spring Boot。
-
-如果没有 `git`：
-
-```bash
-# Ubuntu / Debian
-apt update
-apt install -y git
-
-# CentOS / Rocky
-dnf install -y git
-```
-
-## 安装面板
+需要 Linux、root/sudo、systemd、Python 3.10+，以及用于下载面板自身的 Git。不需要业务仓库、Deploy Key 或部署脚本。Docker 和 Nginx 按需使用。
 
 ```bash
 git clone https://gitee.com/XC1960/mini_deploy.git /root/mini_deploy
@@ -34,273 +15,106 @@ cd /root/mini_deploy
 bash install.sh
 ```
 
-安装脚本会先问语言：
+安装时选择语言并设置管理员密码。随后打开 `http://服务器公网IP:6868`，使用该密码登录。面板固定监听 `0.0.0.0:6868`，无需域名或证书。云安全组需允许 TCP 6868，建议限制访问来源；提交私钥等敏感信息前使用 HTTPS 或 SSH 隧道。可选的 `DEPLOY_DOMAIN` 用于配置面板自身的域名入口。
 
-```text
-请选择安装向导语言 / Select installer language (zh/en，默认 zh):
-```
+Docker 可选，用于容器管理、Docker Nginx 和独立请求网关。安装器默认 `SETUP_DOCKER=ask`：交互时询问，默认回答“否”，无终端时跳过，不自动选择“是”。无需 Docker Compose 或 PyYAML。仅查看已有 Caddy 请求日志时，无需再安装 Nginx。
 
-直接回车就是中文；输入 `en` 使用英文。
+## 首次使用
 
-默认不需要填写域名，也不需要 Nginx 或证书。安装后直接访问 **`http://服务器公网IP:6868`**，端口固定为 `6868`。
-脚本会尝试识别公网 IP；识别失败时，用云控制台显示的公网 IP 替换地址中的占位符。也可用 `DEPLOY_PUBLIC_IP` 指定安装完成时显示的 IP。
+1. 查看服务器 CPU、内存、磁盘和网络，确认数据持续更新。
+2. 使用 Docker 时，查看容器状态、资源和日志；镜像页可列出、搜索、拉取及非强制删除镜像。拉取镜像不会自动更新业务容器。
+3. 已有网站需要请求监控时，选择已有代理日志来源，或按[独立网关说明](REQUEST_GATEWAY.zh-CN.md)开启记录。
+4. 需要管理业务域名时，再配置 Nginx 站点及证书。
 
-如需额外配置域名入口，可以执行 `DEPLOY_DOMAIN=deploy.example.com bash install.sh`，脚本会配置 Nginx，并可选安装 certbot 申请 HTTPS。
-如果你的项目使用 Docker Compose，且服务器未安装 Docker，安装脚本也会询问是否自动安装 Docker；默认不安装。
+无需先添加 Git 项目。业务服务应由你在面板外准备并运行，面板不生成业务 Compose、systemd 服务、构建命令或部署脚本。
 
-安装过程中还会要求输入两次管理员密码。脚本先把密码哈希和独立的 Session Secret 写入 `/etc/mini-deploy-agent.env`，然后才启动 Agent 和配置公网入口。网页不提供管理员密码初始化，避免第一个公网访问者抢先注册。
+## Docker 镜像加速
 
-没有 HTTPS 也能访问：
+在「服务器状态 → Docker 镜像 → 镜像加速」打开配置，面板自动读取主机已有加速地址。新增、修改或移除后点击「保存并生效」，无需手写 JSON 或执行服务器指令。删除全部地址会恢复 Docker 默认拉取方式，不删除镜像、容器和业务文件。
 
-```text
-http://服务器公网IP:6868
-```
+只修改 `registry-mirrors`，保留 Docker 其他配置，应用前自动校验并备份。优先热加载，必要时重启 Docker；有运行中容器且没有开启 live-restore 时，不自动重启，应用失败会尝试恢复原配置。页面展示进度、结果和备份位置。
 
-安装器会尝试在已启用的 UFW/firewalld 中放行 TCP 6868；**云服务器还需在安全组中放行入站 TCP 6868**。默认 HTTP 不加密，可以后续配置域名和 HTTPS。
+加速地址由你使用的服务商提供，填一次即可长期保留；主要用于 Docker Hub。配置生效后可点击「拉取 nginx:stable-alpine 验证」，镜像会保留但不会启动容器。拉取成功也可能是 Docker 回退到官方源，不代表一定经过加速器。
 
-升级也会切换到固定的 `0.0.0.0:6868`，旧 `DEPLOY_AGENT_HOST` / `DEPLOY_AGENT_PORT` 不再控制监听地址；安装器管理的旧 Nginx 配置会同步修改上游端口。若 6868 已被其他服务占用，安装器会停止并提示释放端口。
+目前支持 Linux 主机上 root 权限、systemd 管理的本机 Docker；远程、自定义 Socket、rootless、容器内运行的面板，以及启动参数指定镜像地址等无法安全修改的情况，会显示原因。
 
-## 第一次登录
+## 网站监测与告警
 
-打开面板后，使用安装时设置的管理员密码登录。
+1. 打开「监测告警」，填网站地址，例如 `https://example.com` 或 `http://192.168.1.10:8080/health`，点击「开始监测」。只填域名时默认 HTTPS。
+2. 点击「设置通知」，开启企微、钉钉或邮箱中的一个，保存并发送测试。
+3. 之后自动检查，无需调整 Nginx、Caddy、Docker 或业务代码。HTTPS 的线上证书也会出现在「域名与证书」顶部。
 
-需要修改密码或让所有旧登录失效时，在服务器执行。以下命令假设使用默认 `APP_HOME`、`ENV_FILE` 和 `SERVICE_NAME`；自定义安装必须复制安装器结束时输出的参数化管理员命令，其中会显式传入实际环境文件和服务名，避免把凭据写进默认配置文件：
+默认每 30 秒请求一次地址，2xx/3xx 视为可访问；不跟随重定向，耗时统计到响应头。异常持续 60 秒后提醒，相同问题每小时提醒一次，恢复后通知。响应超过 3 秒、证书剩余不超过 14 天也会提醒，可在「提醒规则」修改。正常证书每小时复查，失败时每 30 秒重试；「立即检查」也会复查证书。最多 50 个网址，同时最多 4 个检查任务，繁忙时可能延迟。
 
-```bash
-python3 /opt/mini_deploy/agent.py admin set-password
-systemctl restart mini-deploy-agent
+服务器 CPU、内存、磁盘使用率达到 90%，Docker 服务异常、容器不健康、重启循环或非零退出，也进入同一告警流程。手动停止的正常容器不会直接触发异常。数据过期或无法读取不等于恢复。所有检查从安装面板的服务器发起，不代表全球可用性；没有可用样本时不会发送恢复通知。
 
-# 只让所有旧 Session 失效，不修改密码
-python3 /opt/mini_deploy/agent.py admin reset-session
-systemctl restart mini-deploy-agent
-```
+「静音 1 小时」只暂停通知，仍持续监测。暂停/移除监测均不操作业务文件、服务或证书。提醒规则、记录和静音保存在数据目录的 `website-monitoring.json`，最近保留 200 条异常/恢复事件；它不是每次探测的历史数据库。
 
-非交互安装必须通过 `DEPLOY_UI_PASSWORD_FILE` 提供权限为 `0600` 的密码文件；未提供凭据时安装器会安全终止，不会先暴露未初始化的面板。安装成功后应立即删除明文密码文件。非交互环境还应把 `SETUP_NGINX` 明确设为 `yes` 或 `false`；默认的 `auto` 在没有 TTY 且服务器缺少 Nginx 时会安全跳过安装。
+线上证书检测适用于任意 HTTPS 服务；启用 CDN 时显示 CDN 边缘证书。检查源站需另填源站可访问的 HTTPS 地址。HTTP 地址不检查证书。仅做监测，不接管 Caddy/Certbot 续签，也不自动替换外部服务证书。
 
-检查状态：
+## Nginx 站点与证书
 
-```bash
-systemctl status mini-deploy-agent
-curl http://127.0.0.1:6868/health
-```
+仅需监测网站时，直接用下面的「监测告警」，无需安装或配置 Nginx。
 
-## 添加第一个项目
+站点已独立于 Git 部署，可直接新增、编辑和删除，不要求仓库、分支或脚本。
 
-服务器页默认显示每秒采样的实时趋势，正常启动后约 2～3 秒出现曲线，最多保留最近 60 个样本。实时样本仅保存在内存，面板重启后重新积累；24h / 7d 等历史视图仍使用低频归档。
+1. 在「域名与证书 → 访问入口」新增站点，填写名称、域名和端口。健康检查地址可选；高级设置中的站点标识（key）留空会自动生成。
+2. 检测并选择本机或 Docker Nginx；不存在时，可按需使用独立 Nginx 安装入口。
+3. 在 Nginx 入口配置后端地址，确认上游已运行且网络可达，核对预览后应用。
+4. HTTP 验证通过后，按需上传 PEM 完整证书链及私钥，检查有效期并启用 HTTPS。
 
-新安装默认没有项目。`examples/` 目录里的 Node、Go、Java 配置只是参考，不会自动接入面板。
+删除站点只移除登记；有关联 Nginx 配置或证书时会阻止删除，需先处理关联。健康检查只报告状态，不自动重启业务。
 
-1. 点击“添加仓库”，选择**首次部署**或**已在本机运行**。已有服务可点“检测本机项目”选择 Compose 项目，自动带入可核对的 Git 目录和仓库地址；找不到时展开查询指令，按示例填写。
-2. 粘贴 Git 克隆地址，点击“检查项目”。分支默认自动识别；指定分支、自建平台和私有仓库授权帮助默认收起。
-3. 核对识别出的方案，只补充缺少的入口、端口或变量。需要时展开“更换部署方案”或“高级设置 / 健康检查”。识别结果不是强制要求，可沿用已有脚本或自己的更新步骤。
-4. 核对摘要和执行步骤，勾选确认。首次部署点击**部署并检查**，环境检查通过后自动提交部署，随后在部署页查看进度和日志；失败停在向导中，可修正后重试。已有服务点击**准备并检查接入**后，可选择**完成接入（不更新服务）**。
-5. 默认**手动更新**。需要自动更新时，展开“可选：push 后自动更新”选择 **Push WebHook**；保存后在项目设置查看地址和密钥，按代码平台提示配置 Push 事件并测试。代码平台必须能访问面板地址。
+本机/host 网络通常可用 `127.0.0.1`；Docker bridge 网络需使用同网络服务名或容器可达的宿主机地址，不能把容器的 `127.0.0.1` 当作宿主机。Docker Nginx 需要正确的配置和证书目录挂载，参见[新建实例示例](../examples/nginx.compose.yml)。已有容器不会自动重建。
 
-本机项目检测只读取 Compose 标签和 Git 信息，不读取容器环境变量，不执行拉取或重启。能够核对原配置时，会建议保留原项目名、工作目录、多份配置及环境文件路径的更新命令；原命令额外传入的变量和参数仍需确认。未识别的本机服务提供查询指令，不猜测服务名。已有 Caddy/Nginx 不需要为了接入部署而重装。
+DNS、云安全组及已有代理的端口分配需自行确认。两个服务不能占用同一地址的 80/443；已有 Caddy/Nginx 可继续使用，不必再装一套入口。
 
-**第一次添加到面板，不等于第一次部署到服务器。** 首次部署选中已有内容的目录时，面板会先停止并提示“改为接入已有项目”或“选择其他目录”，不会先拉取或切换代码，也不会因此新增失败记录。面板刚克隆的代码在准备失败后可以原地重试，不重复更新 Git。
+上传证书支持有效期查看、替换、改名及 HTTPS 启停；不自动申请或续签，也不接管外部站点。已有 Certbot 站点继续由 Certbot 维护。移除站点入口或停用 HTTPS 会影响访问，执行前应核对范围。
 
-不需要的项目可在项目列表点击 **删除接入记录**，准备失败的向导里也有同名按钮。只移除面板登记，不删除任何业务代码、日志、证书、配置或数据，不停止容器和服务。部署任务正在运行或排队时需先等待结束。保留下来的托管资源仍占用原项目标识，重新添加时使用新的标识，避免覆盖旧资源。
+## 请求采集
 
-识别只读取临时 Git 对象，不执行项目代码。首次准备会拉取代码并检查或补齐确认过的文件；已有服务接入只核对本机目录和 Git origin，**不 fetch、不 checkout、不 pull、不重启**。真正执行更新时，面板生成的方案会更新指定分支并运行部署步骤；已有脚本则以脚本自身内容为准。
+- **代理日志**：读取所选本机/Docker Nginx，或已开启 JSON 访问日志的本机 Docker Caddy。没有日志不等于没有流量。
+- **独立网关**：通过「请求记录 → 添加网站」选择受支持入口，预览并确认后接入。保留原业务和外层 HTTPS，支持 HTTP、SSE/WebSocket。详见[网关说明](REQUEST_GATEWAY.zh-CN.md)。
+- 记录方法、域名、路径、状态和耗时，不采集查询参数、认证头、Cookie 或请求体。统计是有限样本，不代表全部历史流量；长连接结束后才有完整记录。
 
-自定义步骤的构建可以留空，启动 / 重启必须明确，例如 `systemctl restart my-app`；不能直接填写一直占用前台的 `python main.py`。命令以 Agent 运行用户的权限执行，不是沙箱，不要把密码写进命令。特殊 Compose `-p`、额外配置文件或部署工具应使用自己的步骤或已有脚本，避免创建另一套服务。
+网关接入会备份并修改所选代理规则，Caddy 重启可能短暂中断连接；这属于明确确认后的运维操作。停止记录恢复原网站访问路径，网关仍保留运行，后续维护需单独确认。
 
-### 容器项目只需确认这些
+## 旧版本升级
 
-- **应用端口**：程序在容器里实际监听的端口。Dockerfile 声明唯一 `EXPOSE` 端口时会预填；程序需要监听 `0.0.0.0`。
-- **访问端口**：浏览器访问 `http://服务器IP:端口` 使用的端口，例如 `8080`。不能使用面板的 `6868`；云安全组需放行对应端口，也可选择仅本机访问并接入 Nginx。
-- **环境变量**：会提示 Compose 引用的变量和 `.env.example` 等示例文件中的变量名称。密码等实际值单独填写，不会出现在配置预览中；不要通过未加密的公网 HTTP 传输敏感信息，先配置 HTTPS 或通过 SSH 隧道访问。
-- **数据目录**：需要保留上传文件等数据时，填写容器内的目录，例如 `/app/uploads`。Dockerfile 模式会使用独立 Docker Volume 保存，不会在重建容器时删除。镜像仍需正确设置目录写入权限；面板配置备份不等于业务数据备份。
+部署页面、队列、脚本执行及仓库识别适配器已移除。旧部署 API（含手动部署、部署回滚和 WebHook）返回 HTTP `410 Gone`。
 
-Dockerfile 模式的运行配置和部署脚本保存在面板数据目录 `managed-projects/项目标识/`，不改动仓库；变量存为私有文件，Linux 下目录权限 `0700`、变量文件权限 `0600`。已有 Compose 的端口、挂载和启动逻辑保持原样。准备后检查失败，可以返回上一步修正端口、变量并重试；已建立的数据目录映射不会被自动改写。
+站点保存到 `sites.json`，旧 `projects.json` 只读提取站点，不被改写。监控状态写入 `monitoring-state.json`；原 `state.json` 保留，不加载其中的部署队列，启动或重启都不会自动恢复旧任务。
 
-自动识别目前以仓库根目录的标准配置为主；其他位置可以填写相对配置文件路径。Compose 引用的额外 `env_file`、证书等运行文件仍需准备，面板不会把未知内容自动补成空文件。数据库、镜像源网络和私有仓库权限也不能仅凭代码自动解决。
+旧服务器上的业务文件、配置、脚本、服务、容器和持久数据全部保留。停止部署功能不等于停止业务，不会因本次转型清理或重建已有资源。后续业务发布由原维护流程负责，面板不再执行旧脚本。
 
-失败时页面会给出可能原因和排查建议，例如仓库权限、网络、端口占用或依赖缺失。准备失败可以原地重试，不会重复新增项目。环境变量、数据库和运行环境仍需按业务准备；没有脚本也可填写实际构建和重启步骤，不会生成占位脚本冒充部署成功。已有项目编辑页继续提供完整配置。
+升级前保留服务器快照和安装备份，复用原安装路径及环境文件。不要删除旧项目配置、队列状态或脚本来绕过升级检查。
 
-没有项目时，也可在 **域名与证书** 点击“安装 Nginx”：
+## 排查与数据
 
-1. 选择“服务器本机”或“Docker 容器”。本机使用 80 端口；Docker 可填写其他 HTTP 端口，如 8080。
-2. Docker 模式确认新容器名称，配置和空证书目录由面板自动挂载，不需要手写 Compose。服务器需已安装并启动 Docker；缺少时可运行安装向导选择安装 Docker。
-3. 点击“检查安装计划”，确认后执行。无需项目、域名或证书，先启动 HTTP。Docker 默认不发布 443；勾选“预留 HTTPS 443 端口”只准备映射，不启用 TLS。
-4. HTTP 检查通过后，打开页面提供的测试地址；外部访问需放行对应安全组端口。没有预留 443 的容器，以后启用 HTTPS 前需调整映射并重建，面板不会自动重建已有容器。
-
-同名容器、被占用的端口及非托管目录会阻止创建；失败时仅清理确认属于本次创建的容器，镜像和托管配置目录保留供重试。新容器使用 `nginx:stable-alpine`，配置目录位于 `/srv/mini-deploy-nginx/<容器名>/conf.d`。已有 Nginx 接入实例会保留；新建 Docker Nginx 在尚未接入实例时尝试自动接入。
-
-需要域名访问时，打开 **域名与证书 → 访问入口**，选择项目、填写域名和业务端口，点击“检查并预览”，核对后“确认并配置”。没有 Nginx 时，可自动通过 apt-get / dnf / yum 安装本机 Nginx；已有接入实例会继续使用。业务需先启动，域名解析和云安全组 80 端口仍需在云平台设置。生成的反向代理关系如下：
-
-```text
-api.example.com -> http://127.0.0.1:8001
-```
-
-默认先使用 HTTP，无需证书。上传和更换证书在 **HTTPS 证书** 标签中完成。已有 Docker Nginx 可展开“高级接入”选择；端口冲突会阻止安装，缺少容器挂载时不会自动重建容器。配置或重载失败会尝试恢复站点和项目配置，已安装的 Nginx 软件会保留。
-
-需要查看访问情况时，先在 **域名与证书** 接入本机或 Docker Nginx，再打开 **请求记录** 点击“开启记录”。面板只显示所选 Nginx 启用后的新请求、状态与耗时，不读取旧日志或应用内部接口；记录路径不含查询参数、请求体和 Cookie。本机写入 `/var/log/nginx/mini-deploy-requests.log`，请按服务器日志轮转策略清理；Docker 从 `docker logs` 读取，需使用支持读取的日志驱动。站点自行设置 `access_log` 时可能覆盖面板的记录配置。切换 Nginx 实例前，先在请求记录页关闭记录；关闭不会删除已写入的日志。
-
-如果现有入口是 **Docker Caddy**，不用安装 Nginx。在 **请求记录 → 来源** 选择 Docker Caddy；容器名含 `caddy` 时会自动识别，其他名称可手动填写。面板只读容器日志，不修改 Caddyfile。若页面提示没有访问日志，在现有站点块加入下面的 Caddy 原生配置（已有 `log` 块则修改原块，不要重复添加）：
-
-```caddyfile
-log {
-    output stdout
-    format json
-}
-```
-
-先用 `docker inspect 容器名 --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'` 找到宿主机挂载的 Caddyfile，并备份后编辑；不要只改容器内部文件。然后执行 `docker exec 容器名 caddy validate --config /etc/caddy/Caddyfile`，检查通过后执行 `docker exec 容器名 caddy reload --config /etc/caddy/Caddyfile`。若你的镜像使用其他配置路径或禁用了 Caddy 管理 API，请按原有 Compose 流程验证和重启。新请求经过该 Caddy 容器后才会显示；页面不回显查询参数、请求体或 Cookie，容器原始日志仍按 Docker 日志驱动配置保留。
-
-如果勾选“业务域名申请 HTTPS”，本机模式会在服务器已安装 certbot 时尝试申请证书；Docker 模式请在证书页上传证书。没有 HTTPS 时，HTTP 访问仍然可用。
-
-## 重要边界
-
-`deploy.sh` 是你的业务部署流程。面板可以生成初版，但你需要检查。
-
-它通常做这些事：
-
-```text
-拉最新代码
-安装依赖或构建
-重启服务
-健康检查
-```
-
-例如 FastAPI 如果用 systemd 管理，`deploy.sh` 里通常是：
+默认安装使用：
 
 ```bash
-git pull --ff-only origin main
-pip install -r requirements.txt
-systemctl restart fastapi-demo
-curl -fsS http://127.0.0.1:8001/health
+systemctl status mini-deploy-agent --no-pager
+journalctl -u mini-deploy-agent -n 100 --no-pager
+curl -fsS http://127.0.0.1:6868/health
+bash /opt/mini_deploy/scripts/doctor.sh
 ```
 
-项目配置了健康检查地址后，面板会后台定时检查并在项目卡片显示“健康正常 / 健康失败”。它只报告状态，不会因为一次失败自动重启业务；部署脚本中的健康检查仍然是发布是否成功的重要依据。
+忘记密码时，在服务器运行 `python3 /opt/mini_deploy/agent.py admin set-password`，然后重启 Agent。只需撤销会话时使用 `admin reset-session` 后重启。自定义安装使用安装器打印的完整命令。
 
-同一个 Push WebHook 被代码平台重试时，面板会按 Delivery ID 或提交标识去重，不会重复入队。Agent 重启后会恢复已经保存但尚未执行的队列任务；正在执行的任务会标记为中断，需要人工确认后重新部署。
+| 内容 | 默认位置 |
+| --- | --- |
+| 数据目录 | `/var/lib/mini-deploy-agent` |
+| 站点配置 / 监控状态 | 数据目录中的 `sites.json` / `monitoring-state.json` |
+| 保留的旧文件 | 数据目录中的 `projects.json` / `state.json` |
+| 上传证书 / Nginx 元数据 | 数据目录中的 `certificates/` / `nginx.json` |
+| 日志 | `/var/log/mini_deploy` |
+| 安装备份 | `/var/backups/mini-deploy-agent` |
 
-但是 `fastapi-demo.service` 这种服务文件仍然属于你的业务项目配置。mini_deploy 可以给模板和检查，但不能保证自动生成适合所有项目的 service。
+备份中的 `installation.tar.gz`、`manifest`、`complete` 必须整体保留。可用 `python3 /opt/mini_deploy/scripts/verify_backup.py <备份目录>` 做只读校验，但它不是恢复命令。手动备份使用安装器打印的完整命令；业务数据库、数据卷和外部代理配置需独立备份。
 
-## 配置 WebHook
+Docker 删除操作仅在明确选择并确认后执行：删除停止的容器会丢失其可写层，保留数据卷和宿主机挂载目录；镜像删除不是业务卸载。升级本身不执行这些删除操作。
 
-项目保存后，面板会显示：
+## 验证状态
 
-- WebHook URL
-- Token / Secret
-
-URL 中只保留 `project` 参数，不要拼接 `token` 或 `secret`。把 Token 分别填入 Gitee 的密码/Token、GitHub 的 Secret 或 GitLab 的 Secret token 字段，触发事件选择 Push。GitHub 会使用 HMAC-SHA256 签名，Gitee/GitLab 会使用平台原生 Token 请求头。
-
-之后你每次 push 到配置分支，mini_deploy 就会执行该项目的 `deploy.sh`。
-
-### 选择 Nginx 运行环境
-
-面板 `公网IP:6868` 不依赖 Nginx。只有配置业务域名或证书时，才需要完成以下步骤：
-
-1. 先保存业务项目；打开 **Nginx 证书**，点击 **检测运行环境**。
-2. 选择“服务器本机”或“Docker 容器”。两者都存在时，请选择实际承接域名流量的实例；也可以“暂不配置”。
-3. 点击 **检查并保存**。后续项目和证书操作都会复用此实例。
-4. 选择业务项目，填写 **Nginx 访问的后端地址**，点击 **检查并保存后端**。再回项目配置业务域名。
-
-本机或 Docker `host` 网络通常使用 `127.0.0.1`；Docker 桥接网络应填写同网络的业务服务名，例如 `api`，或容器可达的宿主机地址。业务端口来自项目设置。宿主机业务如果只监听 `127.0.0.1`，桥接容器通常无法连接它，需要调整业务监听或网络。
-
-Docker 接入要求本机 Docker Unix Socket、运行中的 Nginx 容器，以及两个**目录 bind mount**：
-
-- 独立的宿主机配置目录 → `/etc/nginx/conf.d`。
-- Agent 数据目录下的 `certificates` → `/etc/mini-deploy/certificates`，可只读挂载。
-
-网页会显示检测到的网络、端口和挂载，并给出所需挂载示例。修改 Compose 挂载后需要重建容器，再次检测。暂不支持远程 Docker、命名 Volume 或单文件配置挂载；不会自动重建已有容器。容器应发布实际使用的 80/443 端口；Nginx 主配置需包含 `include /etc/nginx/conf.d/*.conf;`。
-
-没有 Nginx 时可以先选择“暂不配置”，或安装本机 Nginx；新建 Docker Nginx 可参考 [Compose 示例](../examples/nginx.compose.yml)。本机未安装并不代表 Docker 中没有 Nginx。
-
-修改运行实例前，需要先停用 HTTPS、删除该实例的托管证书，并对已有项目点击 **移除域名入口**。移除入口不会删除业务代码或停止业务服务，但域名访问会暂时中断。
-
-### 网页管理 HTTPS 证书
-
-先完成上面的 Nginx 接入，Agent 所在服务器还需安装 OpenSSL。已有证书时，不用每次登录服务器替换文件：
-
-1. 在项目设置里填写业务域名和服务端口。
-2. 打开 **Nginx 证书**，选择项目，填写证书名称。
-3. 选择或粘贴 PEM 完整证书链（`fullchain.pem`）和未加密私钥（`privkey.pem`），点击保存。
-4. 点击 **启用 HTTPS**。面板校验证书和 Nginx 配置后重新加载服务，HTTP 会跳转至 HTTPS。
-
-续期后上传新证书和私钥，点击 **替换并应用证书** 即可；也可以单独修改证书名称。删除前必须先停用 HTTPS，停用后站点仅保留 HTTP。443 端口需要在防火墙和安全组中放行。
-
-此入口管理已选择的本机/Docker Nginx 上、面板已登记的**业务项目域名**，不覆盖面板自身域名、手工维护的站点或 Certbot 改写的配置。已有 Certbot 站点应继续使用 Certbot 续期；本入口不自动申请或续签证书。没有域名时无法启用此功能。
-
-上传证书保存在数据目录的 `certificates/` 下，私钥不回显。Nginx 实例及项目后端设置保存于同目录的 `nginx.json`。替换时保留旧证书用于恢复，删除会一并删除保留版本；安装备份包含这两项数据，但不自动归档外部 Docker Compose 文件或业务 Nginx 挂载目录，后两项需另行备份。
-
-## 常用排查
-
-项目配置默认位于 `/var/lib/mini-deploy-agent/projects.json`，不再把活动配置写入程序目录。需要直接检查时使用：
-
-```bash
-nano /var/lib/mini-deploy-agent/projects.json
-chown root:root /var/lib/mini-deploy-agent/projects.json
-chmod 600 /var/lib/mini-deploy-agent/projects.json
-DEPLOY_PROJECTS_FILE=/var/lib/mini-deploy-agent/projects.json \
-  python3 /opt/mini_deploy/agent.py validate-config
-systemctl restart mini-deploy-agent
-```
-
-优先在面板中保存项目。直接编辑时必须先校验再重启；Agent 不会自动监视外部文件变化，未重启前仍使用内存中的旧配置。
-
-升级会在原始状态备份通过校验后，把旧默认路径 `/opt/mini_deploy/projects.json` 原子复制到数据目录。首次迁移时，若新旧两份内容不同，或环境文件使用了安装器无法纳入备份的外置自定义路径，安装器会停止并要求人工核对，不会猜测哪一份 Token 更新。环境文件已经明确指向数据目录后，该文件成为唯一权威配置；程序目录中保留的 root 私有旧副本可以过期，不再参与内容冲突判断。
-
-Agent 日志：
-
-```bash
-journalctl -u mini-deploy-agent -f
-tail -n 100 /var/log/mini_deploy/mini-deploy-agent.log
-```
-
-没有托管标记的旧版 `APP_HOME`、systemd unit 或 Nginx 配置默认会被拒绝。只有在人工核对路径并额外保留服务器快照后，才可为一次迁移临时设置 `DEPLOY_ALLOW_LEGACY_INSTALL_ADOPTION=true`；迁移成功后立即恢复为 `false`。
-
-安装器识别到已有安装时，会在配置的备份目录（默认 `/var/backups/mini-deploy-agent`）原子发布一个 root 私有备份 bundle。每个 `mini-deploy-<时间>-<随机后缀>/` 目录包含权限受限的 `installation.tar.gz`、带 SHA-256 的 `format=2` 清单 `manifest` 和 `complete`；只有三个文件同时存在才算成功备份。安装器会在修改现有安装前自动用只读校验器检查新 bundle，校验失败就停止。下面是默认路径的手动备份命令；自定义安装应复制安装器结束时输出的完整参数化命令：
-
-```bash
-bash /opt/mini_deploy/scripts/backup-installation.sh
-```
-
-命令成功时会输出 `<bundle>/installation.tar.gz`；同目录的 `manifest` 和 `complete` 属于同一份备份，复制或保存时三者不能拆开。
-
-也可以 root 身份把 bundle 目录或其中的 `installation.tar.gz` 传给校验器。例如把下面的示例路径替换为实际 bundle：
-
-```bash
-python3 /opt/mini_deploy/scripts/verify_backup.py \
-  /var/backups/mini-deploy-agent/mini-deploy-YYYYmmddTHHMMSSZ-suffix
-```
-
-校验器会检查 root 私有控制文件、`format=2` 清单、归档摘要、受管归档根、硬链接解析以及 Agent 文件指纹，不会解压、恢复或修改 bundle。它会统计但不会跟随符号链接，并拒绝归档成员继续穿过链接写入；它不会认可符号链接将来的恢复目标。校验成功只说明当前 bundle 的结构和完整性符合要求，不等于已经验证恢复流程。
-
-归档包含程序、项目配置、状态、环境文件，以及实际存在时的 systemd unit 和 Nginx 配置。安装器管理的独立日志目录（默认 `/var/log/mini_deploy`）会原地保留，不会作为单独目录加入归档；但脚本会整体归档 `APP_HOME` 和 `DATA_HOME`，旧布局或手工放在这两个目录内的日志仍可能进入归档，因此归档必须按敏感数据保存。
-
-Agent、安装器和独立备份通过 `/run/mini-deploy-agent/maintenance.lock` 协调。部署或项目回滚任务从进入队列起到结束都持有共享锁；安装或备份持有独占维护锁时，新 WebHook、手动部署和项目回滚触发会返回 HTTP `503`，配置、状态和审计写入会等待维护结束。systemd 使用 `RuntimeDirectoryPreserve=yes` 在服务重启时保留这个 root 私有运行目录，并在服务器重启后重新创建。`/run/mini-deploy-agent` 仍是临时运行目录，不应存放持久数据。
-
-当前版本仍未完成版本目录切换、完整失败自动回滚、恢复、版本回滚和卸载命令，生产升级前仍需保留可用的服务器快照并查看[开源开发路线图](ROADMAP.zh-CN.md)。安装失败会尽力重新启动升级前的 Agent，但不会自动回滚所有业务文件。
-
-项目部署日志在面板里可以直接看，也可以看你配置的日志文件。
-
-如果部署失败，优先检查：
-
-- 服务器能不能 `git pull`
-- `deploy.sh` 是否可执行
-- 服务重启命令是否正确
-- 健康检查 URL 是否真实可访问
-
-### Docker 容器与镜像
-
-在「服务器状态」中，停止后的容器可以确认删除。删除会丢失容器自身写入的文件，但保留数据卷和宿主机挂载目录；Compose 下次部署可能重建容器。
-
-「Docker 镜像」支持查看、搜索、拉取和删除。拉取不会自动更新运行中的容器；删除不使用强制参数，有容器引用（包括已停止容器）或多个标签时会提示原因。私有仓库沿用服务器已有 Docker 登录凭据。
-
-### 项目已经有 Nginx？
-
-如果只是想查看业务请求，不需要接管现有入口：使用「请求记录 → 管理网关」，让原有 Caddy、Nginx 或其他代理转发到网关即可。后端支持本机或 Docker，操作见[统一请求网关](REQUEST_GATEWAY.zh-CN.md)。
-
-Nginx 不是接入项目的必装项。在「域名与证书 → 项目访问入口」选择本次配置方式：
-
-- **保留项目自带入口**：继续使用业务 Compose，无需安装第二个 Nginx。
-- **使用面板统一入口**：由面板 Nginx 转发到业务服务。
-- **统一入口转发到项目 Nginx**：保留业务 Nginx，使用其他端口（如 8080）或内部网络接收转发。
-
-两个服务不能同时绑定服务器同一地址的 80/443。识别仓库会提示 Compose 入口风险；拉取代码后点击「检查项目」可查看当前端口占用及服务名称。提示不会改 Compose、停止容器或接管已有 Nginx。变量、覆盖文件、profiles 和自定义启动脚本仍需核对，检查不是部署阻断器。
-
-更完整的参考示例见：[部署流程参考](BEGINNER_DEPLOY_FLOW.zh-CN.md)。
+全量自动化测试 476 通过、19 跳过（缺少 Linux/Docker 环境），另有真实后端的站点 UI 增改删测试通过。Linux 实机验收尚未执行，待按[实测清单](LINUX_TEST.zh-CN.md)完成。

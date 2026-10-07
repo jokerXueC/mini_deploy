@@ -17,13 +17,12 @@ def wizard(tmp_path, monkeypatch):
     settings = nginx.Settings(data)
     monkeypatch.setattr(agent, "STATE_FILE", data / "state.json")
     monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", data / "projects.json")
+    monkeypatch.setattr(agent, "SITES_CONFIG_FILE", data / "sites.json")
     monkeypatch.setattr(agent, "PROJECT_CONFIG_BACKUP_DIR", data / "backups")
     monkeypatch.setattr(agent, "_nginx_settings", lambda: settings)
     monkeypatch.setattr(agent, "_log", lambda message: None)
-    project = agent._project_from_form({"key": "api", "name": "API", "workdir": str(tmp_path),
-                                        "enabled": False, "service_port": 8000})
+    project = agent._project_from_config({"key": "api", "name": "API", "enabled": False, "service_port": 8000}, "api")
     monkeypatch.setattr(agent, "PROJECTS", {"api": project})
-    monkeypatch.setattr(agent, "DEFAULT_PROJECT_KEY", "api")
     monkeypatch.setattr(nginx, "local_setup_plan", lambda: {"installed": False, "active": False, "package_manager": "apt-get"})
     prepared = []
     monkeypatch.setattr(nginx, "prepare_local", prepared.append)
@@ -120,7 +119,7 @@ def test_failed_reload_rolls_back_site_project_and_settings(wizard, monkeypatch)
     assert agent.PROJECTS == original
     assert not settings.path.exists()
     assert not (conf / "mini-deploy-api.conf").exists()
-    assert json.loads(agent.PROJECTS_CONFIG_FILE.read_text())["projects"][0]["app_domain"] == ""
+    assert json.loads(agent.SITES_CONFIG_FILE.read_text())["sites"][0]["app_domain"] == ""
 
 
 @pytest.mark.parametrize("change", [{"domain": "bad;host"}, {"port": True}, {"port": 65536}, {"project": "missing"}])

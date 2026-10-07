@@ -31,7 +31,7 @@ function renderCertificateDetails(resetForm = false) {
   const item = certificateSelection();
   const cert = item?.certificate;
   const fields = [
-    ['项目域名', item?.domain || '未设置业务域名'],
+    ['站点域名', item?.domain || '未设置业务域名'],
     ['HTTPS 状态', cert?.active ? '已启用（上传证书）' : '未使用上传证书'],
     ['证书名称', cert?.label || '未上传'],
     ['证书域名', cert?.domain || '-'],
@@ -55,7 +55,7 @@ function renderCertificates(payload, resetForm = false) {
   certificateProjects = payload.projects || [];
   $('certificateProject').innerHTML = certificateProjects.length
     ? certificateProjects.map(item => `<option value="${escapeHtml(item.project)}">${escapeHtml(item.name)} (${escapeHtml(item.domain || '未设置域名')})</option>`).join('')
-    : '<option value="">请先添加项目</option>';
+    : '<option value="">请先添加站点</option>';
   if (certificateProjects.some(item => item.project === previous)) $('certificateProject').value = previous;
   else resetForm = true;
   const mode = nginxSettings?.profile?.mode;
@@ -68,6 +68,7 @@ async function refreshCertificates() {
   if (certificateBusy || nginxBusy) return;
   const request = ++certificateRequest;
   try {
+    await refreshSites();
     await refreshNginxSettings();
     const [payload, status] = await Promise.all([fetchJson('certificates'), fetchJson('status')]);
     csrfToken = status.csrf_token || csrfToken;
@@ -82,7 +83,7 @@ async function refreshCertificates() {
 async function certificateAction(action) {
   if (certificateBusy || nginxBusy) return;
   if (!nginxSettings?.configured || nginxSettings.profile.mode === 'none') {
-    certificateMessage('请先在“访问入口”配置项目域名，或在高级接入中保存已有 Nginx。', true);
+    certificateMessage('请先在“访问入口”配置站点域名，或在高级接入中保存已有 Nginx。', true);
     return;
   }
   const item = certificateSelection();

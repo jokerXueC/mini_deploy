@@ -5,7 +5,6 @@ import io
 import os
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -144,144 +143,6 @@ def test_login_attempt_reservation_bounds_active_client_table(monkeypatch: pytes
 
     assert len(agent._login_failures) == 2
     assert "203.0.113.3" in agent._login_failures
-
-
-def test_force_unlock_refuses_live_deploy_worker_without_child_process(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    running_lock = threading.Lock()
-    running_lock.acquire()
-    monkeypatch.setattr(agent, "_running_lock", running_lock)
-    monkeypatch.setattr(agent, "_deploy_process", None)
-    monkeypatch.setattr(agent, "_deploy_worker_thread", threading.current_thread())
-
-    ok, payload = agent._force_unlock_deploy()
-
-    assert not ok
-    assert payload["error"] == "deploy_worker_active"
-    assert running_lock.locked()
-
-
-def test_force_unlock_cannot_release_lock_while_deploy_is_starting(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = agent._project_from_config({"key": "api", "enabled": False}, "api")
-    running_lock = threading.Lock()
-    update_entered = threading.Event()
-    allow_failure = threading.Event()
-    errors: list[BaseException] = []
-
-    def fail_initial_state_write(**changes: object) -> None:
-        del changes
-        update_entered.set()
-        assert allow_failure.wait(timeout=2)
-        raise RuntimeError("simulated state initialization failure")
-
-    def run_deploy() -> None:
-        try:
-            agent._run_deploy({"project_key": "api", "after": "abc123"})
-        except BaseException as exc:  # surfaced below
-            errors.append(exc)
-
-    monkeypatch.setattr(agent, "PROJECTS", {"api": project})
-    monkeypatch.setattr(agent, "DEFAULT_PROJECT_KEY", "api")
-    monkeypatch.setattr(agent, "_running_lock", running_lock)
-    monkeypatch.setattr(agent, "_deploy_process", None)
-    monkeypatch.setattr(agent, "_deploy_worker_thread", None)
-    monkeypatch.setattr(agent, "_update_state", fail_initial_state_write)
-
-    worker = threading.Thread(target=run_deploy)
-    worker.start()
-    assert update_entered.wait(timeout=2)
-
-    ok, payload = agent._force_unlock_deploy()
-
-    assert not ok
-    assert payload["error"] == "deploy_worker_active"
-    assert running_lock.locked()
-    allow_failure.set()
-    worker.join(timeout=2)
-    assert not worker.is_alive()
-    assert errors and isinstance(errors[0], RuntimeError)
-    assert not running_lock.locked()
-    assert agent._deploy_worker_thread is None
-
-
-def test_force_unlock_releases_lock_owned_by_dead_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    running_lock = threading.Lock()
-    running_lock.acquire()
-    stale_worker = threading.Thread(target=lambda: None)
-    updates: list[dict[str, object]] = []
-    monkeypatch.setattr(agent, "_running_lock", running_lock)
-    monkeypatch.setattr(agent, "_deploy_process", None)
-    monkeypatch.setattr(agent, "_deploy_worker_thread", stale_worker)
-    monkeypatch.setattr(agent, "_update_state", lambda **changes: updates.append(changes))
-
-    ok, payload = agent._force_unlock_deploy()
-
-    assert ok
-    assert payload["message"] == "stale deploy lock cleared"
-    assert not running_lock.locked()
-    assert agent._deploy_worker_thread is None
-    assert updates and updates[0]["running"] is False
-
-
-def test_force_unlock_clears_state_before_releasing_running_lock(monkeypatch: pytest.MonkeyPatch) -> None:
-    running_lock = threading.Lock()
-    running_lock.acquire()
-    lock_observations: list[bool] = []
-    monkeypatch.setattr(agent, "_running_lock", running_lock)
-    monkeypatch.setattr(agent, "_deploy_process", None)
-    monkeypatch.setattr(agent, "_deploy_worker_thread", None)
-
-    def observe_update(**changes: object) -> None:
-        assert changes["running"] is False
-        lock_observations.append(running_lock.locked())
-        assert not running_lock.acquire(blocking=False)
-
-    monkeypatch.setattr(agent, "_update_state", observe_update)
-
-    ok, _payload = agent._force_unlock_deploy()
-
-    assert ok
-    assert lock_observations == [True]
-    assert not running_lock.locked()
-
-
-def test_orphaned_child_can_be_force_unlocked_after_it_exits(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Process:
-        returncode: int | None = None
-        pid = 4242
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-    process = Process()
-    running_lock = threading.Lock()
-    running_lock.acquire()
-    updates: list[dict[str, object]] = []
-    monkeypatch.setattr(agent, "_running_lock", running_lock)
-    monkeypatch.setattr(agent, "_deploy_process", process)
-    monkeypatch.setattr(agent, "_deploy_worker_thread", threading.current_thread())
-    monkeypatch.setattr(agent, "_update_state", lambda **changes: updates.append(changes))
-
-    agent._release_deploy_worker_lifecycle()
-
-    assert agent._deploy_worker_thread is None
-    assert running_lock.locked()
-    assert agent._deploy_process is process
-    blocked, payload = agent._force_unlock_deploy()
-    assert not blocked
-    assert payload["error"] == "deploy_process_running"
-
-    process.returncode = 137
-    ok, payload = agent._force_unlock_deploy()
-
-    assert ok
-    assert payload["message"] == "stale deploy lock cleared"
-    assert not running_lock.locked()
-    assert agent._deploy_process is None
-    assert updates and updates[-1]["running"] is False
 
 
 def test_web_password_setup_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -488,6 +349,7 @@ def test_help_imports_when_projects_config_is_damaged(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment.update({
         "DEPLOY_PROJECTS_FILE": str(broken_config),
+        "DEPLOY_AGENT_STATE_FILE": str(tmp_path / "state.json"),
         "PYTHONDONTWRITEBYTECODE": "1",
     })
 
@@ -513,6 +375,7 @@ def test_set_password_stdin_works_when_projects_config_is_damaged(tmp_path: Path
     environment = os.environ.copy()
     environment.update({
         "DEPLOY_PROJECTS_FILE": str(broken_config),
+        "DEPLOY_AGENT_STATE_FILE": str(tmp_path / "state.json"),
         "DEPLOY_AGENT_ENV_FILE": str(env_file),
         "PYTHONDONTWRITEBYTECODE": "1",
     })

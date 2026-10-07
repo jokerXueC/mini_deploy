@@ -1,68 +1,17 @@
-# Deploy Script Templates
+# Legacy Deployment Templates
 
-mini_deploy runs shell scripts. These templates are starting points, not guaranteed final scripts.
+Deployment templates are retired. mini_deploy is now a server operations and
+request monitoring panel; it no longer guides repository onboarding, deployment
+scripts, WebHooks or automatic business runtime generation.
 
-These are optional examples, not mandatory project files. The UI wizard can also use existing Compose/Dockerfile configuration or save your own build/restart steps. Existing-service preparation does not pull code or restart the service. New wizard projects default to manual updates.
+Existing business files, configurations, scripts, services and containers are
+retained on upgrade. Deployment execution has been removed, old deployment APIs
+return HTTP 410, and old queues do not resume after Agent startup or restart.
 
-Before enabling WebHook deployment, make sure your script can run successfully on the server.
+Repository deployment templates and adapters have been removed. Existing server
+scripts are retained; business releases remain outside the panel.
 
-## Basic Shape
-
-```bash
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-cd /srv/your-project
-git fetch origin main
-git checkout main
-git pull --ff-only origin main
-
-# build or install dependencies here
-
-# restart your service here
-
-# health check here
-curl -fsS http://127.0.0.1:8000/health
-```
-
-## Python / FastAPI
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-systemctl restart fastapi-demo
-curl -fsS http://127.0.0.1:8001/health
-```
-
-The `fastapi-demo.service` file still needs to match your actual app entry, such as `main:app` or `app.main:app`.
-
-## Go
-
-```bash
-go mod download
-go build -o app ./cmd/server
-systemctl restart go-api
-curl -fsS http://127.0.0.1:8002/health
-```
-
-Confirm the build path matches your repository.
-
-## Java / Spring Boot
-
-```bash
-mvn clean package -DskipTests
-cp target/*.jar app.jar
-systemctl restart java-api
-curl -fsS http://127.0.0.1:8003/actuator/health
-```
-
-If your project uses Gradle or has multiple jars, adjust the build and copy commands.
-
-## Docker Compose
-
-```bash
-docker compose up -d --build
-docker compose ps
-curl -fsS http://127.0.0.1:8000/health
-```
+Use the [quickstart](QUICKSTART.zh-CN.md) for server monitoring, Docker management,
+Nginx sites/certificates and request collection. Sites are independent of Git:
+enter a name, domain and port, then configure the backend address in the Nginx
+entry settings. Health checks and the advanced site key are optional.

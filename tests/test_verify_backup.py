@@ -244,7 +244,24 @@ def test_legacy_bundle_does_not_require_install_marker(tmp_path: Path) -> None:
     assert result.legacy_installation
 
 
-def test_bundle_must_include_projects_config_from_app_or_data_home(tmp_path: Path) -> None:
+def test_sites_only_bundle_is_accepted_without_legacy_projects(tmp_path: Path) -> None:
+    data_root = DATA_HOME.lstrip("/")
+    bundle = _build_bundle(
+        tmp_path,
+        omit_entries=frozenset({f"{data_root}/projects.json", f"{data_root}/state.json"}),
+        extra_entries=(
+            ArchiveEntry(f"{data_root}/sites.json", "file", b'{"sites":[]}\n'),
+            ArchiveEntry(f"{data_root}/monitoring-state.json", "file", b'{"system_metrics":[]}\n'),
+        ),
+    )
+
+    result = verifier.verify_backup(bundle, require_root_owner=False)
+
+    assert result.member_count == 9
+    assert not result.legacy_installation
+
+
+def test_bundle_must_include_site_or_legacy_projects_config(tmp_path: Path) -> None:
     projects_name = f"{DATA_HOME.lstrip('/')}/projects.json"
     bundle = _build_bundle(tmp_path, omit_entries=frozenset({projects_name}))
 
@@ -265,12 +282,14 @@ def test_bundle_must_include_projects_config_from_app_or_data_home(tmp_path: Pat
         (ArchiveEntry("", "file", b"{}\n", uid=1000), "not root-owned and private"),
     ],
 )
-def test_archived_projects_config_must_be_a_root_private_regular_file(
+@pytest.mark.parametrize("filename", ["projects.json", "sites.json", "monitoring-state.json", "website-monitoring.json", "docker-mirrors-last.json"])
+def test_archived_config_and_monitoring_state_must_be_root_private_regular_files(
     tmp_path: Path,
     entry: ArchiveEntry,
     message: str,
+    filename: str,
 ) -> None:
-    projects_name = f"{DATA_HOME.lstrip('/')}/projects.json"
+    projects_name = f"{DATA_HOME.lstrip('/')}/{filename}"
     replacement = ArchiveEntry(
         projects_name,
         entry.kind,

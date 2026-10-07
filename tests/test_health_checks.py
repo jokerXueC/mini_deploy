@@ -6,7 +6,7 @@ import agent
 
 
 def project():
-    return agent._project_from_config({"key": "api", "repo": "https://example.test/api.git"}, "api")
+    return agent._project_from_config({"key": "api"}, "api")
 
 
 class Response:
@@ -43,75 +43,15 @@ def test_health_status_for_unconfigured_project():
     assert result["status"] == "not_configured"
 
 
-def test_health_transition_notification_only_reports_real_state_changes():
-    current_project = project()
-    failed = {"status": "failed", "code": 503, "duration_ms": 12.5, "detail": "HTTP 状态码 503"}
-    healthy = {"status": "healthy", "code": 200, "duration_ms": 8, "detail": "HTTP 响应正常"}
-
-    assert agent._health_transition_notification(current_project, None, failed) is None
-    title, detail = agent._health_transition_notification(current_project, healthy, failed)
-    assert "健康检查失败" in title
-    assert "503" in detail
-    title, detail = agent._health_transition_notification(current_project, failed, healthy)
-    assert "已恢复" in title
-    assert "正常" in detail
-    assert agent._health_transition_notification(current_project, failed, failed) is None
-
-
-def test_failed_health_is_exposed_as_an_alert(monkeypatch):
-    current_project = replace(project(), health_url="http://127.0.0.1:8000/health")
-    monkeypatch.setattr(agent, "PROJECTS", {current_project.key: current_project})
-    monkeypatch.setattr(agent, "_health_status", {
-        current_project.key: {
-            "status": "failed",
-            "code": 503,
-            "duration_ms": 11,
-            "checked_at": "2026-10-01 12:00:00",
-            "detail": "HTTP 状态码 503",
-        },
-    })
-    alerts = agent._alerts_payload(
-        {"server": {}, "docker": {"available": True, "containers": []}},
-        {},
-        {},
-    )
-
-    health_alerts = [item for item in alerts if item["source"] == "health"]
-    assert len(health_alerts) == 1
-    assert "503" in health_alerts[0]["detail"]
-
-
-def test_commit_existence_checks_are_batched(monkeypatch):
-    first, second = "a" * 40, "b" * 40
-    calls = []
-
-    class Result:
-        returncode = 0
-        stdout = f"{first} commit 120\n{second} missing\n"
-
-    def run(command, **kwargs):
-        calls.append((command, kwargs))
-        return Result()
-
-    monkeypatch.setattr(agent.subprocess, "run", run)
-    assert agent._commits_exist(project(), [first, second]) == {first}
-    assert len(calls) == 1
-    assert calls[0][0][1:] == ["cat-file", "--batch-check"]
-    assert calls[0][1]["input"] == f"{first}^{{commit}}\n{second}^{{commit}}\n"
-
-
-def test_project_git_status_uses_a_short_identity_aware_cache(monkeypatch):
-    current_project = agent._project_from_config({"key": "git-cache-performance", "repo": "https://example.test/api.git"}, "git-cache-performance")
-    calls = []
-    monkeypatch.setattr(agent, "_run_git", lambda args, current_project=None: calls.append(args) or (
-        "a" * 40 + "\n" + "a" * 7 if args[1] == "rev-parse" else "main"
-    ))
-    monkeypatch.setattr(agent.time, "monotonic", lambda: 100)
-
-    first = agent._project_git_status(current_project)
-    second = agent._project_git_status(current_project)
-
-    assert first == second
-    assert len(calls) == 2
-    agent._project_git_status(replace(current_project, repo="https://example.test/other.git"))
-    assert len(calls) == 4
+def test_existing_health_check_uses_sustained_alerts(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent, "STATE_FILE", tmp_path / "state.json")
+    monitor = agent._monitor()
+    now = [10000]
+    monitor.clock = lambda: now[0]
+    monitor.observe("health:api", True, "健康检查失败：API", "HTTP 503", "health")
+    assert agent._alerts_payload({}) == []
+    now[0] += 60
+    monitor.observe("health:api", True, "健康检查失败：API", "HTTP 503", "health")
+    alerts = agent._alerts_payload({})
+    assert len(alerts) == 1
+    assert alerts[0]["source"] == "health" and "503" in alerts[0]["detail"]

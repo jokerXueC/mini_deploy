@@ -11,10 +11,10 @@ function nginxEntryFields() {
   $('nginxAdvanced').hidden = project;
   if (project) toggleNginxInstall(false);
   $('nginxEntryAdvice').textContent = project
-    ? '保留项目 Compose 中的 Nginx 和端口映射即可。这里无需安装或接管；已有面板入口仍会保留。部署前请在项目的「检查项目」中核对端口占用。'
+    ? '保留站点 Compose 中的 Nginx 和端口映射即可。这里无需安装或接管；已有面板入口仍会保留。请核对入口端口占用。'
     : choice === 'chained'
-      ? '统一入口负责域名和证书，业务端口填写项目 Nginx 的可达端口（例如 8080）。两者不能同时发布服务器相同地址的 80/443；请先调整业务 Compose。'
-      : '没有自带入口的项目可使用此方式。统一 Nginx 转发到业务服务；安装是可选步骤，已有 Nginx 可通过高级接入复用。';
+      ? '统一入口负责域名和证书，业务端口填写站点 Nginx 的可达端口（例如 8080）。两者不能同时发布服务器相同地址的 80/443；请先调整业务 Compose。'
+      : '没有自带入口的站点可使用此方式。统一 Nginx 转发到业务服务；安装是可选步骤，已有 Nginx 可通过高级接入复用。';
   nginxQuickFields();
 }
 
@@ -167,7 +167,7 @@ function nginxProjectFields() {
   $('nginxPort').textContent = project ? `业务端口：${project.port}` : '';
   $('nginxNetworkHint').textContent = bridge
     ? '桥接网络：填写与 Nginx 共享网络的业务服务名，或容器可达的宿主机地址。127.0.0.1 指向 Nginx 容器本身。'
-    : '填写 Nginx 可访问的业务地址，端口来自项目设置。';
+    : '填写 Nginx 可访问的业务地址，端口来自站点设置。';
 }
 
 function renderNginxSettings(data, updateForm = true) {
@@ -190,7 +190,7 @@ function renderNginxSettings(data, updateForm = true) {
     const quickPrevious = $('nginxQuickProject').value;
     $('nginxQuickProject').innerHTML = data.projects?.length
       ? data.projects.map(project => `<option value="${escapeHtml(project.key)}">${escapeHtml(project.name)}</option>`).join('')
-      : '<option value="">请先添加项目</option>';
+      : '<option value="">请先添加站点</option>';
     if (data.projects?.some(project => project.key === quickPrevious)) $('nginxQuickProject').value = quickPrevious;
     nginxQuickFields();
   }
@@ -205,7 +205,7 @@ async function refreshNginxSettings(discover = false) {
   renderNginxSettings(data);
   if (discover) nginxMessage(data.detected.errors?.join('；') || (data.detected.local || data.detected.containers.length
     ? `发现 ${data.detected.local ? '本机 Nginx，' : ''}${data.detected.containers.length} 个运行中的 Nginx 容器，可在高级接入中确认使用。`
-    : '未发现 Nginx，可选择本机或 Docker 安装，项目和域名稍后再配置。'));
+    : '未发现 Nginx，可选择本机或 Docker 安装，站点和域名稍后再配置。'));
   return data;
 }
 
@@ -253,7 +253,7 @@ async function nginxOperation(action) {
       $('nginxInstallResult').replaceChildren(document.createTextNode('测试地址：'), link, notice);
       return;
     }
-    if (action === 'remove-site' && !await showConfirmDialog({title: '移除域名入口', message: '该项目通过此 Nginx 的域名访问将停止。业务服务和代码不删除。', confirmText: '移除'})) return;
+    if (action === 'remove-site' && !await showConfirmDialog({title: '移除域名入口', message: '该站点通过此 Nginx 的域名访问将停止。业务服务和代码不删除。', confirmText: '移除'})) return;
     const payload = {action, mode: $('nginxMode').value, container: $('nginxContainer').value,
       project: $('nginxProject').value, host: $('nginxUpstream').value.trim()};
     nginxMessage('正在检查…');
@@ -268,23 +268,6 @@ async function nginxOperation(action) {
     controls.forEach(control => { control.disabled = false; });
   }
   await refreshCertificates();
-}
-
-async function ensureNginxConfigured() {
-  try {
-    const data = await fetchJson('nginx-settings');
-    if (data.configured && data.profile.mode !== 'none') return true;
-    closeProjectModal();
-    setView('certificates');
-    gatewayTab('Sites');
-    $('nginxEntryChoice').value = 'managed';
-    nginxEntryFields();
-    window.AppSelects?.syncAll();
-    nginxMessage('在访问入口中选择项目、填写域名和端口，即可检查并配置。');
-  } catch (error) {
-    setProjectFormError(`Nginx 接入检查失败：${error.message}`);
-  }
-  return false;
 }
 
 $('nginxMode').addEventListener('change', nginxFields);

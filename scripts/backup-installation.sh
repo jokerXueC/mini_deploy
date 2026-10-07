@@ -325,7 +325,7 @@ if [[ -e "$app_marker" || -L "$app_marker" ]]; then
   fi
 elif legacy_backup_enabled; then
   LEGACY_INSTALLATION="yes"
-  for required in agent.py install.sh env.example ui/index.html scripts/deploy.sample.sh; do
+  for required in agent.py install.sh env.example ui/index.html; do
     if [[ ! -f "$APP_HOME/$required" || -L "$APP_HOME/$required" ]]; then
       echo "APP_HOME is not a recognized mini_deploy installation: $APP_HOME" >&2
       exit 1
@@ -348,7 +348,8 @@ if [[ -e "$DATA_HOME" ]]; then
     fi
   elif [[ ! -f "$DATA_HOME/state.json" \
     && ! -f "$DATA_HOME/audit.jsonl" \
-    && ! -f "$DATA_HOME/projects.json" ]]; then
+    && ! -f "$DATA_HOME/projects.json" \
+    && ! -f "$DATA_HOME/sites.json" ]]; then
     echo "DATA_HOME is not recognized as mini_deploy data: $DATA_HOME" >&2
     exit 1
   fi
@@ -502,11 +503,14 @@ if [[ -f "$ENV_FILE" ]]; then
   fi
 fi
 
-# A first layout migration can legitimately have both files. Archive and
-# validate both verbatim so no project Token is lost; install.sh decides which
-# file is authoritative from the managed DEPLOY_PROJECTS_FILE value.
+# Archive new site/monitoring data and legacy configuration verbatim. The
+# runtime selects sites.json first; original projects.json and state.json stay.
 validate_private_projects_file "$APP_HOME/projects.json"
 validate_private_projects_file "$DATA_HOME/projects.json"
+validate_private_projects_file "$DATA_HOME/sites.json"
+validate_private_projects_file "$DATA_HOME/monitoring-state.json"
+validate_private_projects_file "$DATA_HOME/website-monitoring.json"
+validate_private_projects_file "$DATA_HOME/docker-mirrors-last.json"
 
 declare -a archive_paths=()
 for path in "$APP_HOME" "$ENV_FILE" "$DATA_HOME" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do

@@ -236,9 +236,9 @@ test('server refresh is serialized and ignores superseded status responses', asy
   let finish, requests = 0, renders = 0, scheduled = 0;
   const context = vm.createContext({
     activeView: 'server', document: {hidden: false}, serverRefreshInFlight: false,
-    systemStatusRequestId: 0, clearServerRefresh() {},
+    systemStatusRequestId: 0, csrfToken: '', clearServerRefresh() {}, updateLiveIndicator() {},
     fetchJson: () => { requests++; return new Promise(resolve => {finish = resolve;}); },
-    renderSystemStatus() {renders++;}, renderAlerts() {}, renderEvents() {}, renderDeployLock() {},
+    renderSystemStatus() {renders++;}, renderAlerts() {}, renderEvents() {},
     $: () => ({textContent: ''}), scheduleServerRefresh() {scheduled++;},
   });
   vm.runInContext(js.slice(start, end), context);

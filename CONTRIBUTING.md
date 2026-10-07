@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你参与 mini_deploy。项目面向个人开发者、小团队和低配置 Linux 服务器，目标是保持部署流程可理解、可审计，并尽量维持 Python 标准库运行时和无数据库架构。
+mini_deploy 面向个人开发者、小团队和低配置 Linux 服务器，定位为服务器运维与请求监控面板，保持 Python 标准库运行时和无数据库架构。贡献范围为服务器监控、Docker 管理、Nginx/证书、请求采集和独立网关，不再扩展 Git 部署、脚本向导或业务运行环境生成。
 
 ## 开始之前
 
@@ -11,12 +11,12 @@
 
 ## 支持目标
 
-mini_deploy 的部署目标是 Linux 服务器，主要运行环境为：
+mini_deploy 的运行目标是 Linux 服务器，主要运行环境为：
 
 - Python 3.10-3.13。
 - systemd。
 - Bash、Git。
-- 可选的 Nginx、Certbot 和 Docker Compose。
+- 可选的 Nginx、Certbot 和 Docker；不要求 Compose 或 PyYAML。
 
 Windows 兼容性不是功能验收条件。无论使用什么设备编辑代码，涉及安装、服务管理、权限、路径、Shell 或容器的行为都必须在一次性的 Linux 测试环境中验证。
 
@@ -36,11 +36,12 @@ python3 -m pip install -r requirements-dev.txt
 
 - 保持改动集中，一个 Pull Request 解决一个明确问题。
 - 优先沿用现有标准库、原生 JavaScript/CSS 和本地辅助函数，不为小功能引入重型框架或常驻服务。
-- 所有来自 HTTP、WebHook、项目配置和环境变量的输入都应视为不可信数据。
+- 所有来自 HTTP、站点配置、遗留项目配置和环境变量的输入都应视为不可信数据。
 - 不通过字符串拼接接受任意 Shell、文件路径、systemd 单元名、容器名或 Nginx 配置片段。
 - 配置和状态写入应保持原子性；包含 Secret 的文件应使用最小权限。
 - 安装、升级、回滚和卸载默认不得删除业务代码、数据库、Docker Volume、用户配置或备份。
-- 不要提交本地 `projects.json`、旧版 `.backups/` 或 `projects.json.*.bak`；这些文件可能包含 WebHook 和通知 Secret。
+- 转型后停止部署触发，不自动恢复旧队列；保留业务文件、配置、脚本、服务和容器。Nginx 站点及请求采集不得要求 Git 仓库或部署脚本。
+- 不要提交本地 `sites.json`、`monitoring-state.json`、旧 `projects.json`、`state.json` 或配置备份；它们可能包含凭据和服务器信息。
 - 面板不得提供任意 Shell 终端，也不得自动执行无法安全回滚的数据库迁移。
 - 新增配置项需要安全默认值、环境变量示例、兼容说明和文档。
 - 用户可见的变化应添加到 `CHANGELOG.md` 的 `Unreleased` 部分。
@@ -52,14 +53,15 @@ python3 -m pip install -r requirements-dev.txt
 ```bash
 python3 -m py_compile agent.py certificates.py nginx_runtime.py nginx_install.py scripts/verify_backup.py
 python3 -m pytest
-python3 -m ruff check agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py scripts/verify_backup.py tests
+python3 -m ruff check agent.py certificates.py nginx_runtime.py nginx_install.py scripts/verify_backup.py tests
 node --check ui/app.js
 node --check ui/motion.js
 node --check ui/certificates.js
 node --check ui/nginx.js
 node --test tests/ui_navigation.test.cjs
 node --test tests/ui_motion.test.cjs
-node --test tests/ui_onboarding.test.cjs
+node --test tests/ui_requests.test.cjs
+node --test tests/ui_docker.test.cjs
 node --test tests/ui_nginx.test.cjs
 bash -n install.sh
 for file in scripts/*.sh; do bash -n "$file"; done
@@ -72,9 +74,9 @@ git diff --check
 shellcheck install.sh scripts/*.sh
 ```
 
-修改认证、WebHook、配置写入、部署队列、取消、回滚、备份校验、维护锁、路径校验或安装升级逻辑时，应增加能够覆盖成功、失败和恶意输入的自动化测试。备份测试只能使用临时 fixture；`scripts/verify_backup.py` 是只读校验器，不应在测试说明中把它表述为恢复工具。GitHub Actions 会在 Python 3.10-3.13 上运行测试和 Ruff，并单独执行 JavaScript 语法检查与 ShellCheck。请在 Pull Request 中清楚记录无法自动验证的部分和手动验证步骤。
+修改认证、配置写入、Docker/Nginx 操作、网关接入、备份校验、维护锁、路径校验或安装升级逻辑时，应增加能够覆盖成功、失败和恶意输入的自动化测试。转型测试还须证明旧部署接口不可执行、旧队列不自动恢复、站点独立于 Git 且旧业务资源保留。备份测试只能使用临时 fixture；`scripts/verify_backup.py` 是只读校验器，不是恢复工具。GitHub Actions 会在 Python 3.10-3.13 上运行测试和 Ruff，并单独执行 JavaScript 语法检查与 ShellCheck。请记录未验证的部分和手动验证步骤。
 
-手动验证只能使用测试凭据、测试域名和非生产仓库。测试完成后应撤销临时 Token，并删除日志或截图中的敏感信息。
+手动验证只能使用测试凭据、测试域名和隔离资源，不需要真实仓库或 push。测试完成后应撤销临时 Token，并删除日志或截图中的敏感信息。
 
 ## 提交 Issue
 
@@ -82,7 +84,7 @@ Bug 报告应包含：
 
 - mini_deploy 版本或提交号。
 - Linux 发行版和版本、Python 版本。
-- 安装方式，以及是否使用 systemd、Nginx 和 Docker Compose。
+- 安装方式，以及是否使用 systemd、Nginx 和 Docker。
 - 最小复现步骤、预期结果和实际结果。
 - 已脱敏的配置片段、状态和相关日志。
 

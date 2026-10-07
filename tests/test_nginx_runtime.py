@@ -233,8 +233,8 @@ def test_removing_project_cannot_orphan_nginx_site(docker_setup, monkeypatch):
     monkeypatch.setattr(agent, "STATE_FILE", settings.data_home / "state.json")
     monkeypatch.setattr(agent, "PROJECTS", {"api": project, "other": other})
     agent._project_nginx_conf_path(project).write_text("server {}")
-    with pytest.raises(certificates.CertificateError, match="移除"):
-        agent._delete_project_transaction("api")
+    with pytest.raises(ValueError, match="关联"):
+        agent._delete_site({"key": "api"})
     assert "api" in agent.PROJECTS
 
 
@@ -246,8 +246,8 @@ def test_changing_project_cannot_leave_stale_nginx_domain(docker_setup, monkeypa
     monkeypatch.setattr(agent, "STATE_FILE", settings.data_home / "state.json")
     monkeypatch.setattr(agent, "PROJECTS", {"api": project})
     agent._project_nginx_conf_path(project).write_text("server {}")
-    with pytest.raises(ValueError, match="移除域名入口"):
-        agent._save_project_transaction({"key": "api", "app_domain": "new.example.test", "enabled": False}, "api")
+    with pytest.raises(ValueError, match="不能覆盖"):
+        agent._save_site({"site": {"key": "api", "name": "API", "app_domain": "new.example.test", "enabled": False}, "original_key": "api"})
 
 
 def test_unincluded_conf_directory_is_not_accepted(docker_setup, monkeypatch):

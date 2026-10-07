@@ -20,7 +20,7 @@
 <body>
   <main class="page">
     <div class="top-bar">
-      <a class="back-pill" href="ui">部署面板</a>
+      <a class="back-pill" href="ui">服务器面板</a>
       <button id="themeToggleBtn" class="theme-toggle" type="button" aria-label="切换浅色模式" aria-pressed="false">
         <span class="theme-toggle-icon" aria-hidden="true"></span>
         <span id="themeToggleText">浅色</span>
@@ -28,9 +28,9 @@
     </div>
     <header class="hero">
       <div>
-        <div class="eyebrow">mini_deploy CI/CD</div>
-        <h1 id="panelTitle">部署健康面板</h1>
-        <p id="panelSubtitle">监控 Git 平台 WebHook、部署队列、最近发布和线上健康检查。</p>
+        <div class="eyebrow">mini_deploy Monitor</div>
+        <h1 id="panelTitle">服务器健康面板</h1>
+        <p id="panelSubtitle">查看服务器资源、网络吞吐和 Docker 容器运行状态。</p>
       </div>
       <div class="hero-actions compact-toolbar">
         <div class="hero-action-row toolbar-status">
@@ -38,22 +38,11 @@
           <span id="updatedAt" class="muted">-</span>
         </div>
         <div class="hero-action-row toolbar-controls">
-          <div id="projectSwitcher" class="project-switcher">
-            <button id="projectSelectButton" class="project-select-button" type="button" aria-haspopup="listbox" aria-expanded="false">
-              <span id="projectSelectLabel">全部</span>
-              <span class="select-caret" aria-hidden="true"></span>
-            </button>
-            <div id="projectSelectMenu" class="project-select-menu" role="listbox" hidden></div>
-          </div>
-          <button id="redeployBtn" class="danger-button" type="button">重新部署</button>
           <!-- Lucide icons (ISC); see THIRD_PARTY_NOTICES.md. -->
           <button id="refreshBtn" class="toolbar-icon" type="button" title="刷新当前页面" aria-label="刷新当前页面"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></button>
           <div id="toolbarMore" class="toolbar-more">
             <button id="toolbarMoreButton" class="toolbar-icon" type="button" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbarMoreMenu"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button>
             <div id="toolbarMoreMenu" class="toolbar-more-menu" role="menu" aria-label="更多操作" hidden>
-              <button id="rollbackBtn" type="button" role="menuitem">回滚</button>
-              <button id="cancelDeployBtn" type="button" role="menuitem">取消部署</button>
-              <p id="projectActionHint" class="action-hint">选择项目后可操作</p>
               <a href="logout" role="menuitem">退出登录</a>
             </div>
           </div>
@@ -62,9 +51,8 @@
     </header>
 
     <nav class="view-tabs" aria-label="面板视图">
-      <button id="deployViewTab" class="view-tab active" type="button" data-view="deploy">部署</button>
-      <button id="serverViewTab" class="view-tab" type="button" data-view="server">服务器状态</button>
-      <button id="eventsViewTab" class="view-tab" type="button" data-view="events">告警事件</button>
+      <button id="serverViewTab" class="view-tab active" type="button" data-view="server">服务器状态</button>
+      <button id="eventsViewTab" class="view-tab" type="button" data-view="events">监测告警</button>
       <button id="notifyViewTab" class="view-tab" type="button" data-view="notify">通知配置</button>
       <button id="certificatesViewTab" class="view-tab" type="button" data-view="certificates">域名与证书</button>
       <button id="requestsViewTab" class="view-tab" type="button" data-view="requests">请求记录</button>
@@ -167,23 +155,43 @@
     </div>
 
     <div id="certificatesView" class="dashboard-view">
+      <section class="panel website-monitor-panel">
+        <div class="panel-head"><div><h2>线上证书</h2><p>网站当前提供的证书 · CDN 域名显示边缘证书</p></div><button id="monitorCertificateAdd" class="ghost-button compact-action" type="button">添加网址</button></div>
+        <div id="monitorCertificates" class="monitor-rows"></div>
+      </section>
       <div class="gateway-toolbar">
         <div class="gateway-tabs" role="tablist" aria-label="域名管理">
           <button id="gatewaySitesTab" class="gateway-tab active" type="button" role="tab" aria-selected="true" aria-controls="gatewaySites">访问入口</button>
-          <button id="gatewayCertificatesTab" class="gateway-tab" type="button" role="tab" aria-selected="false" aria-controls="gatewayCertificates">HTTPS 证书</button>
+          <button id="gatewayCertificatesTab" class="gateway-tab" type="button" role="tab" aria-selected="false" aria-controls="gatewayCertificates">Nginx 托管证书</button>
         </div>
         <span id="nginxCurrent" class="badge neutral">尚未接入</span>
       </div>
       <section id="gatewaySites" class="certificate-panel nginx-setup gateway-section" role="tabpanel" aria-labelledby="gatewaySitesTab">
-        <div class="panel-head"><div><h2>项目访问入口</h2><p class="gateway-caption">域名与业务服务</p></div><div class="certificate-actions"><button id="nginxDetect" class="ghost-button compact-action" type="button">立即检测</button><button id="nginxInstall" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="nginxInstallForm">安装 Nginx</button></div></div>
+        <div class="panel-head"><div><h2>站点访问入口</h2><p class="gateway-caption">域名与业务服务</p></div><div class="certificate-actions"><button id="nginxDetect" class="ghost-button compact-action" type="button">立即检测</button><button id="nginxInstall" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="nginxInstallForm">安装 Nginx</button></div></div>
+        <section class="site-registry" aria-labelledby="siteRegistryTitle">
+          <div class="panel-head"><h3 id="siteRegistryTitle">站点登记</h3><button id="siteAdd" class="ghost-button compact-action" type="button">添加站点</button></div>
+          <p id="siteFeedback" role="status" aria-live="polite"></p>
+          <div id="siteRegistryList"></div>
+          <form id="siteForm" hidden>
+            <h3 id="siteFormTitle">添加站点</h3>
+            <div class="gateway-form-grid">
+              <label class="field"><span>显示名称</span><input id="siteName" required maxlength="120"></label>
+              <label class="field"><span>业务域名</span><input id="siteDomain" maxlength="253" placeholder="api.example.com"></label>
+              <label class="field"><span>业务端口</span><input id="sitePort" type="number" min="1" max="65535" required value="8000"></label>
+              <label class="field"><span>健康检查地址（可选）</span><input id="siteHealth" type="url" maxlength="2048" placeholder="http://127.0.0.1:8000/health"></label>
+            </div>
+            <details id="siteAdvanced"><summary>高级设置</summary><label class="field"><span>站点标识（可选）</span><input id="siteKey" maxlength="80" pattern="[a-z0-9][a-z0-9_\-]{0,79}" placeholder="自动生成" autocomplete="off"></label></details>
+            <div class="certificate-actions"><button id="siteSave" class="danger-button compact-action" type="submit">保存站点</button><button id="siteCancel" class="ghost-button compact-action" type="button">取消</button></div>
+          </form>
+        </section>
         <div class="gateway-entry-choice">
-          <label class="field"><span>本次如何配置入口</span><select id="nginxEntryChoice"><option value="project">保留项目自带入口（无需安装）</option><option value="managed">使用面板统一入口</option><option value="chained">统一入口转发到项目 Nginx</option></select></label>
+          <label class="field"><span>本次如何配置入口</span><select id="nginxEntryChoice"><option value="managed">使用面板统一入口</option><option value="project">保留站点自带入口（无需安装）</option><option value="chained">统一入口转发到站点 Nginx</option></select></label>
           <p id="nginxEntryAdvice" class="gateway-caption" role="status"></p>
         </div>
         <div id="nginxSiteList" class="gateway-site-list"></div>
         <div id="nginxFeedback" role="status" aria-live="polite"></div>
         <form id="nginxInstallForm" class="gateway-install" hidden>
-          <div class="gateway-section-title"><h3>先启动 HTTP 服务</h3><span class="badge neutral">无需项目、域名或证书</span></div>
+          <div class="gateway-section-title"><h3>先启动 HTTP 服务</h3><span class="badge neutral">无需站点、域名或证书</span></div>
           <div class="gateway-form-grid">
             <label class="field"><span>安装方式</span><select id="nginxInstallMode"><option value="local">服务器本机</option><option value="docker">Docker 容器</option></select></label>
             <label class="field"><span>HTTP 访问端口</span><input id="nginxInstallPort" type="number" min="1" max="65535" value="80" required readonly></label>
@@ -200,7 +208,7 @@
         <form id="nginxQuickForm" class="gateway-quick-form">
           <div class="gateway-section-title"><span class="gateway-step">01</span><h3>配置访问入口</h3></div>
           <div class="gateway-form-grid">
-            <label class="field"><span>业务项目</span><select id="nginxQuickProject" required><option value="">请先添加项目</option></select></label>
+            <label class="field"><span>业务站点</span><select id="nginxQuickProject" required><option value="">请先添加站点</option></select></label>
             <label class="field"><span>业务域名</span><input id="nginxQuickDomain" placeholder="api.example.com" maxlength="253" required></label>
             <label class="field"><span>业务端口</span><input id="nginxQuickPort" type="number" min="1" max="65535" required placeholder="8001"></label>
           </div>
@@ -236,7 +244,7 @@
           </div>
         </form>
         <form id="nginxUpstreamForm" class="nginx-upstream">
-          <label class="field"><span>业务项目</span><select id="nginxProject"><option value="">请先添加项目</option></select></label>
+          <label class="field"><span>业务站点</span><select id="nginxProject"><option value="">请先添加站点</option></select></label>
           <label class="field"><span>Nginx 访问的后端地址</span><input id="nginxUpstream" maxlength="253" placeholder="例如 api 或 172.17.0.1" required></label>
           <span id="nginxPort" class="muted"></span>
           <div class="certificate-actions"><button id="nginxProbe" class="ghost-button" type="button">检查连通</button><button id="nginxSaveUpstream" class="ghost-button" type="submit">检查并保存后端</button><button id="nginxRemoveSite" class="ghost-button danger-text" type="button">移除域名入口</button></div>
@@ -249,7 +257,7 @@
         <div id="certificateFeedback" role="status" aria-live="polite"></div>
         <div class="certificate-layout">
           <div>
-            <label class="field"><span>业务项目</span><select id="certificateProject"><option value="">加载中</option></select></label>
+            <label class="field"><span>业务站点</span><select id="certificateProject"><option value="">加载中</option></select></label>
             <dl id="certificateDetails" class="detail-list certificate-details"></dl>
             <div class="certificate-actions">
               <button id="certificateEnable" class="ghost-button" type="button" disabled>启用 HTTPS</button>
@@ -274,184 +282,12 @@
       </section>
     </div>
 
-    <div id="deployView" class="dashboard-view active">
-    <section class="summary-grid status-grid">
-      <article class="status-stat-card">
-        <div class="status-card-main">
-          <div class="stat-title">Agent</div>
-          <div class="stat-identity">
-            <div class="stat-icon">AG</div>
-            <div class="stat-meta">
-              <span class="stat-pill">Deploy Agent</span>
-              <span id="agentStatus" class="badge neutral">加载中</span>
-            </div>
-          </div>
-          <div class="stat-metrics compact-metrics">
-            <div class="metric-box">
-              <div class="metric-label">Host</div>
-              <div id="agentHost" class="metric-value compact-value">-</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Branch</div>
-              <div id="targetBranchMini" class="metric-value compact-value">-</div>
-            </div>
-          </div>
-        </div>
-        <div class="status-mini-history">
-          <div class="history-track" id="agentHistory"></div>
-        </div>
-      </article>
-      <article class="status-stat-card">
-        <div class="status-card-main">
-          <div class="stat-title">部署状态</div>
-          <div class="stat-identity">
-            <div class="stat-icon">CI</div>
-            <div class="stat-meta">
-              <span class="stat-pill">Pipeline</span>
-              <span id="deployStatus" class="badge neutral">-</span>
-            </div>
-          </div>
-          <div id="deploySub" class="status-sub">-</div>
-        </div>
-        <div class="status-mini-history">
-          <div class="history-track" id="deployHistory"></div>
-        </div>
-      </article>
-      <article class="status-stat-card">
-        <div class="status-card-main">
-          <div class="stat-title">队列</div>
-          <div class="stat-identity">
-            <div class="stat-icon">QU</div>
-            <div class="stat-meta">
-              <span class="stat-pill">Serial Queue</span>
-              <span id="queueSize" class="badge neutral">-</span>
-            </div>
-          </div>
-          <div class="status-sub">串行执行，避免并发部署</div>
-        </div>
-        <div class="status-mini-history">
-          <div class="history-track" id="queueHistory"></div>
-        </div>
-      </article>
-      <article class="status-stat-card">
-        <div class="status-card-main">
-          <div class="stat-title">当前提交</div>
-          <div class="stat-identity">
-            <div class="stat-icon">GT</div>
-            <div class="stat-meta">
-              <span id="headSha" class="stat-pill mono">-</span>
-              <span id="branchName" class="badge neutral">-</span>
-            </div>
-          </div>
-          <div class="status-sub">仓库当前 HEAD</div>
-        </div>
-        <div class="status-mini-history">
-          <div class="history-track" id="gitHistory"></div>
-        </div>
-      </article>
-    </section>
-
-    <section class="panel project-panel">
-      <div class="panel-head">
-        <div>
-          <h2>项目接入状态</h2>
-          <p id="projectModeHint">加载项目配置中...</p>
-        </div>
-        <div class="project-config-actions">
-          <span id="projectModeBadge" class="badge neutral">-</span>
-          <button id="initProjectsBtn" class="ghost-button compact-action" type="button" title="创建项目配置文件，之后可直接在网页添加和管理仓库">初始化配置</button>
-          <button id="editProjectBtn" class="ghost-button compact-action" type="button">编辑当前</button>
-          <button id="addProjectBtn" class="danger-button compact-action" type="button">添加仓库</button>
-        </div>
-      </div>
-      <div id="projectOverview" class="project-list skeleton-block"></div>
-      <p id="projectRecordError" class="form-error" role="alert" hidden></p>
-    </section>
-
-    <section class="panel-grid deploy-main-grid">
-      <article class="panel wide">
-        <div class="panel-head">
-          <div>
-            <h2>最近部署</h2>
-            <p>按时间从新到旧，横向滑动查看</p>
-          </div>
-          <span id="lastBadge" class="badge">-</span>
-        </div>
-        <div id="deployStats" class="deploy-stats skeleton-block"></div>
-      </article>
-      <details class="panel runtime-details"><summary>运行详情</summary>
-        <dl class="detail-list">
-          <div><dt>目标分支</dt><dd id="targetBranch">-</dd></div>
-          <div><dt>项目目录</dt><dd id="projectDir">-</dd></div>
-          <div><dt>部署脚本</dt><dd id="deployScript">-</dd></div>
-          <div><dt>最近 WebHook</dt><dd id="lastWebhook">-</dd></div>
-        </dl>
-      </details>
-    </section>
-
-    <details class="panel deploy-diagnostics">
-      <summary>部署体检与锁状态</summary>
-
-      <div class="ops-panel">
-        <div class="panel-head">
-          <div>
-            <h2>部署体检</h2>
-            <p id="preflightHint">部署前检查 Git、脚本、Docker、磁盘和日志目录</p>
-          </div>
-          <button id="preflightBtn" class="ghost-button compact-action" type="button">运行体检</button>
-        </div>
-        <div id="deployLockStatus" class="lock-status">锁状态加载中...</div>
-        <div id="preflightResult" class="preflight-result">点击运行体检后显示结果和修复命令。</div>
-      </div>
-    </details>
-
-    <section class="panel logs-panel">
-      <div class="panel-head">
-        <div>
-          <h2>部署日志</h2>
-          <p id="logHint">部署脚本原始输出</p>
-        </div>
-      </div>
-      <div class="log-actions">
-          <button id="deployLogBtn" class="log-tab active" type="button">部署日志</button>
-          <button id="agentLogBtn" class="log-tab" type="button">Agent 日志</button>
-          <label class="log-control">预览
-            <select id="logLineSelect">
-              <option value="100">100 行</option>
-              <option value="200" selected>200 行</option>
-              <option value="500">500 行</option>
-              <option value="1000">1000 行</option>
-              <option value="2000">2000 行</option>
-              <option value="5000">5000 行</option>
-              <option value="custom">自定义</option>
-            </select>
-            <input id="logLineCustomInput" class="log-line-input" type="number" min="1" step="1" value="200" inputmode="numeric" aria-label="自定义预览行数" hidden>
-          </label>
-          <label class="log-control">下载
-            <select id="logDownloadSelect">
-              <option value="current">当前行数</option>
-              <option value="500">500 行</option>
-              <option value="1000">1000 行</option>
-              <option value="5000">5000 行</option>
-              <option value="custom">自定义</option>
-              <option value="all">全部</option>
-            </select>
-            <input id="logDownloadCustomInput" class="log-line-input" type="number" min="1" step="1" value="5000" inputmode="numeric" aria-label="自定义下载行数" hidden>
-          </label>
-          <button id="downloadLogBtn" class="log-tab log-download" type="button">下载日志</button>
-          <span id="logCount" class="badge neutral">0 行</span>
-      </div>
-      <pre id="logs" class="logs" aria-live="polite">加载中...</pre>
-    </section>
-
-    </div>
-
     <div id="notifyView" class="dashboard-view">
     <section class="panel notification-panel">
       <div class="panel-head">
         <div>
           <h2>通知配置</h2>
-          <p id="notificationHint">选择企微、钉钉或邮箱，部署完成后自动推送结果</p>
+          <p id="notificationHint">选择一个通知渠道即可接收异常与恢复提醒</p>
         </div>
         <div class="notification-actions">
           <span id="notificationBadge" class="badge neutral">未配置</span>
@@ -503,21 +339,44 @@
           </div>
         </article>
       </div>
-      <div id="notificationResult" class="notification-result">保存后，部署成功或失败都会按启用渠道推送。</div>
+      <div id="notificationResult" class="notification-result">保存后可发送测试，确认通知能够送达。</div>
     </section>
     </div>
     <div id="eventsView" class="dashboard-view">
+      <section class="panel website-monitor-panel">
+        <div class="panel-head"><div><h2>网站监测</h2><p id="monitorSummary">每 30 秒检查访问状态与响应耗时，HTTPS 自动检查证书</p></div><button id="monitorNotify" class="ghost-button compact-action" type="button">设置通知</button></div>
+        <form id="monitorForm" class="monitor-add-form">
+          <label class="field"><span>网站地址</span><input id="monitorUrl" required maxlength="2048" placeholder="https://example.com 或 http://192.168.1.10:8080/health" autocomplete="off"></label>
+          <button id="monitorSave" class="danger-button compact-action" type="submit">开始监测</button>
+          <button id="monitorCancel" class="ghost-button compact-action" type="button" hidden>取消</button>
+        </form>
+        <p id="monitorFeedback" class="monitor-feedback" role="status" aria-live="polite"></p>
+        <div id="monitorTargets" class="monitor-rows"></div>
+        <details class="monitor-settings"><summary>提醒规则</summary>
+          <form id="monitorSettingsForm">
+            <div class="monitor-settings-grid">
+              <label class="field"><span>异常持续（秒）</span><input id="monitorSustain" type="number" min="15" max="600" value="60" required></label>
+              <label class="field"><span>重复提醒（分钟）</span><input id="monitorRepeat" type="number" min="5" max="1440" value="60" required></label>
+              <label class="field"><span>响应较慢（毫秒）</span><input id="monitorSlow" type="number" min="100" max="60000" value="3000" required></label>
+              <label class="field"><span>证书提前提醒（天）</span><input id="monitorCertDays" type="number" min="1" max="90" value="14" required></label>
+            </div>
+            <div class="certificate-actions"><label><input id="monitorRecovery" type="checkbox" checked> 恢复后通知</label><button class="ghost-button compact-action" type="submit">保存规则</button></div>
+          </form>
+        </details>
+      </section>
       <article class="panel ops-panel">
         <div class="panel-head">
           <div>
             <h2>告警与事件</h2>
-            <p id="eventTimelineHint">部署、WebHook、容器和资源异常汇总</p>
+            <p id="eventTimelineHint">容器和资源异常汇总</p>
           </div>
           <div class="event-actions">
             <span id="alertBadge" class="badge neutral">-</span>
+            <button id="monitorMute" class="ghost-button compact-action" type="button">静音 1 小时</button>
             <button id="clearAlertsBtn" class="ghost-button compact-action" type="button" disabled>清除当前</button>
           </div>
         </div>
+        <p id="monitorDelivery" class="monitor-feedback" role="status"></p>
         <div class="events-layout">
         <div id="alertList" class="alert-list skeleton-block"></div>
         <div id="eventTimeline" class="event-timeline skeleton-block"></div>
@@ -525,7 +384,7 @@
       </article>
     </div>
 
-    <div id="serverView" class="dashboard-view">
+    <div id="serverView" class="dashboard-view active">
       <section class="summary-grid status-grid server-status-grid">
         <article class="status-stat-card resource-card">
           <div class="status-card-main">
@@ -610,8 +469,20 @@
       <section class="panel docker-images-panel" aria-labelledby="dockerImagesHeading">
         <div class="panel-head">
           <div><h2 id="dockerImagesHeading">Docker 镜像</h2><p id="dockerImageCount">尚未加载</p></div>
-          <button id="dockerImagesRefresh" class="ghost-button compact-action" type="button">刷新镜像</button>
+          <div class="certificate-actions"><button id="dockerMirrorsOpen" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="dockerMirrorsPanel">镜像加速</button><button id="dockerImagesRefresh" class="ghost-button compact-action" type="button">刷新镜像</button></div>
         </div>
+        <section id="dockerMirrorsPanel" class="docker-mirrors" hidden aria-labelledby="dockerMirrorsTitle">
+          <div class="panel-head"><div><h3 id="dockerMirrorsTitle">主机镜像加速</h3><p id="dockerMirrorsSource">正在读取 Docker 配置</p></div><button id="dockerMirrorsRefresh" class="ghost-button compact-action" type="button">重新读取</button></div>
+          <p id="dockerMirrorsEffective" class="muted"></p>
+          <form id="dockerMirrorsForm">
+            <div id="dockerMirrorsAddresses"></div>
+            <div class="certificate-actions"><button id="dockerMirrorsAdd" class="ghost-button compact-action" type="button">添加地址</button><button id="dockerMirrorsSave" class="danger-button compact-action" type="submit" disabled>保存并生效</button></div>
+            <p class="docker-mirrors-note">优先热加载，必要时会重启 Docker。有运行中容器且未启用 live-restore 时不会自动重启。移除全部地址后恢复默认拉取方式。</p>
+          </form>
+          <p id="dockerMirrorsFeedback" class="muted" role="status" aria-live="polite"></p>
+          <p id="dockerMirrorsBackup" class="muted"></p>
+          <button id="dockerMirrorsTest" class="ghost-button compact-action" type="button" hidden>拉取 nginx:stable-alpine 验证</button>
+        </section>
         <div class="docker-image-tools">
           <input id="dockerImageSearch" type="search" aria-label="搜索镜像" placeholder="搜索镜像名称、标签或 ID">
           <form id="dockerImagePullForm">
@@ -685,224 +556,6 @@
       </section>
     </div>
 
-    <div id="projectModal" class="modal-backdrop" hidden>
-      <section class="project-modal" role="dialog" aria-modal="true" aria-labelledby="projectModalTitle">
-        <div class="modal-head">
-          <div>
-            <h2 id="projectModalTitle">添加仓库</h2>
-            <p id="projectModalHint">先确认服务器目录和部署脚本，再保存项目配置。</p>
-          </div>
-          <button id="closeProjectModalBtn" class="ghost-button icon-action" type="button">关闭</button>
-        </div>
-        <form id="projectForm" class="project-form">
-          <section id="projectWizard" hidden aria-label="添加项目向导">
-            <ol class="project-wizard-steps" aria-label="接入进度"><li>连接项目</li><li>补充配置</li><li>确认执行</li></ol>
-            <section id="wizardConnect">
-              <h3>连接你的代码仓库</h3>
-              <div class="form-grid">
-                <label class="wide-field">项目目前是什么情况？<select id="wizardSituation"><option value="">请选择</option><option value="new">第一次部署到这台服务器</option><option value="existing">已经在这台服务器运行，接入更新</option><option value="unsure">不确定，先帮我检查仓库</option></select></label>
-              </div>
-              <div id="wizardExistingTools" hidden>
-                <div class="onboarding-tools"><button id="wizardDiscover" type="button" class="ghost-button compact-action">检测本机项目</button><span>Compose 项目可自动查找目录和仓库。</span></div>
-                <p id="wizardDiscoverStatus" class="muted" role="status"></p>
-                <div id="wizardLocalProjects" class="wizard-local-projects"></div>
-                <div class="form-grid"><label id="wizardExistingDirectoryField" class="wide-field">已有项目的代码目录<input id="wizardExistingDirectory" placeholder="例如 /opt/my-app" maxlength="512"><small class="wizard-field-help">填写服务器上的 Git 仓库目录，不是容器内部的 /app 路径。</small></label></div>
-                <details class="wizard-details"><summary>找不到项目？查看查询指令</summary>
-                  <p>在服务器终端执行。Compose 的 CONFIG FILES 是配置文件路径，代码目录可在它所在目录继续查询。</p>
-                  <div class="wizard-command"><code id="wizardComposeQuery">docker compose ls</code><button type="button" class="ghost-button compact-action" data-wizard-copy="wizardComposeQuery">复制</button></div>
-                  <p>进入你原来部署项目的目录，再执行。第一行是 Git 代码目录，第二行是仓库地址；不要分享含密码或 Token 的地址。</p>
-                  <div class="wizard-command"><code id="wizardGitQuery">git rev-parse --show-toplevel&#10;git remote get-url origin</code><button type="button" class="ghost-button compact-action" data-wizard-copy="wizardGitQuery">复制</button></div>
-                  <p>本机运行的服务可先查服务名称，再查询真实目录和启动方式；将下面的 my-app.service 换成你的服务名称。</p>
-                  <div class="wizard-command"><code id="wizardServiceQuery">systemctl list-units --type=service --state=running --no-pager&#10;systemctl show my-app.service -p WorkingDirectory -p ExecStart</code><button type="button" class="ghost-button compact-action" data-wizard-copy="wizardServiceQuery">复制</button></div>
-                </details>
-              </div>
-              <div id="wizardConnectFields" class="form-grid"></div>
-              <datalist id="wizardBranches"></datalist>
-              <details id="wizardRepositoryOptions" class="wizard-details"><summary>指定分支 / 自建代码平台</summary><div id="wizardRepositoryFields" class="form-grid"></div></details>
-              <details class="wizard-details"><summary>仓库地址在哪？私有仓库怎么授权？</summary><p>GitHub：仓库首页 → Code；Gitee：仓库首页 → 克隆/下载。复制 HTTPS 或 SSH 地址，例如 https://github.com/your-name/my-app.git。</p><p>私有仓库需要服务器读取权限。HTTPS 使用服务器已有的 Git 凭据；SSH 需在代码平台添加服务器公钥，并确认平台主机指纹。仓库地址中不要填写密码或 Token。</p><div id="wizardPlatformAdvice" class="muted" role="status"></div></details>
-              <div id="wizardConnectResult" role="status" aria-live="polite"></div>
-            </section>
-            <section id="wizardConfigure" hidden>
-              <h3>确认识别结果，补充缺少项</h3>
-              <p id="wizardRecommendation" class="wizard-recommendation"></p>
-              <p id="wizardDetectedFacts" class="muted"></p>
-              <details id="wizardPlanOptions" class="wizard-details"><summary>更换部署方案</summary><div class="form-grid"><label class="wide-field">部署方式<select id="wizardDeployMethod"><option value="">请选择</option><option value="template">沿用容器配置 / 使用建议方案</option><option value="script">沿用已有部署脚本</option><option value="commands">填写自己的构建和重启步骤</option></select></label></div><div id="wizardRuntimeFields" class="form-grid"></div></details>
-              <div id="wizardPathFields" class="form-grid wizard-entry-fields"></div>
-              <div id="wizardCommandFields" class="form-grid wizard-entry-fields" hidden></div>
-              <p id="wizardCommandsWarning" class="muted" hidden>这些步骤会以面板运行用户的权限执行。不要在命令中填写密码；启动或重启步骤应执行完成并返回，不能是长期占用终端的前台进程。</p>
-              <div id="wizardDockerFields" class="wizard-entry-fields" hidden>
-                <div class="form-grid">
-                  <label class="wide-field">容器配置<select id="wizardDockerChoice"><option value="">请选择仓库里的配置</option></select></label>
-                  <label class="wide-field">配置文件路径<input id="wizardDockerFile" placeholder="例如 Dockerfile 或 deploy/compose.yml" maxlength="240"></label>
-                </div>
-                <div id="wizardDockerBuildFields" class="form-grid wizard-entry-fields">
-                  <label>应用端口（容器内）<input id="wizardDockerContainerPort" type="number" min="1" max="65535" placeholder="例如 8000"><small id="wizardDockerPortHint" class="wizard-field-help">程序实际监听的端口，例如 FastAPI 常用 8000，以项目配置为准。</small></label>
-                  <label>服务器访问端口<input id="wizardDockerPublishedPort" type="number" min="1" max="65535" value="8080"><small class="wizard-field-help">例如 8080 对应 http://服务器IP:8080。不能使用面板的 6868。</small></label>
-                  <label class="wide-field">访问范围<select id="wizardDockerAccess"><option value="public">通过服务器 IP 访问</option><option value="local">仅服务器本机（可接入 Nginx）</option></select></label>
-                  <label class="onboarding-confirm wide-field"><input id="wizardDockerPersist" type="checkbox"> 保存上传文件等业务数据</label>
-                  <label id="wizardDockerVolumesField" class="wide-field" hidden>容器里的数据目录<textarea id="wizardDockerVolumes" rows="2" placeholder="/app/uploads&#10;/app/data" maxlength="4000"></textarea></label>
-                </div>
-                <div class="wizard-env-head"><h4>环境变量</h4><button id="wizardDockerAddEnv" type="button" class="ghost-button compact-action">添加变量</button></div>
-                <div id="wizardDockerEnvironment"></div>
-                <p id="wizardDockerEnvironmentEmpty" class="muted">未发现必填变量</p>
-              </div>
-              <div id="wizardEntryFields" class="form-grid wizard-entry-fields">
-                <label id="wizardEntryChoiceField" class="wide-field">识别到的入口<select id="wizardEntryChoice"><option value="">手动填写</option></select></label>
-                <label class="wide-field"><span id="wizardEntryLabel">启动入口（仓库内路径）</span><input id="wizardEntryPath" placeholder="例如 main.py 或 app/main.py" maxlength="240"><small id="wizardEntryHelp" class="wizard-field-help"></small></label>
-                <details id="wizardEntryOptions" class="wizard-details wide-field"><summary id="wizardEntryOptionsLabel">运行类型 / 应用对象</summary><div class="form-grid">
-                  <label id="wizardPythonKindField">运行类型<select id="wizardEntryKind"><option value="">请选择</option><option value="fastapi">FastAPI</option><option value="python">普通 Python 程序</option></select></label>
-                  <label id="wizardEntryObjectField">应用对象<input id="wizardEntryObject" placeholder="例如 app" maxlength="80"><small class="wizard-field-help">代码里写 app = FastAPI() 就填 app；写 api = FastAPI() 就填 api。</small></label>
-                </div></details>
-              </div>
-              <div id="wizardServiceFields" class="form-grid wizard-entry-fields"></div>
-              <p id="wizardRuntimeHint" class="muted"></p>
-              <div id="wizardWarnings" class="failure-advice"></div>
-              <details id="wizardAutomationOptions" class="wizard-details"><summary>可选：push 后自动更新</summary><div id="wizardAutomationFields" class="form-grid"></div><p>默认手动更新。选择 Push WebHook 后，还需在代码平台配置地址和密钥；平台必须能访问面板。</p></details>
-              <details id="wizardAdvancedOptions" class="wizard-details"><summary>高级设置 / 健康检查</summary><label id="wizardCustomCommandField" class="onboarding-confirm"><input id="wizardCustomCommand" type="checkbox"> 自定义完整启动命令</label><div id="wizardAdvancedFields" class="form-grid"></div></details>
-            </section>
-            <section id="wizardReview" hidden>
-              <h3 id="wizardReviewTitle">确认并准备部署</h3>
-              <dl id="wizardSummary" class="detail-list"></dl>
-              <ol id="wizardPlanSteps" class="wizard-plan-steps"></ol>
-              <p id="wizardReviewHint" class="muted">准备阶段会拉取代码并补齐部署文件，仓库已有的同名文件会保留。业务所需的环境变量、数据库和运行环境需已准备好。</p>
-              <details class="wizard-details"><summary>查看部署文件</summary><div id="wizardFiles"></div></details>
-              <div id="wizardCheckField"></div>
-              <div id="wizardProgress" role="status" aria-live="polite"></div>
-              <details id="wizardWebhookSetup" class="wizard-details" hidden>
-                <summary>后续 push 自动部署（可选）</summary>
-                <p id="wizardWebhookGuide">在代码平台的仓库设置中添加 WebHook，选择 Push 事件。</p>
-                <p id="wizardWebhookModeHint"></p>
-                <div class="webhook-box"><div><div class="webhook-label">WebHook POST 地址</div><code id="wizardWebhookUrl">-</code></div><button id="wizardCopyWebhookUrl" class="ghost-button compact-action" type="button">复制地址</button></div>
-                <div class="webhook-box"><div><div class="webhook-label">Token / Secret</div><span>已生成，复制后填入代码平台</span></div><button id="wizardCopyWebhookSecret" class="ghost-button compact-action" type="button">复制密钥</button></div>
-              </details>
-              <button id="wizardDeploy" class="danger-button compact-action" type="button" hidden>开始首次部署</button>
-              <button id="wizardRecheck" class="ghost-button compact-action" type="button" hidden>重新检查环境</button>
-            </section>
-            <div id="wizardDirectoryConflict" class="wizard-directory-conflict" hidden role="status">
-              <strong>这个目录已经有项目内容</strong><p id="wizardDirectoryMessage"></p><code id="wizardDirectoryPath"></code>
-              <div class="onboarding-tools"><button id="wizardAdoptExisting" type="button" class="ghost-button compact-action">改为接入已有项目</button><button id="wizardChangeDirectory" type="button" class="ghost-button compact-action">选择其他目录</button></div>
-            </div>
-            <p id="wizardError" class="form-error" role="alert" hidden></p>
-            <div class="modal-actions wizard-actions">
-              <button id="wizardBack" class="ghost-button compact-action" type="button" hidden>上一步</button>
-              <button id="wizardFinish" class="ghost-button compact-action" type="button" hidden>稍后部署</button>
-              <button id="wizardDeleteRecord" class="ghost-button compact-action danger-text" type="button" hidden>删除接入记录</button>
-              <span class="modal-spacer"></span>
-              <button id="wizardNext" class="danger-button compact-action" type="button">连接并识别</button>
-            </div>
-          </section>
-          <input id="projectOriginalKey" type="hidden">
-          <div class="form-grid">
-            <h3 class="wide-field onboarding-heading">1. 连接仓库</h3>
-            <label>项目标识<input id="projectKeyInput" name="key" placeholder="example-node" required></label>
-            <label>显示名称<input id="projectNameInput" name="name" placeholder="Example Node"></label>
-            <label>项目类型
-              <select id="projectTemplateInput" name="template">
-                <option value="docker">Docker（Compose / Dockerfile）</option>
-                <option value="python">Python / systemd</option>
-                <option value="node">Node / PM2</option>
-                <option value="java">Java / systemd</option>
-                <option value="go">Go / systemd</option>
-                <option value="static">静态网站</option>
-                <option value="custom">自定义脚本</option>
-              </select>
-            </label>
-            <label class="wide-field">仓库地址<input id="projectRepoInput" name="repo" placeholder="git@gitee.com:org/repo.git"></label>
-            <label>代码平台<select id="projectProviderInput"><option value="auto">自动识别（自建平台可手动选择）</option><option value="github">GitHub</option><option value="gitee">Gitee</option><option value="gitlab">GitLab（含自建）</option><option value="gitea">Gitea（含自建）</option><option value="generic">其他 Git 平台</option></select></label>
-            <label>更新触发方式<select id="projectTriggerInput"><option value="manual">手动点击更新</option><option value="webhook">通过 Push WebHook 更新</option></select></label>
-            <label>部署分支<input id="projectBranchInput" name="branch" placeholder="master"></label>
-            <div class="wide-field onboarding-tools">
-              <button id="inspectProjectBtn" class="ghost-button compact-action" type="button">识别仓库</button>
-              <span id="projectInspectStatus" role="status"></span>
-            </div>
-            <div id="projectDetectionResult" class="wide-field" hidden></div>
-            <h3 class="wide-field onboarding-heading">2. 确认部署配置</h3>
-            <label>超时时间<input id="projectTimeoutInput" name="timeout_seconds" type="number" min="30" step="30" placeholder="900"></label>
-            <label class="wide-field">服务器目录<input id="projectWorkdirInput" name="workdir" placeholder="/root/example-node"></label>
-            <label class="wide-field">部署脚本<input id="projectScriptInput" name="script" placeholder="/root/example-node/deploy/deploy.sh"></label>
-            <label>systemd 服务名<input id="projectServiceNameInput" name="service_name" placeholder="fastapi-demo"></label>
-            <label>服务端口<input id="projectServicePortInput" name="service_port" type="number" min="1" max="65535" placeholder="8000"></label>
-            <label class="wide-field">启动命令<input id="projectStartCommandInput" name="start_command" placeholder="留空则按项目类型生成初版"></label>
-            <label class="wide-field">业务域名<input id="projectAppDomainInput" name="app_domain" placeholder="api.example.com，可留空"></label>
-            <label class="wide-field">回滚脚本<input id="projectRollbackInput" name="rollback_script" placeholder="可留空"></label>
-            <label class="wide-field">健康检查<input id="projectHealthInput" name="health_url" placeholder="http://127.0.0.1:8001/health，可留空"></label>
-            <label class="wide-field">日志文件<input id="projectLogInput" name="deploy_log_file" placeholder="/var/log/example-node-deploy.log"></label>
-            <label class="wide-field">Webhook Token<input id="projectSecretInput" name="webhook_secret" placeholder="保存时自动生成"></label>
-          </div>
-          <div id="projectCommandFields" class="form-grid" hidden>
-            <label class="wide-field">构建步骤（可留空）<textarea id="projectBuildStepInput" rows="3" maxlength="4096" placeholder="填写项目现有的依赖安装或构建步骤"></textarea></label>
-            <label class="wide-field">启动 / 重启步骤<textarea id="projectRestartStepInput" rows="3" maxlength="4096" placeholder="例如 systemctl restart my-app，或已有的容器更新命令"></textarea></label>
-          </div>
-          <div class="toggle-row">
-            <label><input id="projectEnabledInput" type="checkbox"> 启用项目</label>
-            <label><input id="projectManualInput" type="checkbox"> 允许手动部署/回滚</label>
-            <label><input id="projectAppHttpsInput" type="checkbox"> 业务域名申请 HTTPS</label>
-          </div>
-          <section class="onboarding-preview" aria-labelledby="projectPreviewHeading">
-            <div class="command-head">
-              <h3 id="projectPreviewHeading" class="onboarding-heading">3. 预览并初始化</h3>
-              <button id="previewProjectBtn" class="ghost-button compact-action" type="button">预览部署文件</button>
-            </div>
-            <div id="projectFilePreview" aria-live="polite"></div>
-            <label class="onboarding-confirm"><input id="projectConfigConfirmed" type="checkbox" disabled> 已核对启动命令、端口和部署文件</label>
-          </section>
-          <div class="webhook-box">
-            <div>
-              <div class="webhook-label">WebHook POST 地址</div>
-              <code id="projectWebhookUrl">-</code>
-            </div>
-            <button id="copyWebhookBtn" class="ghost-button compact-action" type="button">复制地址</button>
-          </div>
-          <div class="webhook-box">
-            <div>
-              <div class="webhook-label">WebHook Token / Secret</div>
-              <code id="projectWebhookToken">保存后生成</code>
-            </div>
-            <button id="copyWebhookTokenBtn" class="ghost-button compact-action" type="button">复制 Token</button>
-          </div>
-          <div class="command-box">
-            <div class="command-head">
-              <div>
-                <div class="webhook-label">接入体检</div>
-              </div>
-              <button id="bootstrapProjectBtn" class="danger-button compact-action" type="button">自动初始化</button>
-              <button id="configureNginxBtn" class="ghost-button compact-action" type="button">配置业务域名</button>
-              <button id="doctorProjectBtn" class="ghost-button compact-action" type="button">检查项目</button>
-            </div>
-            <div id="projectDoctorResult" class="doctor-result">保存项目后可以检查。</div>
-          </div>
-          <details class="command-box">
-            <summary>手动接入指令（可选）</summary>
-            <div class="command-head">
-              <div>
-                <div class="webhook-label">服务器执行指令</div>
-              </div>
-              <button id="copyProjectCommandsBtn" class="ghost-button compact-action" type="button">复制指令</button>
-            </div>
-            <pre id="projectSetupCommands" class="command-output">填写项目后生成。</pre>
-          </details>
-          <div class="command-box">
-            <div class="command-head">
-              <div>
-                <div class="webhook-label">代码平台 WebHook 填写项</div>
-                <p>URL 不含凭据；Token 填入平台原生的密码或 Secret 字段。</p>
-              </div>
-              <button id="copyWebhookGuideBtn" class="ghost-button compact-action" type="button">复制 WebHook 配置</button>
-            </div>
-            <pre id="projectWebhookGuide" class="command-output">保存后生成。</pre>
-          </div>
-          <div id="projectFormError" class="form-error" hidden></div>
-          <div class="modal-actions">
-            <button id="deleteProjectBtn" class="ghost-button compact-action danger-text" type="button">删除接入记录</button>
-            <button id="resetSecretBtn" class="ghost-button compact-action" type="button">重置 Token</button>
-            <span class="modal-spacer"></span>
-            <button class="ghost-button compact-action" type="button" id="cancelProjectBtn">取消</button>
-            <button class="danger-button compact-action" type="submit">保存项目</button>
-          </div>
-        </form>
-      </section>
-    </div>
-
     <div id="confirmModal" class="modal-backdrop confirm-backdrop" hidden>
       <section class="project-modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
         <div class="confirm-icon" aria-hidden="true">!</div>
@@ -923,8 +576,10 @@
   <script src="ui/app.js"></script>
   <script src="ui/certificates.js"></script>
   <script src="ui/nginx.js"></script>
+  <script src="ui/sites.js"></script>
+  <script src="ui/monitoring.js"></script>
   <script src="ui/docker-images.js"></script>
-  <script src="ui/onboarding.js"></script>
+  <script src="ui/docker-mirrors.js"></script>
   <script src="ui/request-gateway.js"></script>
   <script src="ui/gateway-connect.js"></script>
   <script src="ui/nginx-requests.js"></script>

@@ -12,6 +12,12 @@ import pytest
 import agent
 
 
+@pytest.fixture(autouse=True)
+def isolated_site_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(agent, "SITES_CONFIG_FILE", tmp_path / "sites.json")
+    monkeypatch.setattr(agent, "PROJECT_CONFIG_BACKUP_DIR", tmp_path / "backups")
+
+
 @pytest.mark.parametrize("value", [True, "1", "true", "YES", "on", "enabled"])
 def test_bool_config_accepts_explicit_true_values(value: object) -> None:
     assert agent._bool_config(value)
@@ -27,28 +33,27 @@ def test_int_config_falls_back_for_non_positive_or_invalid_values(value: object)
     assert agent._int_config(value, 900) == 900
 
 
-def test_project_form_normalizes_identifiers_and_domain() -> None:
-    project = agent._project_from_form(
+def test_site_config_normalizes_identifiers_and_preserves_monitoring_fields() -> None:
+    site = agent._project_from_config(
         {
             "key": "My API",
-            "name": " Example API ",
-            "repo": "git@github.com:Example/API.git",
-            "workdir": "/srv/example-api",
-            "service_name": "Example API Service",
+            "name": "Example API",
+            "health_url": "https://api.example.com/health",
             "service_port": "8080",
-            "domain": "https://API.Example.com:443/health",
+            "domain": "api.example.com",
             "https": "yes",
-            "webhook_secret": "0123456789abcdef0123456789abcdef",
-        }
+        },
+        "fallback",
     )
 
-    assert project.key == "my-api"
-    assert project.name == "Example API"
-    assert project.workdir == Path("/srv/example-api")
-    assert project.service_name == "example-api-service"
-    assert project.service_port == 8080
-    assert project.app_domain == "api.example.com"
-    assert project.app_https is True
+    assert isinstance(site, agent.Site)
+    assert site.key == "my-api"
+    assert site.name == "Example API"
+    assert site.health_url == "https://api.example.com/health"
+    assert site.service_port == 8080
+    assert site.app_domain == "api.example.com"
+    assert site.app_https is True
+    assert agent._normalize_domain("https://API.Example.com:443/health") == "api.example.com"
 
 
 @pytest.mark.parametrize(
@@ -63,21 +68,6 @@ def test_project_form_normalizes_identifiers_and_domain() -> None:
 )
 def test_domain_validation(domain: str, expected: bool) -> None:
     assert agent._valid_domain(domain) is expected
-
-
-def test_repository_matching_normalizes_git_and_https_urls(monkeypatch: pytest.MonkeyPatch) -> None:
-    project = agent._project_from_config(
-        {
-            "key": "api",
-            "repo": "git@github.com:Example/API.git",
-            "webhook_secret": "secret",
-        },
-        "api",
-    )
-    monkeypatch.setattr(agent, "PROJECTS", {project.key: project})
-
-    assert agent._project_matches_repo(project, {"https://github.com/example/api.git"})
-    assert not agent._project_matches_repo(project, {"https://github.com/example/other.git"})
 
 
 def test_projects_config_defaults_to_agent_state_directory(tmp_path: Path) -> None:
@@ -201,7 +191,7 @@ def test_missing_projects_configs_do_not_create_state_or_app_directories(
 
     projects = agent._load_projects()
 
-    assert list(projects) == ["default"]
+    assert projects == {}
     assert not config_file.parent.exists()
     assert not legacy_file.parent.exists()
 
@@ -210,6 +200,7 @@ def _run_validate_config_cli(config_file: Path) -> subprocess.CompletedProcess[s
     environment = os.environ.copy()
     environment.update({
         "DEPLOY_PROJECTS_FILE": str(config_file),
+        "DEPLOY_AGENT_STATE_FILE": str(config_file.parent / "state.json"),
         "DEPLOY_UI_PASSWORD_HASH": "intentionally-invalid-for-this-command",
         "PYTHONDONTWRITEBYTECODE": "1",
     })
@@ -226,18 +217,17 @@ def _run_validate_config_cli(config_file: Path) -> subprocess.CompletedProcess[s
     )
 
 
-def test_validate_config_cli_accepts_valid_config_without_ui_credentials(tmp_path: Path) -> None:
+def test_validate_config_cli_accepts_legacy_sites_without_deployment_requirements(tmp_path: Path) -> None:
     config_file = tmp_path / "projects.json"
-    deploy_script = tmp_path / "deploy.sh"
-    deploy_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    deploy_script.chmod(0o700)
     config_file.write_text(
         json.dumps({
             "projects": [{
                 "key": "api",
                 "enabled": True,
-                "webhook_secret": "0123456789abcdef0123456789abcdef",
-                "script": str(deploy_script),
+                "health_url": "http://127.0.0.1:8080/health",
+                "webhook_secret": "obsolete-short-secret",
+                "script": str(tmp_path / "missing-deploy.sh"),
+                "rollback_script": str(tmp_path / "missing-rollback.sh"),
             }]
         }),
         encoding="utf-8",
@@ -247,29 +237,22 @@ def test_validate_config_cli_accepts_valid_config_without_ui_credentials(tmp_pat
     result = _run_validate_config_cli(config_file)
 
     assert result.returncode == 0, result.stderr
-    assert "projects config OK:" in result.stdout
-    assert "projects=1 enabled=1" in result.stdout
+    assert "sites config OK:" in result.stdout
+    assert "sites=1 enabled=1" in result.stdout
     assert config_file.read_bytes() == original_payload
+    assert not (tmp_path / "sites.json").exists()
 
 
 @pytest.mark.parametrize(
     ("payload", "expected_error"),
     [
-        ("{not-json", "projects config is invalid"),
-        ('{"projects": "invalid"}', "projects must be a list"),
-        (
-            json.dumps({
-                "projects": [{
-                    "key": "api",
-                    "enabled": True,
-                    "webhook_secret": "too-short",
-                }]
-            }),
-            "webhook secret missing, too short, or still a placeholder for projects: api",
-        ),
+        ("{not-json", "sites config is invalid"),
+        ('{"projects": "invalid"}', "sites must be a list"),
+        ('{"sites": [null]}', "site at index 0 must be an object"),
+        ('{"sites": [{"key": "api"}, {"key": "api"}]}', "duplicate site key"),
     ],
 )
-def test_validate_config_cli_rejects_invalid_structure_and_weak_enabled_secrets(
+def test_validate_config_cli_rejects_invalid_structure(
     tmp_path: Path,
     payload: str,
     expected_error: str,
@@ -281,103 +264,7 @@ def test_validate_config_cli_rejects_invalid_structure_and_weak_enabled_secrets(
 
     assert result.returncode != 0
     assert expected_error in result.stderr
-    assert "projects config OK:" not in result.stdout
-
-
-@pytest.mark.parametrize(
-    ("missing_action", "expected_error"),
-    [
-        ("deploy", "deploy script not found"),
-        ("rollback", "rollback script not found"),
-    ],
-)
-def test_validate_config_cli_rejects_missing_enabled_project_scripts(
-    tmp_path: Path,
-    missing_action: str,
-    expected_error: str,
-) -> None:
-    deploy_script = tmp_path / "deploy.sh"
-    deploy_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    deploy_script.chmod(0o700)
-    missing_script = tmp_path / f"missing-{missing_action}.sh"
-    project = {
-        "key": "api",
-        "enabled": True,
-        "webhook_secret": "0123456789abcdef0123456789abcdef",
-        "script": str(missing_script if missing_action == "deploy" else deploy_script),
-    }
-    if missing_action == "rollback":
-        project["rollback_script"] = str(missing_script)
-    config_file = tmp_path / "projects.json"
-    config_file.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
-
-    result = _run_validate_config_cli(config_file)
-
-    assert result.returncode != 0
-    assert expected_error in result.stderr
-    assert str(missing_script) in result.stderr
-
-
-@pytest.mark.skipif(os.name == "nt", reason="executable mode validation targets Linux servers")
-def test_validate_config_cli_rejects_non_executable_deploy_script(tmp_path: Path) -> None:
-    deploy_script = tmp_path / "deploy.sh"
-    deploy_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    deploy_script.chmod(0o600)
-    config_file = tmp_path / "projects.json"
-    config_file.write_text(
-        json.dumps({
-            "projects": [{
-                "key": "api",
-                "enabled": True,
-                "webhook_secret": "0123456789abcdef0123456789abcdef",
-                "script": str(deploy_script),
-            }]
-        }),
-        encoding="utf-8",
-    )
-
-    result = _run_validate_config_cli(config_file)
-
-    assert result.returncode != 0
-    assert "deploy script is not executable" in result.stderr
-    assert str(deploy_script) in result.stderr
-
-
-@pytest.mark.parametrize(
-    ("non_executable_action", "expected_error"),
-    [
-        ("deploy", "deploy script is not executable"),
-        ("rollback", "rollback script is not executable"),
-    ],
-)
-def test_project_runtime_validation_rejects_non_executable_scripts(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    non_executable_action: str,
-    expected_error: str,
-) -> None:
-    deploy_script = tmp_path / "deploy.sh"
-    rollback_script = tmp_path / "rollback.sh"
-    deploy_script.write_text("deploy\n", encoding="utf-8")
-    rollback_script.write_text("rollback\n", encoding="utf-8")
-    project = agent._project_from_config(
-        {
-            "key": "api",
-            "enabled": True,
-            "webhook_secret": "0123456789abcdef0123456789abcdef",
-            "script": str(deploy_script),
-            "rollback_script": str(rollback_script) if non_executable_action == "rollback" else "",
-        },
-        "api",
-    )
-    non_executable_path = rollback_script if non_executable_action == "rollback" else deploy_script
-    monkeypatch.setattr(agent, "_RUNTIME_CONFIG_ERROR", None)
-    monkeypatch.setattr(agent, "PROJECTS", {project.key: project})
-    monkeypatch.setattr(agent, "DEFAULT_PROJECT_KEY", project.key)
-    monkeypatch.setattr(agent, "_script_is_executable", lambda path: path != non_executable_path)
-
-    with pytest.raises(SystemExit, match=expected_error):
-        agent._validate_projects_runtime_config()
+    assert "sites config OK:" not in result.stdout
 
 
 def test_validate_config_command_does_not_validate_auth_or_probe_maintenance(
@@ -387,7 +274,6 @@ def test_validate_config_command_does_not_validate_auth_or_probe_maintenance(
     project = agent._project_from_config({"key": "disabled", "enabled": False}, "disabled")
     monkeypatch.setattr(agent, "_RUNTIME_CONFIG_ERROR", None)
     monkeypatch.setattr(agent, "PROJECTS", {project.key: project})
-    monkeypatch.setattr(agent, "DEFAULT_PROJECT_KEY", project.key)
     monkeypatch.setattr(agent.sys, "argv", ["agent.py", "validate-config"])
 
     def unexpected_call(*args: object, **kwargs: object) -> None:
@@ -401,7 +287,7 @@ def test_validate_config_command_does_not_validate_auth_or_probe_maintenance(
 
     agent.main()
 
-    assert "projects config OK:" in capsys.readouterr().out
+    assert "sites config OK:" in capsys.readouterr().out
 
 
 def test_projects_config_reader_rejects_path_replacement_after_read(
@@ -458,19 +344,18 @@ def test_load_projects_parses_supported_aliases(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", config_file)
     monkeypatch.setattr(agent, "LEGACY_PROJECTS_CONFIG_FILE", None)
 
+    original_payload = config_file.read_bytes()
     projects = agent._load_projects()
 
     assert list(projects) == ["worker"]
     project = projects["worker"]
-    assert project.template == "python"
-    assert project.repo == "https://github.com/example/worker.git"
-    assert project.workdir == Path("/srv/worker")
-    assert project.deploy_log_file == Path("/var/log/worker.log")
-    assert project.webhook_secret == "worker-secret"
+    assert isinstance(project, agent.Site)
     assert project.enabled is True
-    assert project.manual_deploy_enabled is False
-    assert project.timeout_seconds == 120
     assert project.service_port == 8081
+    assert set(vars(project)) == {
+        "key", "name", "health_url", "enabled", "service_port", "app_domain", "app_https",
+    }
+    assert config_file.read_bytes() == original_payload
 
 
 @pytest.mark.parametrize("content", ["{not-json", '{"projects": [null]}'])
@@ -484,7 +369,7 @@ def test_load_projects_fails_closed_for_invalid_existing_config(
     monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", config_file)
     monkeypatch.setattr(agent, "LEGACY_PROJECTS_CONFIG_FILE", None)
 
-    with pytest.raises(RuntimeError, match="projects config is invalid"):
+    with pytest.raises(RuntimeError, match="sites config is invalid"):
         agent._load_projects()
 
 
@@ -496,57 +381,85 @@ def test_load_projects_accepts_empty_existing_config(tmp_path: Path, monkeypatch
     assert agent._load_projects() == {}
 
 
-def test_project_config_does_not_fall_back_to_global_webhook_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agent, "WEBHOOK_SECRET", "global-secret-0123456789abcdef")
+def test_sites_config_takes_priority_over_conflicting_legacy_files(monkeypatch, tmp_path):
+    canonical = tmp_path / "projects.json"
+    legacy = tmp_path / "legacy-projects.json"
+    canonical.write_text('{"projects": [{"key": "old"}]}', encoding="utf-8")
+    legacy.write_text("{broken-legacy", encoding="utf-8")
+    monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", canonical)
+    monkeypatch.setattr(agent, "LEGACY_PROJECTS_CONFIG_FILE", legacy)
+    agent.SITES_CONFIG_FILE.write_text('{"sites": [{"key": "current"}]}', encoding="utf-8")
 
-    project = agent._project_from_config({"key": "api", "enabled": False}, "api")
-
-    assert project.webhook_secret == ""
-
-
-def test_project_form_generates_for_empty_or_placeholder_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agent.secrets, "token_hex", lambda _: "ab" * 32)
-
-    empty = agent._project_from_form({"key": "empty", "webhook_secret": ""})
-    placeholder = agent._project_from_form({"key": "placeholder", "webhook_secret": "replace-with-token"})
-
-    assert empty.webhook_secret == "ab" * 32
-    assert placeholder.webhook_secret == "ab" * 32
+    assert list(agent._load_projects()) == ["current"]
+    agent.SITES_CONFIG_FILE.write_text('{"sites": []}', encoding="utf-8")
+    assert agent._load_projects() == {}
 
 
-def test_project_form_rejects_short_non_placeholder_secret() -> None:
-    with pytest.raises(ValueError, match="至少需要 32 位"):
-        agent._project_from_form({"key": "api", "webhook_secret": "short-custom-secret"})
-
-
-@pytest.mark.parametrize("secret", ["", "x" * 31, "replace-with-a-long-random-token"])
-def test_agent_startup_rejects_enabled_projects_with_weak_secrets(
-    monkeypatch: pytest.MonkeyPatch,
-    secret: str,
-) -> None:
-    project = agent._project_from_config(
-        {"key": "api", "webhook_secret": secret, "enabled": True},
-        "api",
-    )
-    monkeypatch.setattr(agent, "PROJECTS", {"api": project})
-    monkeypatch.setattr(agent, "DEFAULT_PROJECT_KEY", "api")
-    monkeypatch.setattr(agent.sys, "argv", ["agent.py"])
-    monkeypatch.setattr(agent, "UI_PASSWORD_HASH", "")
-    monkeypatch.setattr(agent, "UI_SESSION_SECRET", "")
-
-    with pytest.raises(SystemExit, match="webhook secret missing"):
-        agent.main()
-
-
-def test_missing_projects_file_creates_disabled_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", tmp_path / "missing.json")
+@pytest.mark.parametrize("payload", ["{broken", '{"sites": "invalid"}'])
+def test_invalid_sites_config_does_not_fall_back_to_legacy(monkeypatch, tmp_path, payload):
+    canonical = tmp_path / "projects.json"
+    canonical.write_text('{"projects": [{"key": "old"}]}', encoding="utf-8")
+    monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", canonical)
     monkeypatch.setattr(agent, "LEGACY_PROJECTS_CONFIG_FILE", None)
-    monkeypatch.delenv("DEPLOY_PROJECT_ENABLED", raising=False)
+    agent.SITES_CONFIG_FILE.write_text(payload, encoding="utf-8")
 
+    with pytest.raises(RuntimeError, match="sites config is invalid"):
+        agent._load_projects()
+
+
+def test_config_write_migrates_sites_without_changing_legacy_config(monkeypatch, tmp_path):
+    canonical = tmp_path / "projects.json"
+    original = b'{"projects":[{"key":"api","repo":"old-repo","webhook_secret":"old-secret"}]}\n'
+    canonical.write_bytes(original)
+    monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", canonical)
+    monkeypatch.setattr(agent, "LEGACY_PROJECTS_CONFIG_FILE", None)
     projects = agent._load_projects()
 
-    assert list(projects) == ["default"]
-    assert projects["default"].enabled is False
+    agent._write_projects_config(projects, notifications={})
+
+    assert canonical.read_bytes() == original
+    payload = json.loads(agent.SITES_CONFIG_FILE.read_text(encoding="utf-8"))
+    assert payload["sites"] == [{
+        "key": "api", "name": "api", "health_url": "", "enabled": True,
+        "service_port": 8000, "app_domain": "", "app_https": False,
+    }]
+    assert "projects" not in payload
+    assert agent._load_projects() == projects
+
+
+@pytest.mark.parametrize("existing_monitoring_state", [False, True])
+def test_monitoring_state_preserves_only_metrics_and_never_writes_legacy(
+    monkeypatch, tmp_path, existing_monitoring_state,
+):
+    legacy = tmp_path / "state.json"
+    monitoring = tmp_path / "monitoring-state.json"
+    legacy.write_text(json.dumps({
+        "system_metrics": [{"version": "legacy"}],
+        "running": True, "deploy_history": [{"secret": "old-secret"}],
+    }), encoding="utf-8")
+    original = legacy.read_bytes()
+    if existing_monitoring_state:
+        monitoring.write_text(json.dumps({"system_metrics": [{"version": "current"}]}), encoding="utf-8")
+    monkeypatch.setattr(agent, "STATE_FILE", legacy)
+    monkeypatch.setattr(agent, "MONITORING_STATE_FILE", monitoring)
+    monkeypatch.setattr(agent, "_state", {})
+
+    agent._read_state()
+
+    expected = [{"version": "current" if existing_monitoring_state else "legacy"}]
+    assert agent._state == {"system_metrics": expected}
+    agent._update_state(running=True, system_metrics=[{"version": "updated"}])
+    assert json.loads(monitoring.read_text(encoding="utf-8")) == {
+        "system_metrics": [{"version": "updated"}],
+    }
+    assert legacy.read_bytes() == original
+
+
+def test_missing_projects_file_starts_with_no_sites(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(agent, "LEGACY_PROJECTS_CONFIG_FILE", None)
+
+    assert agent._load_projects() == {}
 
 
 def test_empty_path_environment_value_uses_safe_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -555,24 +468,24 @@ def test_empty_path_environment_value_uses_safe_default(monkeypatch: pytest.Monk
     assert agent._path_from_env("TEST_EMPTY_PATH", tmp_path) == tmp_path
 
 
-def test_project_config_backups_are_unique_and_private(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config_file = tmp_path / "projects.json"
+def test_site_config_backups_are_unique_and_private(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "sites.json"
     backup_dir = tmp_path / "state" / "backups"
-    config_file.write_text('{"projects": []}\n', encoding="utf-8")
-    monkeypatch.setattr(agent, "PROJECTS_CONFIG_FILE", config_file)
+    config_file.write_text('{"sites": []}\n', encoding="utf-8")
+    monkeypatch.setattr(agent, "SITES_CONFIG_FILE", config_file)
     monkeypatch.setattr(agent, "PROJECT_CONFIG_BACKUP_DIR", backup_dir)
-    monkeypatch.setattr(agent, "PROJECT_CONFIG_BACKUP_LIMIT", 5)
 
-    first = Path(agent._backup_projects_config())
-    second = Path(agent._backup_projects_config())
+    agent._backup_projects_config()
+    agent._backup_projects_config()
 
-    assert first != second
-    assert first.read_text(encoding="utf-8") == config_file.read_text(encoding="utf-8")
-    assert second.read_text(encoding="utf-8") == config_file.read_text(encoding="utf-8")
+    backups = list(backup_dir.glob("sites.json.*.bak"))
+    assert len(backups) == 2
+    for backup in backups:
+        assert backup.read_bytes() == config_file.read_bytes()
+        if agent.os.name != "nt":
+            assert backup.stat().st_mode & 0o777 == 0o600
     if agent.os.name != "nt":
         assert backup_dir.stat().st_mode & 0o777 == 0o700
-        assert first.stat().st_mode & 0o777 == 0o600
-        assert second.stat().st_mode & 0o777 == 0o600
 
 
 def test_private_atomic_write_leaves_no_fixed_or_stale_temp_file(tmp_path: Path) -> None:
@@ -618,112 +531,10 @@ def test_private_append_tightens_existing_file_permissions(tmp_path: Path) -> No
         assert destination.stat().st_mode & 0o777 == 0o600
 
 
-def test_deploy_subprocess_environment_excludes_control_plane_secrets(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    for name in agent._DEPLOY_CONTROL_SECRET_ENV_NAMES:
-        monkeypatch.setenv(name, f"secret-{name.lower()}")
-    monkeypatch.setenv("BUSINESS_DEPLOY_SETTING", "keep-this-value")
-    project = agent._project_from_config(
-        {
-            "key": "api",
-            "repo": "git@example.test:team/api.git",
-            "workdir": str(tmp_path),
-            "script": str(tmp_path / "deploy.sh"),
-            "webhook_secret": "project-secret",
-            "service_port": 8080,
-        },
-        "api",
-    )
-
-    environment = agent._deploy_subprocess_environment(
-        project,
-        "deploy",
-        tmp_path / "deploy.sh",
-        {"after": "abcdef", "source": "webhook"},
-    )
-
-    assert not (agent._DEPLOY_CONTROL_SECRET_ENV_NAMES & environment.keys())
-    assert environment["BUSINESS_DEPLOY_SETTING"] == "keep-this-value"
-    assert environment["DEPLOY_PROJECT_KEY"] == "api"
-    assert environment["DEPLOY_AFTER"] == "abcdef"
-
-
-def test_project_config_transactions_prevent_concurrent_secret_reversion(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    initial = agent._project_from_config(
-        {
-            "key": "api",
-            "name": "Initial",
-            "workdir": str(tmp_path),
-            "script": str(tmp_path / "deploy.sh"),
-            "webhook_secret": "01" * 32,
-            "enabled": False,
-        },
-        "api",
-    )
-    monkeypatch.setattr(agent, "PROJECTS", {"api": initial})
-    monkeypatch.setattr(agent, "DEFAULT_PROJECT_KEY", "api")
-    monkeypatch.setattr(agent.secrets, "token_hex", lambda _: "cd" * 32)
-
-    first_write_entered = threading.Event()
-    allow_first_write = threading.Event()
-    second_write_entered = threading.Event()
-    write_count = 0
-    write_count_lock = threading.Lock()
-
-    def fake_write(projects, notifications=None) -> None:
-        del projects, notifications
-        nonlocal write_count
-        with write_count_lock:
-            write_count += 1
-            current_write = write_count
-        if current_write == 1:
-            first_write_entered.set()
-            assert allow_first_write.wait(timeout=2)
-        elif current_write == 2:
-            second_write_entered.set()
-
-    monkeypatch.setattr(agent, "_write_projects_config", fake_write)
-    errors: list[BaseException] = []
-
-    def save_name() -> None:
-        try:
-            agent._save_project_transaction({"key": "api", "name": "Updated"}, "api")
-        except BaseException as exc:  # pragma: no cover - surfaced by assertion below
-            errors.append(exc)
-
-    def rotate_secret() -> None:
-        try:
-            agent._reset_project_secret_transaction("api")
-        except BaseException as exc:  # pragma: no cover - surfaced by assertion below
-            errors.append(exc)
-
-    first = threading.Thread(target=save_name)
-    second = threading.Thread(target=rotate_secret)
-    first.start()
-    assert first_write_entered.wait(timeout=2)
-    second.start()
-    assert not second_write_entered.wait(timeout=0.1)
-    allow_first_write.set()
-    first.join(timeout=2)
-    second.join(timeout=2)
-
-    assert not errors
-    assert not first.is_alive()
-    assert not second.is_alive()
-    assert second_write_entered.is_set()
-    assert agent.PROJECTS["api"].name == "Updated"
-    assert agent.PROJECTS["api"].webhook_secret == "cd" * 32
-
-
 def test_state_writes_cannot_persist_an_older_snapshot_after_a_newer_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(agent, "_state", {"version": "initial"})
+    monkeypatch.setattr(agent, "_state", {"system_metrics": [{"version": "initial"}]})
     monkeypatch.setattr(agent, "_state_write_lock", threading.Lock())
 
     first_write_entered = threading.Event()
@@ -733,7 +544,6 @@ def test_state_writes_cannot_persist_an_older_snapshot_after_a_newer_update(
     call_count_lock = threading.Lock()
 
     def fake_atomic_write(path: Path, text: str) -> None:
-        del path
         nonlocal call_count
         with call_count_lock:
             call_count += 1
@@ -741,12 +551,13 @@ def test_state_writes_cannot_persist_an_older_snapshot_after_a_newer_update(
         if current_call == 1:
             first_write_entered.set()
             assert allow_first_write.wait(timeout=2)
-        persisted_versions.append(json.loads(text)["version"])
+        assert path == agent.MONITORING_STATE_FILE
+        persisted_versions.append(json.loads(text)["system_metrics"][0]["version"])
 
     monkeypatch.setattr(agent, "_atomic_write_private_text", fake_atomic_write)
 
-    older = threading.Thread(target=lambda: agent._update_state(version="old"))
-    newer = threading.Thread(target=lambda: agent._update_state(version="new"))
+    older = threading.Thread(target=lambda: agent._update_state(system_metrics=[{"version": "old"}]))
+    newer = threading.Thread(target=lambda: agent._update_state(system_metrics=[{"version": "new"}]))
     older.start()
     assert first_write_entered.wait(timeout=2)
     newer.start()

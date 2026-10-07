@@ -1,4 +1,4 @@
-"""Optional browser regression checks: pytest tests/test_onboarding_browser.py."""
+"""Browser regression checks for request monitoring and gateway connections."""
 import json
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -6,8 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import agent
-import project_guidance
 import request_gateway
 
 playwright = pytest.importorskip('playwright.sync_api')
@@ -40,7 +38,7 @@ def browser_page():
             worker.join(timeout=5)
             pytest.skip('Playwright Chromium is not installed')
         page = browser.new_page(viewport={'width': 1440, 'height': 1000})
-        state = {'projects': [], 'posts': [], 'blocked': False, 'failed_bootstrap': False, 'failed_connection': False, 'candidates': None, 'files': None}
+        state = {'posts': []}
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
 
@@ -50,52 +48,15 @@ def browser_page():
                 route.continue_()
                 return
             payload = json.loads(route.request.post_data or '{}')
-            project = payload.get('project', {})
             if route.request.method == 'POST':
                 state['posts'].append((path, payload))
             result = {}
             if path == '/status':
-                result = dict(projects=state['projects'], state={}, system={}, events=[], alerts=[], csrf_token='test')
-            elif path == '/projects-config':
-                result = dict(projects=state['projects'], notifications={})
-            elif path == '/projects-config/discover':
-                result = state.get('local_projects', {'projects': [], 'notice': '未发现 Compose 项目，可手动填写。'})
-            elif path == '/projects-config/inspect':
-                result = dict(ok=True, branch=project.get('branch') or 'master', branches=['master', 'release'],
-                              existing_script='', warnings=[], candidates=[dict(template='python', entry='main:app')],
-                              provider=project_guidance.provider_info(project['repo'], project.get('repository_provider', 'auto')))
-                if state['candidates'] is not None:
-                    result['candidates'] = state['candidates']
-                if state['files'] is not None:
-                    result.update(project_guidance.detect(state['files']))
-                if state['failed_connection']:
-                    result.update(ok=False, diagnosis=[dict(title='仓库无权限', advice='请配置部署密钥')])
-            elif path == '/projects-config/preview':
-                try:
-                    resolved = agent._project_from_form(project)
-                except ValueError as exc:
-                    route.fulfill(status=400, json={'detail': str(exc)})
-                    return
-                result = {'start_command': resolved.start_command, 'script': resolved.script,
-                          'files': [dict(kind='deploy.sh', path=project['script'], content='# preview', exists=False)]}
-                if state.get('directory_conflict') and project.get('deployment_plan', {}).get('situation') == 'new':
-                    result = {'directory_conflict': {'path': project['workdir'], 'can_adopt': True,
-                        'message': '该目录已有代码，请改为接入已有项目。尚未更新代码。'}, 'files': []}
-            elif path == '/projects-config/delete':
-                if state.get('delete_blocked'):
-                    route.fulfill(status=409, json={'error': 'project_is_running', 'detail': '有部署任务正在执行或排队，请等待结束。'})
-                    return
-                from urllib.parse import parse_qs, urlsplit
-                key = parse_qs(urlsplit(route.request.url).query)['project'][0]
-                state['projects'] = [item for item in state['projects'] if item['key'] != key]
-                result = {'projects': state['projects']}
-            elif path in ('/projects-config/bootstrap', '/projects-config/save'):
-                state['projects'] = [{**project, 'webhook_secret': 'test'}]
-                result = dict(projects=state['projects'], bootstrap=dict(ok=not state['failed_bootstrap'], results=[]))
-            elif path == '/projects-config/doctor':
-                result = {'checks': [dict(title='Python', message='运行环境', ok=not state['blocked'], level='fail')]}
-            elif path == '/preflight':
-                result = {'items': [dict(title='Project is disabled', detail='', level='critical')]}
+                result = dict(agent={'status': 'ok'}, system={}, events=[], alerts=[], csrf_token='test')
+            elif path == '/sites':
+                result = dict(sites=[], notifications={})
+            elif path == '/notifications':
+                result = dict(notifications={})
             elif path == '/nginx-requests':
                 result = state.get('nginx_requests', {'mode': 'none', 'enabled': False, 'records': [], 'notice': 'No Nginx'})
             elif path == '/caddy-requests':
@@ -155,8 +116,6 @@ def browser_page():
         server_url = f'http://127.0.0.1:{server.server_port}'
         page.route(server_url + '/**', api)
         page.goto(server_url + '/ui')
-        page.locator('#addProjectBtn').click()
-        page.locator('#wizardSituation').select_option('new', force=True)
         try:
             yield page, state
             assert not errors, errors
@@ -167,544 +126,9 @@ def browser_page():
             worker.join(timeout=5)
 
 
-@pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'light'), (1440, 'dark'), (390, 'dark')])
-def test_compact_header_actions_and_menu(browser_page, width, theme, tmp_path):
-    page, state = browser_page
-    page.locator('#closeProjectModalBtn').click()
-    page.set_viewport_size({'width': width, 'height': 950})
-    page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
-    assert page.locator('#projectSelectButton').is_disabled()
-    assert page.locator('#redeployBtn').is_hidden()
-    assert page.locator('#rollbackBtn').is_hidden()
-    page.locator('.hero').screenshot(path=str(tmp_path / f'header-empty-{width}-{theme}.png'))
-    state['projects'] = [dict(key='demo', name='业务服务 / 一个比较长的项目名称', branch='main',
-                             enabled=True, manual_deploy_enabled=True, rollback_available=True, running=True)]
-    page.locator('#refreshBtn').click()
-    page.wait_for_function("!document.querySelector('#projectSelectButton').disabled")
-    page.locator('#projectSelectButton').click()
-    page.locator('#projectSelectMenu [data-project-key="demo"]').click()
-    page.wait_for_function("!document.querySelector('#cancelDeployBtn').disabled")
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('.hero').screenshot(path=str(tmp_path / f'header-{width}-{theme}.png'))
-    page.locator('#toolbarMoreButton').click()
-    assert page.locator('#toolbarMoreMenu').is_visible()
-    page.keyboard.press('Escape')
-    assert page.locator('#toolbarMoreMenu').is_hidden()
-    assert page.locator('#toolbarMoreButton').evaluate('(el) => el === document.activeElement')
-    page.keyboard.press('ArrowDown')
-    assert page.locator('#rollbackBtn').evaluate('(el) => el === document.activeElement')
-    page.keyboard.press('ArrowDown')
-    assert page.locator('#cancelDeployBtn').evaluate('(el) => el === document.activeElement')
-    page.locator('.hero').screenshot(path=str(tmp_path / f'header-menu-{width}-{theme}.png'))
-    page.locator('#cancelDeployBtn').click()
-    page.wait_for_selector('#confirmCancelBtn', state='visible')
-    assert page.locator('#toolbarMoreMenu').is_hidden()
-    page.locator('#confirmCancelBtn').click()
-    assert not any(path == '/cancel' for path, _ in state['posts'])
-    page.locator('#toolbarMoreButton').click()
-    page.locator('#panelTitle').click()
-    assert page.locator('#toolbarMoreMenu').is_hidden()
-    page.locator('#requestsViewTab').click()
-    assert page.locator('#projectSwitcher').is_hidden()
-    page.locator('#toolbarMoreButton').click()
-    assert page.locator('#toolbarMoreMenu').get_by_role('menuitem').count() == 1
-
-
-def connect_and_review(page):
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#projectRepoInput').press('Enter')
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#projectNameInput').input_value() == 'demo'
-    assert page.locator('#projectBranchInput').input_value() == 'master'
-    assert page.locator('#wizardEntryPath').input_value() == 'main.py'
-    assert page.locator('#wizardEntryObject').input_value() == 'app'
-    assert page.locator('#projectStartCommandInput').is_hidden()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-
-
-@pytest.mark.parametrize('width', [1440, 390])
-def test_guided_onboarding_keeps_optional_fields_collapsed(browser_page, width, tmp_path):
-    page, state = browser_page
-    page.set_viewport_size({'width': width, 'height': 950})
-    assert page.locator('#projectRepoInput').is_visible()
-    assert page.locator('#projectBranchInput').is_hidden()
-    assert page.locator('#projectProviderInput').is_hidden()
-    assert 'github.com' in page.locator('#projectRepoInputHelp').inner_text()
-    page.locator('#projectModal .project-modal').screenshot(path=str(tmp_path / f'connect-{width}.png'))
-    connect_and_review(page)
-    page.locator('#wizardBack').click()
-    assert page.locator('#projectWorkdirInput').is_hidden()
-    assert page.locator('#projectHealthInput').is_hidden()
-    assert page.locator('#projectTriggerInput').is_hidden()
-    assert page.locator('#wizardPlanOptions').get_attribute('open') is None
-    assert 'Python' in page.locator('#wizardRecommendation').inner_text()
-    assert page.locator('#wizardEntryPath').input_value() == 'main.py'
-    assert '不需要填写' in page.locator('#wizardEntryHelp').inner_text()
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('#projectModal .project-modal').screenshot(path=str(tmp_path / f'configure-{width}.png'))
-    assert not any(path == '/projects-config/bootstrap' for path, _ in state['posts'])
-
-
-@pytest.mark.parametrize('width', [1440, 390])
-def test_existing_project_discovery_prefills_without_updating(browser_page, width, tmp_path):
-    page, state = browser_page
-    page.set_viewport_size({'width': width, 'height': 950})
-    command = 'docker compose --project-directory /opt/aimore/deploy --project-name aimore --file /opt/aimore/deploy/compose.yaml up -d --build'
-    state['local_projects'] = {'notice': '只读检查完成', 'projects': [dict(name='aimore',
-        directory='/opt/aimore/deploy', git_directory='/opt/aimore', repo='https://example.test/aimore.git',
-        command=command, containers=[dict(name='aimore-cloud-1', state='running')])]}
-    page.locator('#wizardSituation').select_option('existing', force=True)
-    page.locator('#wizardDiscover').click()
-    page.locator('[data-local-project="0"]').click()
-    assert page.locator('#wizardExistingDirectory').input_value() == '/opt/aimore'
-    assert page.locator('#projectRepoInput').input_value() == 'https://example.test/aimore.git'
-    assert not state['posts']
-    page.locator('#projectModal .project-modal').screenshot(path=str(tmp_path / f'discovery-{width}.png'))
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#projectRestartStepInput').input_value() == command
-    assert '额外环境变量' in page.locator('#wizardWarnings').inner_text()
-    assert page.locator('#wizardDockerFields').is_hidden()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    assert command in page.locator('#wizardSummary').inner_text()
-    assert not any(path == '/redeploy' for path, _ in state['posts'])
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('#projectConfigConfirmed').check()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDeploy', state='visible')
-    page.locator('#wizardFinish').click()
-    page.wait_for_selector('#projectModal', state='hidden')
-    assert not any(path == '/redeploy' for path, _ in state['posts'])
-
-
-def test_discovery_fallback_shows_instructions_and_preserves_input(browser_page):
-    page, _state = browser_page
-    page.locator('#wizardSituation').select_option('existing', force=True)
-    page.locator('#wizardExistingDirectory').fill('/srv/already-running')
-    page.locator('#wizardDiscover').click()
-    page.wait_for_function('!ProjectWizard.busy()')
-    assert '手动' in page.locator('#wizardDiscoverStatus').inner_text()
-    assert page.locator('#wizardExistingDirectory').input_value() == '/srv/already-running'
-    page.locator('#wizardExistingTools summary').click()
-    assert 'git rev-parse' in page.locator('#wizardGitQuery').inner_text()
-    assert 'systemctl show' in page.locator('#wizardServiceQuery').inner_text()
-
-
-def test_new_existing_directory_offers_adoption_before_saving(browser_page):
-    page, state = browser_page
-    state['directory_conflict'] = True
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    page.locator('#wizardAdvancedOptions summary').click()
-    page.locator('#projectWorkdirInput').fill('/opt/aimore')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDirectoryConflict', state='visible')
-    assert page.locator('#wizardDirectoryPath').inner_text() == '/opt/aimore'
-    assert not any(path in ('/projects-config/bootstrap', '/projects-config/save', '/redeploy') for path, _ in state['posts'])
-    page.locator('#wizardChangeDirectory').click()
-    assert page.locator('#projectWorkdirInput').is_visible()
-    page.locator('#wizardNext').click()
-    page.locator('#wizardAdoptExisting').click()
-    assert page.locator('#wizardSituation').input_value() == 'existing'
-    assert page.locator('#wizardExistingDirectory').input_value() == '/opt/aimore'
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#projectWorkdirInput').input_value() == '/opt/aimore'
-    page.locator('#projectRestartStepInput').fill('systemctl restart existing-api')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    page.locator('#projectConfigConfirmed').check()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardFinish', state='visible')
-    page.locator('#wizardFinish').click()
-    page.wait_for_selector('#projectModal', state='hidden')
-    assert not any(path == '/redeploy' for path, _ in state['posts'])
-
-
-def test_failed_preparation_record_can_be_deleted_in_wizard(browser_page):
-    page, state = browser_page
-    connect_and_review(page)
-    page.locator('#projectConfigConfirmed').check()
-    state['failed_bootstrap'] = True
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    page.locator('#wizardDeleteRecord').click()
-    page.wait_for_selector('#confirmOkBtn', state='visible')
-    assert '服务器文件、容器和业务服务全部保留' in page.locator('#confirmMessage').inner_text()
-    page.locator('#confirmCancelBtn').click()
-    page.wait_for_function('!ProjectWizard.busy()')
-    assert len(state['projects']) == 1
-    page.locator('#wizardDeleteRecord').click()
-    page.locator('#confirmOkBtn').click()
-    page.wait_for_selector('#projectModal', state='hidden')
-    assert not state['projects']
-    assert not any(path in ('/redeploy', '/docker/action') for path, _ in state['posts'])
-
-
-@pytest.mark.parametrize('width', [1440, 390])
-def test_project_list_delete_record_and_active_task_error(browser_page, width, tmp_path):
-    page, state = browser_page
-    page.set_viewport_size({'width': width, 'height': 950})
-    state['projects'] = [dict(key='demo', name='Demo', enabled=False)]
-    page.locator('#closeProjectModalBtn').click()
-    page.locator('#deployViewTab').click()
-    page.locator('#refreshBtn').click()
-    button = page.locator('[data-project-remove="demo"]')
-    button.wait_for(state='visible')
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('#projectOverview').screenshot(path=str(tmp_path / f'remove-{width}.png'))
-    state['delete_blocked'] = True
-    button.click()
-    page.locator('#confirmOkBtn').click()
-    page.wait_for_selector('#projectRecordError', state='visible')
-    assert '部署任务' in page.locator('#projectRecordError').inner_text()
-    assert len(state['projects']) == 1
-    state['delete_blocked'] = False
-    button.click()
-    page.locator('#confirmOkBtn').click()
-    page.wait_for_function("document.querySelector('#projectOverview').textContent.includes('暂无项目')")
-    assert not state['projects']
-
-
-@pytest.mark.parametrize('width', [1440, 390])
-@pytest.mark.parametrize('editing', [False, True])
-def test_repository_modal_backdrop_does_not_close_or_discard_fields(browser_page, width, editing):
-    page, _state = browser_page
-    page.set_viewport_size({'width': width, 'height': 844})
-    if editing:
-        page.locator('#closeProjectModalBtn').click()
-        page.evaluate("openProjectModal({key:'existing',name:'Existing',repo:'https://example.test/a.git',template:'custom',enabled:true})")
-    page.locator('#projectRepoInput').fill('https://example.test/keep-my-input.git')
-    assert page.evaluate("document.elementFromPoint(4, 4).id") == 'projectModal'
-    page.mouse.click(4, 4)
-    assert page.locator('#projectModal').is_visible()
-    assert page.locator('#projectRepoInput').input_value() == 'https://example.test/keep-my-input.git'
-    page.locator('#projectModalTitle').click()
-    assert page.locator('#projectModal').is_visible()
-    page.locator('#closeProjectModalBtn').click()
-    assert page.locator('#projectModal').is_hidden()
-
-
-def test_first_deploy_requires_confirmation_and_ready_environment(browser_page):
-    page, state = browser_page
-    assert page.locator('#projectRepoInput').is_visible()
-    assert page.locator('#projectKeyInput').is_hidden()
-    assert page.locator('#projectWebhookUrl').is_hidden()
-    connect_and_review(page)
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert not any(path == '/projects-config/bootstrap' for path, _ in state['posts'])
-    page.locator('#projectConfigConfirmed').check()
-    state['blocked'] = True
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDeploy', state='visible')
-    page.locator('#wizardDeploy').click()
-    page.wait_for_function('!ProjectWizard.busy()')
-    assert not any(path == '/redeploy' for path, _ in state['posts'])
-    state['blocked'] = False
-    page.locator('#wizardDeploy').click()
-    page.wait_for_selector('#projectModal', state='hidden')
-    assert sum(path == '/redeploy' for path, _ in state['posts']) == 1
-    saved = next(data for path, data in state['posts'] if path == '/projects-config/save')
-    assert saved['project']['enabled'] is True
-    assert saved['original_key'] == 'demo'
-    assert saved['project']['entry_kind'] == 'fastapi'
-    assert 'main:app' in saved['project']['start_command']
-
-
-def test_connection_retry_and_failed_initialization_reuse_saved_project(browser_page):
-    page, state = browser_page
-    state['failed_connection'] = True
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert page.locator('#wizardConfigure').is_hidden()
-    state['failed_connection'] = False
-    connect_and_review(page)
-    page.locator('#projectConfigConfirmed').check()
-    state['failed_bootstrap'] = True
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert not any(path == '/redeploy' for path, _ in state['posts'])
-    state['failed_bootstrap'] = False
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#projectModal', state='hidden')
-    assert sum(path == '/redeploy' for path, _ in state['posts']) == 1
-    attempts = [body for path, body in state['posts'] if path == '/projects-config/bootstrap']
-    assert len(attempts) == 2
-    assert attempts[-1]['original_key'] == 'demo'
-
-
-def test_mobile_layout_and_existing_project_editing(browser_page, tmp_path):
-    page, _state = browser_page
-    page.set_viewport_size({'width': 390, 'height': 844})
-    connect_and_review(page)
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=str(tmp_path / 'wizard-mobile.png'))
-    page.locator('#wizardBack').click()
-    page.locator('#projectServicePortInput').fill('0')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert page.locator('#wizardReview').is_hidden()
-    page.locator('#closeProjectModalBtn').click()
-    page.evaluate("openProjectModal({key:'existing',name:'Existing',repo:'https://example.test/a.git',template:'docker',enabled:true})")
-    assert page.locator('#projectWizard').is_hidden()
-    assert page.locator('#projectKeyInput').is_visible()
-    assert not page.locator('#projectStartCommandInput').evaluate('(el) => el.required')
-
-
-def test_multiple_entries_require_choice_and_plain_python_generates_command(browser_page):
-    page, state = browser_page
-    state['candidates'] = [dict(template='python', entries=[
-        dict(kind='fastapi', path='api/main.py', object='api'),
-        dict(kind='python', path='worker.py', object='')])]
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#wizardEntryPath').input_value() == ''
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    page.locator('#wizardEntryChoice').select_option('1', force=True)
-    assert page.locator('#wizardEntryPath').input_value() == 'worker.py'
-    assert page.locator('#wizardEntryObject').is_hidden()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    assert '.venv/bin/python' in page.locator('#projectStartCommandInput').input_value()
-    assert 'uvicorn' not in page.locator('#projectStartCommandInput').input_value()
-
-
-def test_custom_command_and_invalid_relative_entry(browser_page):
-    page, _state = browser_page
-    connect_and_review(page)
-    page.locator('#wizardBack').click()
-    page.locator('#wizardEntryPath').fill('../main.py')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert '相对路径' in page.locator('#wizardError').inner_text()
-    page.locator('#wizardAdvancedOptions summary').click()
-    page.locator('#wizardCustomCommand').check()
-    page.locator('#projectStartCommandInput').fill('/usr/bin/custom-runner')
-    assert page.locator('#wizardEntryPath').is_hidden()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    preview = [body for path, body in _state['posts'] if path == '/projects-config/preview'][-1]
-    assert preview['project']['entry_kind'] == ''
-    assert preview['project']['start_command'] == '/usr/bin/custom-runner'
-
-
-def test_dockerfile_wizard_autofills_port_and_keeps_secrets_out_of_preview(browser_page):
-    page, state = browser_page
-    state['files'] = {'Dockerfile': 'FROM python:3.12\nEXPOSE 8000\nCMD python main.py',
-                      '.env.example': 'DATABASE_URL=example-not-used'}
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#wizardEntryFields').is_hidden()
-    assert page.locator('#wizardDockerContainerPort').input_value() == '8000'
-    assert page.locator('[data-env-value]').input_value() == ''
-    page.locator('[data-env-value]').fill('postgres://secret@db/app')
-    page.locator('#wizardDockerPersist').check()
-    page.locator('#wizardDockerVolumes').fill('/app/uploads')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    assert '8080' in page.locator('#wizardSummary').inner_text()
-    assert '/app/uploads' in page.locator('#wizardSummary').inner_text()
-    assert 'postgres://secret' not in page.locator('#wizardReview').inner_text()
-    preview = next(body for path, body in state['posts'] if path == '/projects-config/preview')
-    assert 'postgres://secret' not in json.dumps(preview)
-    assert preview['project']['docker_config']['environment'] == ['DATABASE_URL']
-    page.locator('#projectConfigConfirmed').check()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#projectModal', state='hidden')
-    bootstrap = next(body for path, body in state['posts'] if path == '/projects-config/bootstrap')
-    assert bootstrap['options']['environment']['DATABASE_URL'] == 'postgres://secret@db/app'
-    assert 'postgres://secret' not in json.dumps(bootstrap['project'])
-    assert sum(path == '/redeploy' for path, _ in state['posts']) == 1
-    saved = next(body for path, body in state['posts'] if path == '/projects-config/save')
-    assert 'postgres://secret' not in json.dumps(saved)
-    assert page.locator('[data-env-value]').count() == 0
-
-
-def test_compose_required_variables_and_mobile_layout(browser_page, tmp_path):
-    page, state = browser_page
-    state['files'] = {'compose.yaml': 'services:\n  api:\n    image: ${IMAGE:?required}\n'}
-    page.set_viewport_size({'width': 390, 'height': 844})
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#wizardDockerBuildFields').is_hidden()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert page.locator('#wizardReview').is_hidden()
-    page.locator('[data-env-value]').fill('nginx:stable-alpine')
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=str(tmp_path / 'docker-compose-mobile.png'))
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    preview = next(body for path, body in state['posts'] if path == '/projects-config/preview')
-    assert preview['project']['docker_config']['mode'] == 'compose'
-
-
-def test_ambiguous_docker_port_requires_input_and_retry_can_change_port(browser_page):
-    page, state = browser_page
-    state['files'] = {'Dockerfile': 'FROM python:3\nCMD python main.py\n'}
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    page.locator('#wizardDockerContainerPort').fill('8000')
-    page.locator('#wizardDockerPublishedPort').fill('6868')
-    page.locator('#wizardNext').click()
-    page.wait_for_function('!ProjectWizard.busy()')
-    assert '6868' in page.locator('#wizardError').inner_text()
-    page.locator('#wizardDockerPublishedPort').fill('8080')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    page.locator('#projectConfigConfirmed').check()
-    state['blocked'] = True
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDeploy', state='visible')
-    page.locator('#wizardBack').click()
-    page.locator('#wizardDockerPublishedPort').fill('8081')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    page.locator('#projectConfigConfirmed').check()
-    page.locator('#wizardNext').click()
-    page.wait_for_function('!ProjectWizard.busy()')
-    bodies = [body for path, body in state['posts'] if path == '/projects-config/bootstrap']
-    assert bodies[-1]['original_key'] == 'demo'
-    assert bodies[-1]['project']['docker_config']['published_port'] == 8081
-
-
-def test_switching_runtime_ignores_invalid_hidden_docker_fields(browser_page):
-    page, state = browser_page
-    state['files'] = {'Dockerfile': 'FROM python:3\nEXPOSE 8000\nCMD python main.py',
-                      'requirements.txt': 'fastapi', 'main.py': 'from fastapi import FastAPI\napp = FastAPI()'}
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    page.locator('#wizardDockerContainerPort').fill('0')
-    page.locator('#projectTemplateInput').select_option('python', force=True)
-    assert page.locator('#wizardDockerFields').is_hidden()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    preview = next(body for path, body in state['posts'] if path == '/projects-config/preview')
-    assert preview['project']['docker_config'] == {}
-    assert preview['project']['entry_kind'] == 'fastapi'
-
-
-def test_unknown_repository_can_use_commands_without_script_or_service(browser_page, tmp_path):
-    page, state = browser_page
-    state['files'] = {'README.md': ''}
-    page.locator('#projectRepoInput').fill('https://git.example.test/team/demo.git')
-    page.locator('#projectProviderInput').select_option('gitea', force=True)
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#wizardDeployMethod').input_value() == ''
-    assert 'Gitea' in page.locator('#wizardPlatformAdvice').inner_text()
-    page.locator('#wizardDeployMethod').select_option('commands', force=True)
-    assert page.locator('#projectScriptInput').is_hidden()
-    assert page.locator('#projectTemplateInput').is_hidden()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert page.locator('#wizardReview').is_hidden()
-    page.locator('#projectBuildStepInput').fill('npm ci\nnpm run build')
-    page.locator('#projectRestartStepInput').fill('systemctl restart my-real-service')
-    page.screenshot(path=str(tmp_path / 'commands-desktop.png'))
-    page.set_viewport_size({'width': 390, 'height': 844})
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=str(tmp_path / 'commands-mobile.png'))
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    assert 'systemctl restart my-real-service' in page.locator('#wizardSummary').inner_text()
-    assert 'npm ci\nnpm run build' in page.locator('#wizardSummary').inner_text()
-    body = [body for path, body in state['posts'] if path == '/projects-config/preview'][-1]
-    assert body['project']['deployment_plan'] == dict(situation='new', method='commands', build='npm ci\nnpm run build', restart='systemctl restart my-real-service')
-    assert body['project']['repository_provider'] == 'gitea'
-    assert body['project']['trigger_mode'] == 'manual'
-    page.locator('#projectConfigConfirmed').check()
-    state['blocked'] = True
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDeploy', state='visible')
-    page.locator('#wizardWebhookSetup summary').click()
-    assert 'Gitea' in page.locator('#wizardWebhookGuide').inner_text()
-    assert '不会触发' in page.locator('#wizardWebhookModeHint').inner_text()
-
-
-def test_existing_service_can_finish_without_forced_update(browser_page):
-    page, state = browser_page
-    page.locator('#wizardSituation').select_option('existing', force=True)
-    page.locator('#wizardExistingDirectory').fill('/opt/already-running')
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#wizardDeployMethod').input_value() == 'commands'
-    assert page.locator('#projectWorkdirInput').input_value() == '/opt/already-running'
-    assert page.locator('#wizardEntryFields').is_hidden()
-    page.locator('#projectRestartStepInput').fill('systemctl restart existing-api')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    assert '不拉取' in page.locator('#wizardReviewHint').inner_text()
-    page.locator('#projectConfigConfirmed').check()
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDeploy', state='visible')
-    assert page.locator('#wizardDeploy').inner_text() == '执行一次更新'
-    page.locator('#wizardFinish').click()
-    page.wait_for_selector('#projectModal', state='hidden')
-    assert not any(path == '/redeploy' for path, _ in state['posts'])
-    body = next(body for path, body in state['posts'] if path == '/projects-config/bootstrap')
-    assert body['project']['deployment_plan']['situation'] == 'existing'
-    assert body['options']['write_service'] is False
-    saved = next(body for path, body in state['posts'] if path == '/projects-config/save')
-    assert saved['project']['enabled'] is True
-    assert saved['project']['trigger_mode'] == 'manual'
-
-
-def test_unsure_or_missing_situation_cannot_prepare(browser_page):
-    page, state = browser_page
-    page.locator('#wizardSituation').select_option('', force=True)
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert not state['posts']
-    page.locator('#wizardSituation').select_option('unsure', force=True)
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardError', state='visible')
-    assert '返回第一步' in page.locator('#wizardError').inner_text()
-    assert not any(path == '/projects-config/bootstrap' for path, _ in state['posts'])
-
-
-def test_existing_compose_avoids_new_container_plan_and_supports_explicit_script(browser_page):
-    page, state = browser_page
-    state['files'] = {'compose.yaml': 'services:\n  api:\n    image: busybox\n', 'Dockerfile': 'FROM busybox\n'}
-    page.locator('#wizardSituation').select_option('existing', force=True)
-    page.locator('#wizardExistingDirectory').fill('/srv/existing-compose')
-    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardConfigure', state='visible')
-    assert page.locator('#projectTemplateInput').input_value() == 'docker'
-    assert not page.locator('#wizardDockerChoice option[value="dockerfile"]').count()
-    page.locator('#wizardDeployMethod').select_option('script', force=True)
-    assert page.locator('#projectScriptInput').input_value() == ''
-    page.locator('#projectScriptInput').fill('ops/update.sh')
-    page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardReview', state='visible')
-    body = [body for path, body in state['posts'] if path == '/projects-config/preview'][-1]
-    assert body['project']['deployment_plan']['method'] == 'script'
-    assert body['project']['script'] == 'ops/update.sh'
-    assert body['project']['docker_config'] == {}
-
-
 @pytest.mark.parametrize('width', [1440, 390])
 def test_request_groups_average_history_and_expansion(browser_page, width, tmp_path):
     page, state = browser_page
-    page.locator('#closeProjectModalBtn').click()
     page.set_viewport_size({'width': width, 'height': 950})
     spec = request_gateway.normalize({'key': 'api', 'name': 'API', 'upstream': 'http://127.0.0.1:8000'})
     state['gateway_entries'] = [{**spec, 'state': 'running', 'local_address': '127.0.0.1:18080',
@@ -755,7 +179,6 @@ def test_request_groups_average_history_and_expansion(browser_page, width, tmp_p
 @pytest.mark.parametrize('width', [1440, 390])
 def test_nginx_request_view_filters_and_escapes(browser_page, width):
     page, state = browser_page
-    page.locator('#closeProjectModalBtn').click()
     page.set_viewport_size({'width': width, 'height': 844})
     state['nginx_requests'] = {
         'mode': 'docker', 'container': 'edge', 'enabled': True, 'notice': 'Only new requests',
@@ -783,7 +206,6 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
 @pytest.mark.parametrize('width', [1440, 390])
 def test_caddy_request_view_selects_and_filters(browser_page, width):
     page, state = browser_page
-    page.locator('#closeProjectModalBtn').click()
     page.set_viewport_size({'width': width, 'height': 844})
     state['caddy_requests'] = {'mode': 'caddy', 'container': 'aimore-caddy-1',
                                'candidates': ['aimore-caddy-1'], 'notice': 'Active', 'records': [
@@ -804,7 +226,6 @@ def test_caddy_request_view_selects_and_filters(browser_page, width):
 @pytest.mark.parametrize('width', [1440, 390])
 def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
     page, state = browser_page
-    page.locator('#closeProjectModalBtn').click()
     page.set_viewport_size({'width': width, 'height': 1000})
     page.locator('#requestsViewTab').click()
     assert page.locator('#requestBackend').input_value() == 'gateway'
@@ -858,7 +279,6 @@ def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
 
 def test_gateway_save_error_keeps_form_values(browser_page):
     page, state = browser_page
-    page.locator('#closeProjectModalBtn').click()
     page.locator('#requestsViewTab').click()
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayMaintenance > summary').click()
@@ -878,7 +298,6 @@ def test_gateway_save_error_keeps_form_values(browser_page):
 @pytest.mark.parametrize('width', [1440, 390])
 def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp_path):
     page, state = browser_page
-    page.locator('#closeProjectModalBtn').click()
     page.set_viewport_size({'width': width, 'height': 950})
     page.locator('#requestsViewTab').click()
     assert page.locator('#requestBackend').is_hidden()
@@ -935,7 +354,6 @@ def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp
 def test_connection_errors_preserve_inputs_and_show_help(browser_page):
     page, state = browser_page
     state['no_proxy'] = True
-    page.locator('#closeProjectModalBtn').click()
     page.locator('#requestsViewTab').click()
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayConnectOpen').click()

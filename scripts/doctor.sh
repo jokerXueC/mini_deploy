@@ -42,6 +42,11 @@ SERVICE_NAME="${SERVICE_NAME:-mini-deploy-agent}"
 STATE_FILE="${STATE_FILE:-/var/lib/mini-deploy-agent/state.json}"
 DATA_HOME="${DATA_HOME:-$(dirname -- "$STATE_FILE")}"
 PROJECTS_FILE="${PROJECTS_FILE:-$DATA_HOME/projects.json}"
+SITES_FILE="$(dirname -- "$STATE_FILE")/sites.json"
+CONFIG_FILE="$SITES_FILE"
+if [[ ! -e "$SITES_FILE" && ! -L "$SITES_FILE" ]]; then
+  CONFIG_FILE="$PROJECTS_FILE"
+fi
 PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
 if [[ -n "$PYTHON_BIN" ]]; then
   PYTHON_BIN="$(readlink -f -- "$PYTHON_BIN")"
@@ -62,20 +67,21 @@ check_file() {
 printf 'mini_deploy diagnostics\n\n'
 check_file "$APP_HOME/agent.py" "agent"
 check_file "$APP_HOME/ui/index.html" "UI"
-check_file "$PROJECTS_FILE" "projects config"
+check_file "$CONFIG_FILE" "sites config (including legacy fallback)"
 check_file "$ENV_FILE" "environment file"
 check_file "$APP_HOME/systemd/mini-deploy-agent.service" "systemd unit source"
 
-if [[ -f "$PROJECTS_FILE" ]]; then
+if [[ -f "$CONFIG_FILE" ]]; then
   if [[ -z "$PYTHON_BIN" ]]; then
     bad "Python 3 is unavailable; cannot run Agent config validation"
   elif MINI_DEPLOY_HOME="$APP_HOME" \
+    DEPLOY_AGENT_ENV_FILE="$ENV_FILE" \
     DEPLOY_AGENT_STATE_FILE="$STATE_FILE" \
     DEPLOY_PROJECTS_FILE="$PROJECTS_FILE" \
     "$PYTHON_BIN" "$APP_HOME/agent.py" validate-config >/dev/null; then
-    pass "Agent validates projects config: $PROJECTS_FILE"
+    pass "Agent validates sites config: $CONFIG_FILE"
   else
-    bad "Agent rejected projects config: $PROJECTS_FILE"
+    bad "Agent rejected sites config: $CONFIG_FILE"
   fi
 fi
 
@@ -93,9 +99,8 @@ fi
 
 if command -v docker >/dev/null 2>&1; then
   pass "docker is installed"
-  if docker compose version >/dev/null 2>&1; then pass "docker compose is available"; else note "docker compose plugin is unavailable"; fi
 else
-  note "docker is not installed (only required for Docker projects)"
+  note "docker is not installed (optional container management)"
 fi
 
 printf '\nSummary: OK=%s WARN=%s FAIL=%s\n' "$ok" "$warn" "$fail"

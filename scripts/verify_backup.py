@@ -530,23 +530,28 @@ def _verify_tar(
 
             app_root = fields["app_home"].lstrip("/")
             projects_candidates = (
+                f"{data_root}/sites.json",
                 f"{app_root}/projects.json",
                 f"{data_root}/projects.json",
             )
             archived_projects = [name for name in projects_candidates if name in members]
             if not archived_projects:
                 raise VerificationError(
-                    "tar archive is missing projects.json from both app_home and data_home"
+                    "tar archive is missing projects.json from both app_home and data_home "
+                    "and missing data_home/sites.json"
                 )
-            for projects_name in archived_projects:
+            monitoring_names = [f"{data_root}/{name}" for name in ("monitoring-state.json", "website-monitoring.json", "docker-mirrors-last.json")]
+            private_data_files = archived_projects + [name for name in monitoring_names if name in members]
+            for projects_name in private_data_files:
                 projects_member, projects_kind = members[projects_name]
+                label = PurePosixPath(projects_name).name
                 if projects_kind != "file":
                     raise VerificationError(
-                        f"archived projects.json is not a regular file: {projects_name}"
+                        f"archived {label} is not a regular file: {projects_name}"
                     )
                 if projects_member.uid != 0 or stat.S_IMODE(projects_member.mode) & 0o077:
                     raise VerificationError(
-                        f"archived projects.json is not root-owned and private: {projects_name}"
+                        f"archived {label} is not root-owned and private: {projects_name}"
                     )
 
             agent_name = f"{app_root}/agent.py"

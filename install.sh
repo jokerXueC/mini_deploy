@@ -41,6 +41,17 @@ LEGACY_INSTALLATION="false"
 PROJECTS_LAYOUT_STATE="unset"
 UPGRADE_SERVICE_WAS_ACTIVE="false"
 UPGRADE_SERVICE_FAILSAFE_ARMED="false"
+# Only these program entries are updated. Never prune an installed tree:
+# retired deployment scripts and user-owned business resources must survive.
+RELEASE_ENTRIES=(
+  agent.py certificates.py nginx_runtime.py nginx_install.py nginx_requests.py
+  caddy_requests.py request_gateway.py gateway_connections.py monitoring.py docker_mirrors.py
+  install.sh env.example server.env.example LICENSE THIRD_PARTY_NOTICES.md ui
+  examples/nginx.compose.yml
+  systemd/mini-deploy-agent.service
+  scripts/bootstrap_server.sh scripts/backup-installation.sh scripts/doctor.sh
+  scripts/verify_backup.py
+)
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "请使用 root 用户运行，或使用 sudo 执行。 / Please run as root or use sudo."
@@ -78,8 +89,9 @@ for path in "$ENV_FILE" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   fi
 done
 
-for required in agent.py certificates.py nginx_runtime.py nginx_install.py nginx_requests.py caddy_requests.py request_gateway.py gateway_connections.py project_guidance.py entrypoint_checks.py docker_onboarding.py env.example examples/projects.empty.json systemd/mini-deploy-agent.service scripts/backup-installation.sh scripts/verify_backup.py; do
-  if [[ ! -f "$SOURCE_DIR/$required" ]]; then
+for required in "${RELEASE_ENTRIES[@]}"; do
+  if [[ "$required" == "ui" && ! -d "$SOURCE_DIR/$required" ]] \
+    || [[ "$required" != "ui" && ! -f "$SOURCE_DIR/$required" ]]; then
     echo "安装包不完整 / Incomplete installation package: $required" >&2
     exit 1
   fi
@@ -174,7 +186,7 @@ write_systemd_service() {
   cat >"$temporary" <<EOF
 $MANAGED_SERVICE_MARKER
 [Unit]
-Description=mini_deploy lightweight deploy agent
+Description=mini_deploy operations and sites agent
 After=network-online.target
 Wants=network-online.target
 
@@ -209,13 +221,6 @@ EOF
     rm -f -- "$temporary"
     return 1
   fi
-}
-
-is_persistent_app_entry() {
-  case "$1" in
-    "$INSTALL_MARKER_NAME"|projects.json|.backups|workspace|state.json|audit.jsonl|.env|server.env|*.log) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 directory_has_entries() {
@@ -352,7 +357,7 @@ first_hardlinked_regular_file() {
 
 looks_like_legacy_installation() {
   local required=""
-  for required in agent.py install.sh env.example ui/index.html scripts/deploy.sample.sh; do
+  for required in agent.py install.sh env.example ui/index.html; do
     [[ -f "$APP_HOME/$required" && ! -L "$APP_HOME/$required" ]] || return 1
   done
   return 0
@@ -503,16 +508,12 @@ secure_app_release_files() {
   validate_app_release_tree_safety
   chown root:root "$APP_HOME"
   chmod go-w "$APP_HOME"
-  shopt -s dotglob nullglob
-  for item in "$APP_HOME"/*; do
-    name="$(basename -- "$item")"
-    if is_persistent_app_entry "$name"; then
-      continue
-    fi
+  for name in "${RELEASE_ENTRIES[@]}"; do
+    item="$APP_HOME/$name"
+    [[ -e "$item" ]] || continue
     find "$item" -xdev -exec chown -h -- root:root {} +
     find "$item" -xdev \( -type d -o -type f \) -exec chmod go-w -- {} +
   done
-  shopt -u dotglob nullglob
 }
 
 validate_app_release_tree_safety() {
@@ -522,25 +523,26 @@ validate_app_release_tree_safety() {
 
   [[ -d "$APP_HOME" ]] || return 0
   assert_no_nested_mounts "$APP_HOME" "APP_HOME"
-  shopt -s dotglob nullglob
-  for item in "$APP_HOME"/*; do
-    name="$(basename -- "$item")"
-    if is_persistent_app_entry "$name"; then
-      continue
+  for name in "${RELEASE_ENTRIES[@]}"; do
+    item="$APP_HOME/$name"
+    assert_no_symlink_components "$item"
+    assert_trusted_directory_chain "$(dirname -- "$item")"
+    [[ -e "$item" ]] || continue
+    if [[ "$name" == "ui" && ! -d "$item" ]] \
+      || [[ "$name" != "ui" && ! -f "$item" ]]; then
+      echo "Installed release entry has an unexpected file type: $item" >&2
+      return 1
     fi
     if [[ -L "$item" ]] || [[ -n "$(find "$item" -xdev -type l -print -quit 2>/dev/null)" ]]; then
       echo "发布文件树不能包含符号链接 / Release tree must not contain symbolic links: $item" >&2
-      shopt -u dotglob nullglob
       return 1
     fi
     unsafe_hardlink="$(first_hardlinked_regular_file "$item")"
     if [[ -n "$unsafe_hardlink" ]]; then
       echo "发布文件树不能包含硬链接 / Release tree must not contain hard-linked regular files: $unsafe_hardlink" >&2
-      shopt -u dotglob nullglob
       return 1
     fi
   done
-  shopt -u dotglob nullglob
 }
 
 validate_release_source_tree() {
@@ -549,28 +551,19 @@ validate_release_source_tree() {
   local unsafe_hardlink=""
 
   assert_no_nested_mounts "$SOURCE_DIR" "SOURCE_DIR"
-  shopt -s dotglob nullglob
-  for item in "$SOURCE_DIR"/*; do
-    name="$(basename -- "$item")"
-    case "$name" in
-      .git|__pycache__) continue ;;
-    esac
-    if is_persistent_app_entry "$name"; then
-      continue
-    fi
+  for name in "${RELEASE_ENTRIES[@]}"; do
+    item="$SOURCE_DIR/$name"
+    assert_no_symlink_components "$item"
     if [[ -L "$item" ]] || [[ -n "$(find "$item" -xdev -type l -print -quit 2>/dev/null)" ]]; then
       echo "安装包发布文件不能包含符号链接 / Release package must not contain symbolic links: $item" >&2
-      shopt -u dotglob nullglob
       return 1
     fi
     unsafe_hardlink="$(first_hardlinked_regular_file "$item")"
     if [[ -n "$unsafe_hardlink" ]]; then
       echo "安装包发布文件不能包含硬链接 / Release package must not contain hard-linked regular files: $unsafe_hardlink" >&2
-      shopt -u dotglob nullglob
       return 1
     fi
   done
-  shopt -u dotglob nullglob
 }
 
 acquire_maintenance_lock() {
@@ -644,24 +637,15 @@ copy_without_rsync() {
 
   validate_release_source_tree
   validate_app_release_tree_safety
-  shopt -s dotglob nullglob
-  for item in "$SOURCE_DIR"/*; do
-    name="$(basename "$item")"
-    case "$name" in
-      .git|__pycache__) continue ;;
-    esac
-    if is_persistent_app_entry "$name"; then
-      continue
-    fi
+  for name in "${RELEASE_ENTRIES[@]}"; do
+    item="$SOURCE_DIR/$name"
     if [[ -L "$item" ]] || [[ -n "$(find "$item" -xdev -type l -print -quit 2>/dev/null)" ]]; then
       echo "安装包发布文件不能包含符号链接 / Release package must not contain symbolic links: $item" >&2
       return 1
     fi
 
-    # Replace only entries shipped by the new release. Unknown local entries
-    # are left in place when rsync is unavailable.
-    rm -rf -- "$APP_HOME/$name"
-    cp -a -- "$item" "$APP_HOME/$name"
+    # Merge release entries without removing legacy or locally added files.
+    cp -a -- "$item" "$(dirname -- "$APP_HOME/$name")/"
     assert_no_nested_mounts "$APP_HOME/$name" "copied release entry"
     if [[ -L "$APP_HOME/$name" ]] \
       || [[ -n "$(find "$APP_HOME/$name" -xdev -type l -print -quit 2>/dev/null)" ]] \
@@ -672,7 +656,6 @@ copy_without_rsync() {
     find "$APP_HOME/$name" -xdev -exec chown -h -- root:root {} +
     find "$APP_HOME/$name" -xdev \( -type d -o -type f \) -exec chmod go-w -- {} +
   done
-  shopt -u dotglob nullglob
 }
 
 env_file_value() {
@@ -823,9 +806,9 @@ try:
     raw = json.loads(payload.decode("utf-8"))
 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
     raise SystemExit(f"projects config is invalid JSON: {path}: {exc}") from exc
-projects = raw.get("projects") if isinstance(raw, dict) else raw
+projects = raw.get("sites", raw.get("projects")) if isinstance(raw, dict) else raw
 if not isinstance(projects, list):
-    raise SystemExit(f"projects config must contain a projects list: {path}")
+    raise SystemExit(f"site config must contain a sites or legacy projects list: {path}")
 if any(not isinstance(project, dict) for project in projects):
     raise SystemExit(f"every projects config entry must be an object: {path}")
 PY
@@ -889,6 +872,12 @@ validate_projects_migration_plan() {
 
   validate_private_projects_file "$legacy_projects_file"
   validate_private_projects_file "$data_projects_file"
+  validate_private_projects_file "$DATA_HOME/sites.json"
+  validate_private_projects_file "$DATA_HOME/monitoring-state.json"
+  if [[ -f "$DATA_HOME/sites.json" ]]; then
+    validate_projects_json_structure "$DATA_HOME/sites.json" "private"
+    return 0
+  fi
   # Once ENV_FILE explicitly selects DATA_HOME, APP_HOME/projects.json is only
   # a stale backup candidate: require safe metadata for archiving, but do not
   # let malformed stale JSON block the authoritative data configuration.
@@ -924,12 +913,6 @@ EOF
     && ! -f "$data_projects_file" ]]; then
     echo "已安装实例缺少所有 projects.json，拒绝用示例配置静默替代 / The installed instance has no projects.json; refusing to silently replace it with an example." >&2
     return 1
-  fi
-
-  if [[ "$EXISTING_INSTALLATION" != "true" \
-    && ! -f "$legacy_projects_file" \
-    && ! -f "$data_projects_file" ]]; then
-    validate_projects_json_structure "$SOURCE_DIR/examples/projects.empty.json" "release"
   fi
 }
 
@@ -1048,6 +1031,9 @@ migrate_projects_config() {
 
   # Revalidate after the original-state backup, immediately before publishing.
   validate_projects_migration_plan
+  if [[ -f "$DATA_HOME/sites.json" ]]; then
+    return 0
+  fi
   if [[ -f "$data_projects_file" ]]; then
     if [[ -f "$legacy_projects_file" ]]; then
       if [[ "$PROJECTS_LAYOUT_STATE" == "data" ]]; then
@@ -1067,12 +1053,18 @@ migrate_projects_config() {
     fi
     echo "已将 projects.json 原子迁移到数据目录，旧副本继续保留 / Atomically migrated projects.json to DATA_HOME and preserved the legacy copy."
   else
-    atomic_copy_projects_file "$SOURCE_DIR/examples/projects.empty.json" "$data_projects_file" "release"
-    if ! projects_files_are_identical "$SOURCE_DIR/examples/projects.empty.json" "$data_projects_file" "release"; then
-      echo "数据目录中的 projects.json 与空配置源文件字节不一致，拒绝继续 / Published projects.json does not match its empty configuration source byte-for-byte." >&2
+    local empty_config=""
+    empty_config="$(mktemp "$DATA_HOME/.sites.empty.XXXXXX")"
+    printf '{"sites": []}\n' >"$empty_config"
+    if ! atomic_copy_projects_file "$empty_config" "$DATA_HOME/sites.json" "private"; then
+      rm -f -- "$empty_config"
       return 1
     fi
-    echo "已在数据目录创建 projects.json / Created projects.json in DATA_HOME."
+    rm -f -- "$empty_config"
+    validate_private_projects_file "$DATA_HOME/sites.json"
+    validate_projects_json_structure "$DATA_HOME/sites.json" "private"
+    echo "已在数据目录创建 sites.json / Created sites.json in DATA_HOME."
+    return 0
   fi
   validate_private_projects_file "$data_projects_file"
   validate_projects_json_structure "$data_projects_file" "private"
@@ -1315,17 +1307,7 @@ server {
     server_name $domain;
 
     client_max_body_size 20m;
-
-    location = /deploy/webhook {
-        # \$uri deliberately excludes the query string, so compatibility
-        # tokens can never enter the Nginx access log.
-        access_log /var/log/nginx/mini-deploy-webhook.access.log mini_deploy_no_query;
-        proxy_pass http://127.0.0.1:6868/webhook;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
+    access_log /var/log/nginx/mini-deploy.access.log mini_deploy_no_query;
 
     location = /deploy/ui {
         return 302 /deploy/ui/;
@@ -1441,58 +1423,43 @@ install_docker_if_requested() {
     return 0
   fi
 
-  if [[ "$SETUP_DOCKER" == "0" || "$SETUP_DOCKER" == "false" || "$SETUP_DOCKER" == "no" ]]; then
-    return 0
-  fi
-
-  local prompt="检测到未安装 Docker。如果你的项目要用 Docker Compose 部署，是否现在自动安装 Docker？"
+  local prompt="未检测到 Docker。是否现在安装，用于容器管理、Docker Nginx 和请求网关？"
   if is_en; then
-    prompt="Docker is not installed. Install Docker now for Docker Compose deployments?"
+    prompt="Docker was not found. Install it now for container management, Docker Nginx and the request gateway?"
   fi
-
-  if [[ "$SETUP_DOCKER" != "yes" && "$SETUP_DOCKER" != "true" && "$SETUP_DOCKER" != "1" ]]; then
-    if ! ask_yes_no "$prompt" "n"; then
-      if is_en; then
-        echo "Skipped Docker installation."
-      else
-        echo "已跳过 Docker 安装。"
+  case "${SETUP_DOCKER,,}" in
+    0|false|no|off|disabled) return 0 ;;
+    1|true|yes|on|enabled) ;;
+    *)
+      if ! ask_yes_no "$prompt" "n"; then
+        if is_en; then
+          echo "Skipped Docker installation."
+        else
+          echo "已跳过 Docker 安装。"
+        fi
+        return 0
       fi
-      return 0
-    fi
-  fi
+      ;;
+  esac
 
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y docker.io docker-compose-plugin || apt-get install -y docker.io docker-compose
+    apt-get install -y docker.io
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y docker docker-compose-plugin || dnf install -y docker
+    dnf install -y docker
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y docker docker-compose-plugin || yum install -y docker
+    yum install -y docker
   else
     if is_en; then
-      echo "No supported package manager found. Please install Docker manually if your projects need it."
+      echo "No supported package manager found. Install Docker manually for container management and the request gateway."
     else
-      echo "未找到支持的包管理器。如果你的项目需要 Docker，请先手动安装 Docker。"
+      echo "未找到支持的包管理器。若需容器管理和请求网关，请手动安装 Docker。"
     fi
     return 0
   fi
 
   systemctl enable docker
   systemctl start docker
-
-  if docker compose version >/dev/null 2>&1; then
-    if is_en; then
-      echo "Docker and Docker Compose are ready."
-    else
-      echo "Docker 和 Docker Compose 已可用。"
-    fi
-  else
-    if is_en; then
-      echo "Docker is installed, but 'docker compose' is not available. Install the Docker Compose plugin before using Docker projects."
-    else
-      echo "Docker 已安装，但 docker compose 不可用。使用 Docker 项目前，请先安装 Docker Compose 插件。"
-    fi
-  fi
 }
 
 setup_nginx() {
@@ -1660,7 +1627,7 @@ if [[ -z "$DEPLOY_DOMAIN" ]] && nginx_install_is_preapproved; then
   if is_en; then
     DEPLOY_DOMAIN="$(ask "Enter dashboard domain, for example deploy.example.com; press Enter to skip Nginx auto config" "")"
   else
-    DEPLOY_DOMAIN="$(ask "请输入部署面板域名，例如 deploy.example.com；直接回车则跳过 Nginx 自动配置" "")"
+    DEPLOY_DOMAIN="$(ask "请输入运维面板域名，例如 ops.example.com；直接回车则跳过 Nginx 自动配置" "")"
   fi
 fi
 DEPLOY_DOMAIN="$(normalize_domain "$DEPLOY_DOMAIN")"
@@ -1768,7 +1735,6 @@ if [[ -f "$ENV_FILE" ]]; then
   assert_managed_env_value "DEPLOY_AGENT_ENV_FILE" "$ENV_FILE"
   assert_projects_env_layout
   assert_managed_env_value "DEPLOY_AGENT_LOG" "$LOG_HOME/mini-deploy-agent.log"
-  assert_managed_env_value "DEPLOY_LOG_FILE" "$LOG_HOME/mini_deploy.log"
   assert_managed_env_value "DEPLOY_AGENT_STATE_FILE" "$DATA_HOME/state.json"
   assert_managed_env_value "DEPLOY_AUDIT_LOG_FILE" "$DATA_HOME/audit.jsonl"
   assert_managed_env_value "DEPLOY_PROJECT_CONFIG_BACKUP_DIR" "$DATA_HOME/backups"
@@ -1804,10 +1770,12 @@ if [[ -d "$APP_HOME" ]] && directory_has_entries "$APP_HOME"; then
       && ! -e "$ENV_FILE" \
       && ! -e "$SERVICE_FILE" \
       && ! -e "$APP_HOME/projects.json" \
+      && ! -e "$APP_HOME/sites.json" \
       && ! -e "$DATA_HOME/.mini-deploy-data" \
       && ! -e "$DATA_HOME/state.json" \
       && ! -e "$DATA_HOME/audit.jsonl" \
-      && ! -e "$DATA_HOME/projects.json" ]]; then
+      && ! -e "$DATA_HOME/projects.json" \
+      && ! -e "$DATA_HOME/sites.json" ]]; then
       : # A source checkout being installed in place is not an upgrade yet.
     elif legacy_adoption_enabled; then
       EXISTING_INSTALLATION="true"
@@ -1818,7 +1786,7 @@ if [[ -d "$APP_HOME" ]] && directory_has_entries "$APP_HOME"; then
       exit 1
     fi
   else
-    echo "APP_HOME 非空但不是可识别的 mini_deploy 安装，拒绝使用 --delete 覆盖 / Refusing to overwrite an unrecognized non-empty APP_HOME: $APP_HOME" >&2
+    echo "APP_HOME 非空但不是可识别的 mini_deploy 安装，拒绝覆盖 / Refusing to overwrite an unrecognized non-empty APP_HOME: $APP_HOME" >&2
     exit 1
   fi
 fi
@@ -1865,7 +1833,8 @@ if [[ -e "$data_marker" || -L "$data_marker" ]]; then
 elif [[ -d "$DATA_HOME" ]] && directory_has_entries "$DATA_HOME" \
   && [[ ! -f "$DATA_HOME/state.json" \
     && ! -f "$DATA_HOME/audit.jsonl" \
-    && ! -f "$DATA_HOME/projects.json" ]]; then
+    && ! -f "$DATA_HOME/projects.json" \
+    && ! -f "$DATA_HOME/sites.json" ]]; then
   echo "DATA_HOME 非空但不是可识别的 mini_deploy 数据目录 / Refusing an unrecognized non-empty DATA_HOME: $DATA_HOME" >&2
   exit 1
 fi
@@ -1930,12 +1899,14 @@ install -m 600 /dev/null "$data_marker"
 chown root:root "$data_marker"
 chmod 600 "$data_marker"
 
-# Project Tokens move only after the verified original-state backup. The
-# legacy APP_HOME copy remains excluded from release replacement as a private,
-# read-only recovery copy; DATA_HOME/projects.json becomes authoritative.
+# Keep legacy configuration byte-for-byte for the runtime's site fallback.
+# Fresh installs receive an empty sites.json without deployment templates.
 migrate_projects_config
 
 secure_app_release_files
+ensure_root_directory "$APP_HOME/scripts" 755
+ensure_root_directory "$APP_HOME/systemd" 755
+ensure_root_directory "$APP_HOME/examples" 755
 
 if [[ "$SAME_SOURCE_AND_TARGET" == "true" ]]; then
   if is_en; then
@@ -1946,27 +1917,19 @@ if [[ "$SAME_SOURCE_AND_TARGET" == "true" ]]; then
 elif command -v rsync >/dev/null 2>&1; then
   validate_release_source_tree
   validate_app_release_tree_safety
-  rsync -a -x --delete \
-    --chown=root:root \
-    --chmod=go-w \
-    --exclude '/.git/' \
-    --exclude '/__pycache__/' \
-    --exclude '/.mini-deploy-install' \
-    --exclude '/projects.json' \
-    --exclude '/.backups/' \
-    --exclude '/workspace/' \
-    --exclude '/state.json' \
-    --exclude '/audit.jsonl' \
-    --exclude '/.env' \
-    --exclude '/server.env' \
-    --exclude '/*.log' \
-    "$SOURCE_DIR/" "$APP_HOME/"
+  (
+    cd "$SOURCE_DIR"
+    rsync -a -x --relative --chown=root:root --chmod=go-w \
+      "${RELEASE_ENTRIES[@]}" "$APP_HOME/"
+  )
 else
   copy_without_rsync
 fi
 
 secure_app_release_files
-chmod +x "$APP_HOME/agent.py" "$APP_HOME/scripts/"*.sh
+chmod +x "$APP_HOME/agent.py" "$APP_HOME/install.sh" \
+  "$APP_HOME/scripts/bootstrap_server.sh" "$APP_HOME/scripts/backup-installation.sh" \
+  "$APP_HOME/scripts/doctor.sh"
 
 if [[ -L "$ENV_FILE" || ( -e "$ENV_FILE" && ! -f "$ENV_FILE" ) ]]; then
   echo "ENV_FILE 必须是普通文件且不能是符号链接 / ENV_FILE must be a regular non-symlink file: $ENV_FILE" >&2
@@ -1996,14 +1959,15 @@ upsert_env_assignment "DEPLOY_AGENT_ENV_FILE" "$ENV_FILE"
 upsert_env_assignment "DEPLOY_AGENT_SERVICE_NAME" "$SERVICE_NAME"
 upsert_env_assignment "DEPLOY_PROJECTS_FILE" "$DATA_HOME/projects.json"
 upsert_env_assignment "DEPLOY_AGENT_LOG" "$LOG_HOME/mini-deploy-agent.log"
-upsert_env_assignment "DEPLOY_LOG_FILE" "$LOG_HOME/mini_deploy.log"
 upsert_env_assignment "DEPLOY_AGENT_STATE_FILE" "$DATA_HOME/state.json"
 upsert_env_assignment "DEPLOY_AUDIT_LOG_FILE" "$DATA_HOME/audit.jsonl"
 upsert_env_assignment "DEPLOY_PROJECT_CONFIG_BACKUP_DIR" "$DATA_HOME/backups"
 
-validate_private_projects_file "$DATA_HOME/projects.json"
-chown root:root "$ENV_FILE" "$DATA_HOME/projects.json"
-chmod 600 "$ENV_FILE" "$DATA_HOME/projects.json"
+chown root:root "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+for config_file in "$DATA_HOME/sites.json" "$DATA_HOME/projects.json"; do
+  validate_private_projects_file "$config_file"
+done
 
 marker="$APP_HOME/$INSTALL_MARKER_NAME"
 if [[ -L "$marker" || ( -e "$marker" && ! -f "$marker" ) ]]; then
@@ -2040,20 +2004,6 @@ if nginx_setup_enabled; then
   setup_nginx "$DEPLOY_DOMAIN"
 fi
 
-if ! "$PYTHON_BIN" -c 'import yaml' >/dev/null 2>&1; then
-  echo "安装 Compose 配置检查依赖 / Installing Compose inspection dependency"
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update && apt-get install -y python3-yaml
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y python3-pyyaml
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y python3-pyyaml
-  else
-    echo "请为当前 Python 安装 PyYAML 后重试 / Install PyYAML for the current Python and retry" >&2
-    exit 1
-  fi
-  "$PYTHON_BIN" -c 'import yaml'
-fi
 install_docker_if_requested
 
 if curl -fsS --max-time 5 http://127.0.0.1:6868/health >/dev/null 2>&1; then
@@ -2107,14 +2057,12 @@ Manual safety backup:
 Optional: edit environment config:
    nano $ENV_FILE
 
-Preferred: add or edit projects in the web panel.
+Preferred: add or edit sites in the web panel.
 
-Advanced: after editing projects directly, restore private permissions,
-validate the exact configuration, and restart the Agent:
-   nano $DATA_HOME/projects.json
-   chown root:root $DATA_HOME/projects.json
-   chmod 600 $DATA_HOME/projects.json
-   MINI_DEPLOY_HOME=$APP_HOME DEPLOY_AGENT_STATE_FILE=$DATA_HOME/state.json DEPLOY_PROJECTS_FILE=$DATA_HOME/projects.json $PYTHON_BIN $APP_HOME/agent.py validate-config
+Site configuration: $DATA_HOME/sites.json
+Legacy fallback (preserved): $DATA_HOME/projects.json
+Validate configuration and restart after manual changes:
+   DEPLOY_AGENT_ENV_FILE=$ENV_FILE MINI_DEPLOY_HOME=$APP_HOME DEPLOY_AGENT_STATE_FILE=$DATA_HOME/state.json DEPLOY_PROJECTS_FILE=$DATA_HOME/projects.json $PYTHON_BIN $APP_HOME/agent.py validate-config
    systemctl restart $SERVICE_NAME
 
 Health check:
@@ -2155,13 +2103,12 @@ Agent 状态：$HEALTH_RESULT
 可选：修改环境配置：
    nano $ENV_FILE
 
-推荐：在网页面板中添加或修改项目。
+推荐：在网页面板中添加或修改站点。
 
-高级用法：直接修改项目配置后，请恢复私有权限、校验精确配置并重启 Agent：
-   nano $DATA_HOME/projects.json
-   chown root:root $DATA_HOME/projects.json
-   chmod 600 $DATA_HOME/projects.json
-   MINI_DEPLOY_HOME=$APP_HOME DEPLOY_AGENT_STATE_FILE=$DATA_HOME/state.json DEPLOY_PROJECTS_FILE=$DATA_HOME/projects.json $PYTHON_BIN $APP_HOME/agent.py validate-config
+站点配置：$DATA_HOME/sites.json
+兼容读取的旧配置（保留）：$DATA_HOME/projects.json
+手动修改后校验配置并重启 Agent：
+   DEPLOY_AGENT_ENV_FILE=$ENV_FILE MINI_DEPLOY_HOME=$APP_HOME DEPLOY_AGENT_STATE_FILE=$DATA_HOME/state.json DEPLOY_PROJECTS_FILE=$DATA_HOME/projects.json $PYTHON_BIN $APP_HOME/agent.py validate-config
    systemctl restart $SERVICE_NAME
 
 健康检查：
