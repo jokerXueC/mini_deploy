@@ -285,7 +285,7 @@ def test_gateway_api_requires_auth_csrf_and_confirmation(monkeypatch, tmp_path, 
         assert request("GET")[0] == 401
         cookie = agent._make_session_cookie()
         headers = {"Cookie": f"{agent.COOKIE_NAME}={cookie}"}
-        assert request("GET", headers)[1] == ({"entries": []} if endpoint == '/request-gateways' else {'sources': []})
+        assert request("GET", headers)[1] == ({"entries": [], "history_sources": []} if endpoint == '/request-gateways' else {'sources': []})
         payload = {"action": "save", "spec": spec()} if endpoint == '/request-gateways' else {'action': 'apply'}
         assert request("POST", headers, payload)[0] == 403
         headers["X-CSRF-Token"] = agent._csrf_token(cookie)

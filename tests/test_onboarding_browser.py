@@ -82,7 +82,7 @@ def browser_page():
                         entry = next(e for e in entries if e['key'] == payload['key'])
                         entry['state'] = 'running' if payload['action'] == 'start' else 'exited'
                 result = {'entries': state['gateway_entries']}
-            elif path == '/gateway-requests':
+            elif path in ('/gateway-requests', '/request-history'):
                 result = state.get('gateway_requests', {'records': [], 'notice': '请求结束后显示记录'})
             elif path == '/gateway-connections/discover':
                 result = {'sources': [] if state.get('no_proxy') else [
@@ -142,6 +142,7 @@ def test_request_groups_average_history_and_expansion(browser_page, width, tmp_p
                  'duration_ms': 6290, 'upstream_ms': 23.4} for i in range(65)]
     records += [{**base, 'method': 'POST'}, {**base, 'host': 'other.test'}]
     state['gateway_requests'] = {'records': records}
+    page.evaluate("document.querySelector('#requestLayout').value = 'flat'")
     page.locator('#requestsViewTab').click()
     page.wait_for_selector('.request-group')
     assert page.locator('.request-group').count() == 4
@@ -165,11 +166,15 @@ def test_request_groups_average_history_and_expansion(browser_page, width, tmp_p
     assert page.evaluate('window.keptRequestGroup === document.querySelector(".request-group")')
     assert group.get_attribute('open') is not None
     page.locator('#requestStatus').select_option('error', force=True)
+    playwright.expect(page.locator('.request-group')).to_have_count(2)
     assert page.locator('.request-group').count() == 2
     assert '66.7%' in page.locator('.request-group').first.locator('summary').inner_text()
     page.locator('#requestStatus').select_option('success', force=True)
+    page.wait_for_function("!document.querySelector('#requestRefresh').disabled")
+    playwright.expect(page.locator('.request-group').first.locator('summary')).to_contain_text('100.0%')
     assert page.locator('.request-group').count() == 2
     page.locator('#requestStatus').select_option('all', force=True)
+    playwright.expect(page.locator('.request-group')).to_have_count(4)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     for theme in ('light', 'dark'):
         page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
@@ -180,6 +185,7 @@ def test_request_groups_average_history_and_expansion(browser_page, width, tmp_p
 def test_nginx_request_view_filters_and_escapes(browser_page, width):
     page, state = browser_page
     page.set_viewport_size({'width': width, 'height': 844})
+    page.evaluate("document.querySelector('#requestLayout').value = 'flat'")
     state['nginx_requests'] = {
         'mode': 'docker', 'container': 'edge', 'enabled': True, 'notice': 'Only new requests',
         'records': [
@@ -199,6 +205,7 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
     assert page.locator('.request-group').count() == 1
     assert '/failed' in page.locator('#requestRows').inner_text()
     page.locator('#requestSearch').fill('missing')
+    playwright.expect(page.locator('.request-group')).to_have_count(0)
     assert page.locator('.request-group').count() == 0
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
 
@@ -262,7 +269,7 @@ def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
          'path': '/cloud/session', 'status': 502, 'duration_ms': 25, 'upstream_ms': None}]}
     page.locator('[data-gateway-action="records"]').click()
     page.wait_for_selector('.request-group')
-    assert page.locator('.request-group').count() == 2
+    assert page.locator('.request-group:not(.request-branch)').count() == 2
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=str(tmp_path / f'gateway-running-{width}.png'), full_page=True)
     page.locator('[data-gateway-action="edit"]').click()
@@ -304,13 +311,16 @@ def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp
     assert page.locator('#gatewayAdd').is_hidden()
     page.locator('#gatewayConnectOpen').click()
     page.wait_for_function("document.querySelector('#connectContainer').value === 'edge'")
-    page.wait_for_selector('#connectRouteFields', state='visible')
+    page.wait_for_selector('#connectReview', state='visible')
     assert page.locator('#connectContainer').is_hidden()
     assert page.locator('#connectPort').is_hidden()
-    assert page.locator('#connectPreview').is_disabled()
-    page.locator('#connectRoute').select_option('api', force=True)
-    assert '/cloud/*' in page.locator('#connectRouteNotice').inner_text()
-    page.locator('#connectRoute').select_option('static', force=True)
+    assert '/cloud/*' in page.locator('#connectReviewScope').inner_text()
+    page.locator('#connectBack').click()
+    page.locator('#connectSourceAdvanced > summary').click()
+    page.locator('#connectIncludeStatic').check()
+    page.locator('#connectService').select_option('0', force=True)
+    page.wait_for_selector('#connectReview', state='visible')
+    page.locator('#connectBack').click()
     assert page.locator('#connectNetwork').input_value() == 'app_default'
     page.locator('#connectOptionsAdvanced > summary').click()
     assert page.locator('#connectInternalField').is_visible()
@@ -333,9 +343,8 @@ def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp
     page.locator('#gatewayConnectClose').click()
     assert not any(p.get('action') == 'apply' for _, p in state['posts'])
     page.locator('#gatewayConnectOpen').click()
-    page.wait_for_selector('#connectRouteFields', state='visible')
-    page.locator('#connectRoute').select_option('static', force=True)
-    page.locator('#connectPreview').click()
+    playwright.expect(page.locator('#connectService option')).to_have_count(4)
+    page.locator('#connectService').select_option('0', force=True)
     page.wait_for_selector('#connectReview', state='visible')
     page.locator('#connectApply').click()
     page.wait_for_selector('#requestStopMonitoring', state='visible')
@@ -357,7 +366,9 @@ def test_connection_errors_preserve_inputs_and_show_help(browser_page):
     page.locator('#requestsViewTab').click()
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayConnectOpen').click()
-    page.wait_for_function("document.querySelector('#connectHelp').open")
+    page.wait_for_function("!document.querySelector('#gatewayConnectFields').disabled")
+    page.locator('#connectSourceAdvanced > summary').click()
+    page.locator('#connectHelp summary').click()
     assert '右边' in page.locator('#connectHelpItems').inner_text()
     page.locator('#connectContainer').fill('custom-edge')
     state['connection_failure'] = True

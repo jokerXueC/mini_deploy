@@ -1,22 +1,25 @@
 window.RequestGateway = (() => {
   let entries = [], loaded = false, loading = null, busy = false, editing = null, formVersion = 0;
+  let historySources = [];
   const feedback = $('gatewayFeedback');
   const states = {running: '运行中', exited: '已停止', created: '未启动', not_created: '待启动', restarting: '重启中', paused: '已暂停', unknown: '状态不可用'};
 
   function draw() {
     const selected = $('requestGatewayKey').value;
-    $('requestGatewayKey').replaceChildren(...entries.map(entry => {
+    const choices = entries.concat(historySources.filter(item => !entries.some(entry => entry.key === item.key))
+      .map(item => ({...item, name: `${item.name}（历史记录）`})));
+    $('requestGatewayKey').replaceChildren(...choices.map(entry => {
       const option = document.createElement('option');
       option.value = entry.key;
       option.textContent = entry.connection?.site ? `${entry.upstream} · ${entry.connection.site}` : `自定义入口 · ${entry.name}`;
       return option;
     }));
-    if (entries.some(entry => entry.key === selected)) $('requestGatewayKey').value = selected;
+    if (choices.some(entry => entry.key === selected)) $('requestGatewayKey').value = selected;
     else {
       const connected = entries.find(entry => entry.connection?.state === 'connected');
       if (connected) $('requestGatewayKey').value = connected.key;
     }
-    if (!entries.length) $('requestGatewayKey').innerHTML = '<option value="">尚未接入服务</option>';
+    if (!choices.length) $('requestGatewayKey').innerHTML = '<option value="">尚未接入服务</option>';
     $('gatewayEntries').innerHTML = entries.length ? entries.map(entry => `
       <article class="request-gateway-entry">
         <div class="request-gateway-title"><strong>${escapeHtml(entry.name)}</strong><span class="badge ${entry.state === 'running' ? 'success' : 'neutral'}">${escapeHtml(states[entry.state] || entry.state)}</span></div>
@@ -40,6 +43,7 @@ window.RequestGateway = (() => {
     loading = (async () => {
       const result = await fetchJson('request-gateways');
       entries = result.entries || [];
+      historySources = result.history_sources || [];
       loaded = true;
       draw();
     })();

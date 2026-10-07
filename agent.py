@@ -47,6 +47,8 @@ import nginx_requests
 import request_gateway
 import gateway_connections
 import monitoring
+import request_history
+import sqlite3
 import docker_mirrors
 
 try:
@@ -2231,6 +2233,16 @@ def _health_check_sampler() -> None:
 
 
 _monitor_instance: monitoring.Monitor | None = None
+_history_instance: request_history.History | None = None
+_history_lock = threading.Lock()
+
+
+def _request_history() -> request_history.History:
+    global _history_instance
+    with _history_lock:
+        if _history_instance is None or _history_instance.home != STATE_FILE.parent:
+            _history_instance = request_history.History(STATE_FILE.parent, maintenance=_maintenance_shared_lock)
+        return _history_instance
 _monitor_lock = threading.Lock()
 _discovery_instance: certificate_discovery.Discovery | None = None
 _discovery_lock = threading.Lock()
@@ -2864,6 +2876,20 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "caddy_requests_failed", "detail": str(exc)})
             return
+        if path == "/request-history":
+            if self._require_auth_json():
+                try:
+                    query = parse_qs(parsed.query)
+                    result = _request_history().query(query.get("key", [""])[0],
+                        period=query.get("period", ["24h"])[0], layout=query.get("layout", ["tree"])[0],
+                        search=query.get("search", [""])[0], status=query.get("status", ["all"])[0],
+                        page=int(query.get("page", ["0"])[0]))
+                    self._write_json(200, result)
+                except ValueError as exc:
+                    self._write_json(400, {"error": "history_query_invalid", "detail": str(exc)})
+                except (OSError, sqlite3.Error):
+                    self._write_json(503, {"error": "history_unavailable", "detail": "请求历史暂不可用，请检查采集日志；历史文件不会自动重置"})
+            return
         if path in {"/request-gateways", "/request-gateways/networks", "/gateway-requests", "/gateway-connections/discover"}:
             if self._require_auth_json():
                 try:
@@ -2878,6 +2904,10 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         with request_gateway.LOCK:
                             result = {"entries": [store.describe(entry) for entry in store.entries()]}
+                        try:
+                            result["history_sources"] = _request_history().sources()
+                        except (OSError, sqlite3.Error):
+                            result["history_sources"] = []
                     self._write_json(200, result)
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "gateway_read_failed", "detail": str(exc)})
@@ -3400,9 +3430,18 @@ def main() -> None:
     threading.Thread(target=_docker_log_metric_sampler, name="docker-log-metric-sampler", daemon=True).start()
     threading.Thread(target=_health_check_sampler, name="health-check-sampler", daemon=True).start()
     threading.Thread(target=_certificate_discovery_sampler, name="certificate-discovery-sampler", daemon=True).start()
+    history_stop = threading.Event()
+    history_worker = threading.Thread(target=request_history.Collector(_request_history()).run,
+        args=(history_stop, _log), name="request-history-sampler", daemon=True)
+    history_worker.start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     _log(f"monitoring agent listening on {HOST}:{PORT}, sites={len(PROJECTS)}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        history_stop.set()
+        history_worker.join(timeout=10)
+        server.server_close()
 
 
 if __name__ == "__main__":

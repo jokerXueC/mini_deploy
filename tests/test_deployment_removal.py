@@ -89,6 +89,18 @@ def test_new_site_endpoints_require_auth_and_csrf(http_server):
         assert http_server(method, path, authenticated=False)[0] == 401
 
 
+def test_request_history_is_authenticated_and_reads_without_docker(http_server, runtime, monkeypatch):
+    assert http_server("GET", "/request-history?key=api", authenticated=False)[0] == 401
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("history queries must not invoke Docker")
+    monkeypatch.setattr(agent.subprocess, "run", forbidden)
+    code, payload = http_server("GET", "/request-history?key=api&period=24h")
+    assert code == 200 and payload["history"] and payload["total_requests"] == 0
+    assert (runtime / "request-history/history.sqlite3").exists()
+    assert http_server("GET", "/request-history?key=api&period=forever")[0] == 400
+    assert http_server("GET", "/request-history?key=api&page=-1")[0] == 400
+
+
 def test_legacy_config_is_read_only_and_missing_scripts_do_not_block(runtime):
     legacy = {"projects": [{"key": "api", "name": "API", "app_domain": "api.example.test",
                              "service_port": 8000, "enabled": True, "webhook_secret": "weak",
@@ -155,6 +167,9 @@ def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
         def start(self):
             started.append(self.target.__name__)
 
+        def join(self, timeout):
+            assert timeout == 10
+
     class Server:
         def __init__(self, address, handler):
             assert address == ("0.0.0.0", 6868)
@@ -162,13 +177,16 @@ def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
         def serve_forever(self):
             return
 
+        def server_close(self):
+            pass
+
     monkeypatch.setattr(agent.threading, "Thread", Thread)
     monkeypatch.setattr(agent, "ThreadingHTTPServer", Server)
     monkeypatch.setattr(agent, "_validate_ui_auth_config", lambda: None)
     monkeypatch.setattr(agent.sys, "argv", ["agent.py"])
     agent.main()
     assert started == ["_realtime_metric_sampler", "_system_metric_sampler",
-                       "_docker_log_metric_sampler", "_health_check_sampler", "_certificate_discovery_sampler"]
+                       "_docker_log_metric_sampler", "_health_check_sampler", "_certificate_discovery_sampler", "run"]
     assert agent.STATE_FILE.read_bytes() == original
 
 

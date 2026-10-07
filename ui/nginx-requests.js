@@ -2,6 +2,7 @@ window.NginxRequests = (() => {
   let records = [], pending = false, generation = 0, sourceChosen = false, pendingRefresh = false;
   const source = $('requestSource'), notice = $('requestNotice'), rows = $('requestRows');
   const rendered = new WeakMap();
+  let historyResult = null, historyPage = 0, searchTimer = null;
 
   function updateHtml(element, html) {
     if (rendered.get(element) === html) return;
@@ -73,8 +74,13 @@ window.NginxRequests = (() => {
       if (!children.length && leaves.length === 1) return leaves[0];
       const all = [...leaves, ...children];
       const items = all.flatMap(child => child.items).sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+      const totals = Object.fromEntries(['count', 'successes', 'errors', 'durationSum', 'durationCount', 'upstreamSum', 'upstreamCount']
+        .map(key => [key, all.reduce((sum, child) => sum + child[key], 0)]));
       return {key: `branch:${JSON.stringify([current.host, current.path])}`, host: current.host, path: current.path,
-        children: all, leaves: all.reduce((total, child) => total + child.leaves, 0), ...summarizeRequests(items)};
+        children: all, leaves: all.reduce((total, child) => total + child.leaves, 0), ...totals, items,
+        average: totals.durationCount ? totals.durationSum / totals.durationCount : null,
+        upstreamAverage: totals.upstreamCount ? totals.upstreamSum / totals.upstreamCount : null,
+        successRate: totals.count ? totals.successes / totals.count * 100 : 0};
     }
     return [...hosts.values()].sort((a, b) => a.host.localeCompare(b.host)).map(compact);
   }
@@ -83,14 +89,20 @@ window.NginxRequests = (() => {
     const term = $('requestSearch').value.trim().toLowerCase();
     const status = $('requestStatus').value;
     const tree = $('requestLayout').value === 'tree';
-    const groups = groupRequests(records, tree).filter(group => {
+    const groups = historyResult?.groups || groupRequests(records, tree).filter(group => {
       if (status === 'success' && group.successes !== group.count) return false;
       if (status === 'error' && !group.errors) return false;
       return !term || `${group.path} ${group.host}`.toLowerCase().includes(term) ||
         group.items.some(item => (item.path || '').toLowerCase().includes(term));
     });
-    $('requestSampleSummary').textContent = records.length
+    $('requestSampleSummary').textContent = historyResult
+      ? `时段内已保存 ${historyResult.total_requests} 条 · ${historyResult.total_groups} 类请求 · 本页 ${groups.length} 类 · 明细取最近 30 条 · 2xx / 3xx 计为成功`
+      : records.length
       ? `本次读取 ${records.length} 条 · 显示 ${groups.length} ${tree ? '类请求（疑似 ID 已合并）' : '个地址'} · 2xx / 3xx 计为成功` : '';
+    $('requestHistoryPages').hidden = !historyResult || (!historyPage && !historyResult.has_more);
+    $('requestHistoryPrevious').disabled = historyPage === 0;
+    $('requestHistoryNext').disabled = !historyResult?.has_more;
+    $('requestHistoryPage').textContent = `第 ${historyPage + 1} 页`;
     if (!groups.length) {
       rows.innerHTML = '<p class="request-empty">暂无匹配的请求</p>';
       return;
@@ -124,10 +136,11 @@ window.NginxRequests = (() => {
       element.classList.toggle('request-branch', !!group.children);
       element.style.setProperty('--request-indent', `${Math.min(depth, 3) * 12}px`);
       if (term && group.children && (created || searchChanged)) element.open = true;
+      else if (created && group.children && depth === 0) element.open = true;
       const samples = group.items.slice(0, 30).reverse();
       const bars = samples.map((item, position) => `<span class="request-tick ${item.status >= 200 && item.status < 400 ? 'is-ok' : item.status >= 400 ? 'is-error' : 'is-unknown'}" ${position === 0 ? `style="grid-column-start:${31 - samples.length}"` : ''} title="${escapeHtml(item.at || '-')} · ${escapeHtml(item.status)}"></span>`).join('');
       const label = prefix && group.path.startsWith(prefix + '/') ? group.path.slice(prefix.length + 1) : group.path;
-      const pathCount = new Set(group.items.map(item => item.path)).size;
+      const pathCount = group.pathCount ?? new Set(group.items.map(item => item.path)).size;
       const meta = [!depth ? group.host || '-' : '', group.children ? `${group.leaves} 类请求` : pathCount > 1 ? `${pathCount} 个原始地址` : ''].filter(Boolean).join(' · ');
       const summary = `<span class="request-route"><span class="request-route-top"><i class="request-expand" aria-hidden="true"></i>${group.children ? '' : `<b>${escapeHtml(group.method)}</b>`}<code title="${escapeHtml(group.path)}">${escapeHtml(label || '/')}${group.children && label && !label.endsWith('/') ? '/' : ''}</code></span>${meta ? `<span class="request-route-host">${escapeHtml(meta)}</span>` : ''}</span>
         <span class="request-metric" data-label="次数">${group.count}</span>
@@ -160,12 +173,16 @@ window.NginxRequests = (() => {
       let backend = $('requestBackend').value;
       let result;
       $('requestGatewayField').hidden = backend !== 'gateway';
+      $('requestPeriodField').hidden = backend !== 'gateway';
+      $('requestLimitField').hidden = backend === 'gateway';
       $('requestContainerField').hidden = backend !== 'caddy';
       if (backend === 'gateway') {
         await window.RequestGateway.ensure();
         if (version !== generation) return;
         const key = $('requestGatewayKey').value;
-        result = key ? await fetchJson(`gateway-requests?key=${encodeURIComponent(key)}&limit=${$('requestLimit').value}`)
+        const params = new URLSearchParams({key, period: $('requestPeriod').value, layout: $('requestLayout').value,
+          search: $('requestSearch').value.trim(), status: $('requestStatus').value, page: String(historyPage)});
+        result = key ? await fetchJson(`request-history?${params}`)
           : {mode: 'gateway', records: [], notice: '尚未接入后端服务。'};
       } else {
         result = await fetchJson(`${backend}-requests?limit=${$('requestLimit').value}${backend === 'caddy' && $('requestContainer').value.trim() ? `&container=${encodeURIComponent($('requestContainer').value.trim())}` : ''}`);
@@ -184,6 +201,7 @@ window.NginxRequests = (() => {
       }
       if (version !== generation || !$('requestsView').classList.contains('active')) return;
       records = result.records || [];
+      historyResult = result.history ? result : null;
       window.AppSelects?.syncAll();
       $('requestContainerField').hidden = backend !== 'caddy';
       if (backend === 'caddy') {
@@ -206,6 +224,15 @@ window.NginxRequests = (() => {
       $('requestStopMonitoring').hidden = !entry?.connection || entry.connection.state === 'not_connected';
       $('requestStopMonitoring').textContent = attached ? '停止记录' : '恢复原入口';
       notice.textContent = result.notice || '';
+      if (historyResult) {
+        const checked = result.checked_at ? new Date(result.checked_at * 1000).toLocaleTimeString('zh-CN') : '';
+        notice.textContent = `${checked ? `最近采集 ${checked}` : '等待首次后台采集'} · 最多保留 7 天（受容量限制）。`;
+        if (result.error) notice.textContent += ` ${result.error}。`;
+        if (result.checked_at && Date.now() / 1000 - result.checked_at > 60) notice.textContent += ' 采集延迟，当前统计可能不完整。';
+        if (result.limited_at) notice.textContent += ' 曾达到单批采集上限，可能存在缺口。';
+        if (result.earliest_at) notice.textContent += ` 当前最早记录：${new Date(result.earliest_at * 1000).toLocaleString('zh-CN')}。`;
+        if (!entry && $('requestGatewayKey').value) source.textContent = '已保存的历史记录 · 原采集入口不可用';
+      }
       $('requestEnable').hidden = backend !== 'nginx' || result.enabled || result.mode === 'none';
       $('requestDisable').hidden = backend !== 'nginx' || !result.enabled;
       render();
@@ -224,7 +251,7 @@ window.NginxRequests = (() => {
   function changeSource() {
     sourceChosen = true;
     generation++;
-    records = []; render();
+    records = []; historyResult = null; historyPage = 0; render();
     source.textContent = '检查中';
     $('requestEnable').hidden = true;
     $('requestDisable').hidden = true;
@@ -242,9 +269,23 @@ window.NginxRequests = (() => {
   $('requestContainer').addEventListener('change', changeSource);
   $('requestGatewayKey').addEventListener('change', changeSource);
   $('requestLimit').addEventListener('change', changeSource);
-  $('requestSearch').addEventListener('input', render);
-  $('requestStatus').addEventListener('change', render);
-  $('requestLayout').addEventListener('change', render);
+  function changeHistory(resetPage = true) {
+    if ($('requestBackend').value !== 'gateway') { render(); return; }
+    if (resetPage) historyPage = 0;
+    generation++;
+    records = []; historyResult = null; render();
+    if (pending) pendingRefresh = true;
+    else refresh();
+  }
+  $('requestSearch').addEventListener('input', () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(changeHistory, 250);
+  });
+  $('requestStatus').addEventListener('change', () => changeHistory());
+  $('requestLayout').addEventListener('change', () => changeHistory());
+  $('requestPeriod').addEventListener('change', () => changeHistory());
+  $('requestHistoryPrevious').addEventListener('click', () => { if (historyPage) { historyPage--; changeHistory(false); } });
+  $('requestHistoryNext').addEventListener('click', () => { if (historyResult?.has_more) { historyPage++; changeHistory(false); } });
   $('requestEnable').addEventListener('click', async () => {
     const confirmed = await showConfirmDialog({title: '开启 Nginx 请求记录',
       message: '将在当前选中的 Nginx 中新增面板专用日志配置，先检查语法再重载。仅采集新请求；站点自行覆盖 access_log 时可能不在列表中。',

@@ -45,7 +45,7 @@ UPGRADE_SERVICE_FAILSAFE_ARMED="false"
 # retired deployment scripts and user-owned business resources must survive.
 RELEASE_ENTRIES=(
   agent.py certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
-  caddy_requests.py request_gateway.py gateway_connections.py monitoring.py docker_mirrors.py
+  caddy_requests.py request_gateway.py request_history.py gateway_connections.py monitoring.py docker_mirrors.py
   install.sh env.example server.env.example LICENSE THIRD_PARTY_NOTICES.md ui
   examples/nginx.compose.yml
   systemd/mini-deploy-agent.service

@@ -116,12 +116,14 @@
           <label id="requestGatewayField">查看服务<select id="requestGatewayKey"><option value="">尚未接入服务</option></select></label>
           <label>状态<select id="requestStatus"><option value="all">全部地址</option><option value="success">全部成功</option><option value="error">含失败请求</option></select></label>
           <label>展示<select id="requestLayout"><option value="tree">路径层级</option><option value="flat">原始地址</option></select></label>
+          <label id="requestPeriodField">时间范围<select id="requestPeriod"><option value="1h">最近 1 小时</option><option value="24h" selected>最近 24 小时</option><option value="7d">最近 7 天</option></select></label>
           <label>查找路径<input id="requestSearch" type="search" placeholder="路径或域名" autocomplete="off"></label>
           <button id="requestStopMonitoring" class="ghost-button compact-action" type="button" hidden>停止记录</button>
         </div>
         <p id="requestNotice" class="muted" role="status"></p>
         <p id="requestSampleSummary" class="muted"></p>
         <div id="requestRows" class="request-rows" aria-live="polite"></div>
+        <div id="requestHistoryPages" class="request-actions" hidden><button id="requestHistoryPrevious" class="ghost-button compact-action" type="button">上一页</button><span id="requestHistoryPage" class="muted"></span><button id="requestHistoryNext" class="ghost-button compact-action" type="button">下一页</button></div>
         </div>
         <button id="manageRequestGateways" class="ghost-button compact-action request-advanced-toggle" type="button" aria-expanded="false" aria-controls="requestGatewayManager">高级设置</button>
         <section id="requestGatewayManager" class="request-gateway-manager" hidden>
@@ -129,7 +131,7 @@
           <div class="request-filters">
             <label>来源<select id="requestBackend"><option value="gateway">请求网关</option><option value="nginx">已有 Nginx 日志</option><option value="caddy">已有 Docker Caddy 日志</option></select></label>
             <label id="requestContainerField" hidden>容器<input id="requestContainer" type="text" list="requestContainerOptions" placeholder="Caddy 容器名称" autocomplete="off"><datalist id="requestContainerOptions"></datalist></label>
-            <label>最近<select id="requestLimit"><option value="100">100 条</option><option value="300">300 条</option></select></label>
+            <label id="requestLimitField" hidden>最近<select id="requestLimit"><option value="100">100 条</option><option value="300">300 条</option></select></label>
             <button id="requestEnable" class="ghost-button compact-action" type="button" hidden>开启 Nginx 日志</button>
             <button id="requestDisable" class="ghost-button compact-action" type="button" hidden>关闭 Nginx 日志</button>
           </div>

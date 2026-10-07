@@ -1,6 +1,7 @@
 """Frontend contract tests; all API requests are mocked, including mutations."""
 import json
 import threading
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -80,7 +81,7 @@ def dashboard():
                 elif path == "/docker/logs":
                     result = {"container": "web", "lines": ["healthy"]}
                 elif path == "/request-gateways":
-                    result = {"entries": state.get("gateways", [])}
+                    result = {"entries": state.get("gateways", []), "history_sources": state.get("history_sources", [])}
                 elif path == "/gateway-connections/discover":
                     result = {"sources": [item["source"] for item in state.get("connections", [])]}
                 elif path == "/gateway-connections":
@@ -105,6 +106,8 @@ def dashboard():
                     result = {"available": True, "enabled": True, "records": [], "containers": []}
                 elif path == "/gateway-requests":
                     result = {"records": state.get("records", []), "notice": "测试请求样本"}
+                elif path == "/request-history":
+                    result = state.get("history", {"records": state.get("records", []), "notice": "测试请求样本"})
                 elif path != "/docker/action":
                     state["errors"].append(f"Unexpected API: {path}")
                     route.fulfill(status=404, json={"error": "Removed endpoint"})
@@ -184,6 +187,43 @@ def connection_calls(state, action):
             if path == "/gateway-connections" and payload.get("action") == action]
 
 
+def test_persistent_history_counts_are_not_limited_to_details_and_can_page(dashboard):
+    page, state, origin = dashboard
+    state["history_sources"] = [{"key": "api", "name": "API"}]
+    groups = []
+    for path, count, duration in [("/api/heartbeat", 1000, 10), ("/api/rare", 2, 200)]:
+        groups.append({"key": path, "path": path, "host": "api.test", "method": "GET", "count": count,
+            "successes": count, "errors": 0, "durationSum": count * duration, "durationCount": count,
+            "upstreamSum": count * 5, "upstreamCount": count, "average": duration, "upstreamAverage": 5,
+            "successRate": 100, "items": [{"path": path, "host": "api.test", "method": "GET", "status": 200,
+                "duration_ms": duration, "upstream_ms": 5, "at": "2026-10-07T12:00:00Z"}]})
+    state["history"] = {"history": True, "groups": groups, "total_requests": 1002,
+        "total_groups": 101, "has_more": True, "checked_at": time.time(), "limited_at": time.time(),
+        "error": "采集容器不存在，历史保留", "notice": "历史记录"}
+    page.goto(f"{origin}/ui?view=requests")
+    playwright.expect(page.locator("#requestSampleSummary")).to_contain_text("已保存 1002 条")
+    root = page.locator("#requestRows > .request-branch")
+    playwright.expect(root.locator(':scope > summary [data-label="次数"]')).to_have_text("1002")
+    playwright.expect(root.locator(':scope > summary [data-label="平均耗时"]')).to_have_text("10.38 ms")
+    assert root.get_attribute("open") is not None
+    playwright.expect(page.locator("#requestNotice")).to_contain_text("可能存在缺口")
+    playwright.expect(page.locator("#requestSource")).to_contain_text("历史记录")
+    root.locator(":scope > summary").click()
+    page.locator("#requestRefresh").click()
+    playwright.expect(page.locator("#requestRefresh")).to_be_enabled()
+    assert root.get_attribute("open") is None
+    state["history"] = {**state["history"], "groups": groups[:1], "has_more": False}
+    with page.expect_request("**/request-history?*") as request:
+        page.locator("#requestHistoryNext").click()
+    assert "page=1" in request.value.url
+    playwright.expect(page.locator("#requestHistoryPage")).to_have_text("第 2 页")
+    page.locator("#requestPeriod-button").click()
+    with page.expect_request("**/request-history?*") as request:
+        page.locator("#requestPeriod-menu").get_by_role("option", name="最近 7 天").click()
+    assert "period=7d" in request.value.url and "page=0" in request.value.url
+    assert not state["errors"]
+
+
 @pytest.mark.parametrize("width", [390, 1440])
 def test_request_tree_ids_refresh_search_and_original_paths(dashboard, tmp_path, width):
     page, state, origin = dashboard
@@ -203,9 +243,8 @@ def test_request_tree_ids_refresh_search_and_original_paths(dashboard, tmp_path,
     playwright.expect(root.locator(":scope > summary code")).to_have_text("/cloud/runtime/")
     playwright.expect(root.locator(':scope > summary [data-label="次数"]')).to_have_text("5")
     playwright.expect(root.locator(':scope > summary [data-label="平均耗时"]')).to_have_text("96.40 ms")
-    assert root.get_attribute("open") is None
-    page.screenshot(path=str(tmp_path / f"request-tree-collapsed-{width}.png"), full_page=True)
-    root.locator(":scope > summary").click()
+    assert root.get_attribute("open") is not None
+    page.screenshot(path=str(tmp_path / f"request-tree-default-{width}.png"), full_page=True)
     sessions = page.locator('.request-branch').filter(has=page.locator(':scope > summary code[title="/cloud/runtime/sessions/:id"]'))
     assert sessions.get_attribute("open") is None
     sessions.locator(":scope > summary").click()
