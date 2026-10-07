@@ -3,17 +3,19 @@ window.ProjectWizard = (() => {
   let detection = null, savedKey = '', prepared = false, preview = '', entryTemplate = '';
   let entryChoices = [];
   let dockerChoices = [], dockerMode = '';
+  let localProjects = [], localProject = null;
   const moved = [], hidden = [];
   const originalConfirmation = $('projectConfigConfirmed').closest('label').lastChild.textContent;
   const originalValidation = $('projectForm').noValidate;
   const groups = {
-    wizardConnectFields: ['projectRepoInput', 'projectBranchInput', 'projectProviderInput'],
-    wizardRuntimeFields: ['projectNameInput', 'projectTemplateInput'],
-    wizardPathFields: ['projectWorkdirInput', 'projectScriptInput'],
+    wizardConnectFields: ['projectRepoInput'],
+    wizardRepositoryFields: ['projectBranchInput', 'projectProviderInput'],
+    wizardRuntimeFields: ['projectTemplateInput'],
+    wizardPathFields: ['projectScriptInput'],
     wizardCommandFields: ['projectBuildStepInput', 'projectRestartStepInput'],
     wizardAutomationFields: ['projectTriggerInput'],
-    wizardServiceFields: ['projectServicePortInput', 'projectHealthInput'],
-    wizardAdvancedFields: ['projectStartCommandInput', 'projectKeyInput', 'projectServiceNameInput', 'projectTimeoutInput', 'projectLogInput', 'projectRollbackInput'],
+    wizardServiceFields: ['projectServicePortInput'],
+    wizardAdvancedFields: ['projectNameInput', 'projectWorkdirInput', 'projectHealthInput', 'projectStartCommandInput', 'projectKeyInput', 'projectServiceNameInput', 'projectTimeoutInput', 'projectLogInput', 'projectRollbackInput'],
   };
   const adopting = () => $('wizardSituation').value === 'existing';
   const method = () => $('wizardDeployMethod').value;
@@ -25,8 +27,50 @@ window.ProjectWizard = (() => {
       : '配置并测试 WebHook 后，指定分支的 push 才会触发更新。代码平台需能访问此地址。';
   }
   function situationFields() {
-    $('wizardExistingDirectoryField').hidden = !adopting();
+    $('wizardExistingTools').hidden = !adopting();
     $('wizardExistingDirectory').required = adopting();
+    if (!adopting()) {
+      if (localProject && !savedKey) {
+        $('projectWorkdirInput').value = '';
+        delete $('projectWorkdirInput').dataset.autoValue;
+      }
+      localProject = null;
+    }
+  }
+  function fieldHelp(id, text) {
+    const help = document.createElement('small');
+    help.className = 'wizard-field-help wizard-added-help';
+    help.id = `${id}Help`;
+    help.textContent = text;
+    $(id).setAttribute('aria-describedby', help.id);
+    $(id).closest('label').append(help);
+  }
+  async function discover() {
+    $('wizardDiscoverStatus').textContent = '正在查询本机 Compose 项目，不会重启服务…';
+    try {
+      const result = await fetchJson('projects-config/discover');
+      localProjects = result.projects || [];
+      $('wizardDiscoverStatus').textContent = result.notice || '未发现 Compose 项目，可手动填写。';
+      $('wizardLocalProjects').innerHTML = localProjects.map((project, index) =>
+        `<div class="wizard-local-project"><div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml((project.containers || []).map(item => item.name).join('、'))}</span><span>${escapeHtml(project.git_directory || project.directory)}${project.git_directory ? ' · Git 目录已核对' : ' · 待确认 Git 目录'}</span></div><button type="button" class="ghost-button compact-action" data-local-project="${index}">选择</button></div>`).join('');
+    } catch (err) {
+      $('wizardDiscoverStatus').textContent = '查询失败，可重试，或展开下方查询指令手动填写。';
+      throw err;
+    }
+  }
+  function selectLocalProject(index) {
+    localProject = localProjects[index];
+    if (!localProject) return;
+    $('wizardExistingDirectory').value = localProject.git_directory || localProject.directory;
+    $('projectWorkdirInput').value = $('wizardExistingDirectory').value;
+    delete $('projectWorkdirInput').dataset.autoValue;
+    $('projectRepoInput').value = localProject.repo || '';
+    $('wizardDiscoverStatus').textContent = `已选择 ${localProject.name}。${localProject.repo ? '仓库地址已读取，请核对后检查项目。' : '未读取到可用仓库地址，请补充；代码目录也需要核对。'}`;
+    $('wizardLocalProjects').querySelectorAll('button').forEach(button => {
+      const selected = Number(button.dataset.localProject) === index;
+      button.textContent = selected ? '已选择' : '选择';
+      button.setAttribute('aria-pressed', String(selected));
+    });
   }
   const error = message => {
     $('wizardError').textContent = message;
@@ -56,7 +100,7 @@ window.ProjectWizard = (() => {
     $('wizardBack').hidden = step === 0;
     $('wizardFinish').hidden = !savedKey;
     $('wizardNext').hidden = prepared;
-    $('wizardNext').textContent = ['连接并识别', '下一步：确认部署', '准备项目'][step];
+    $('wizardNext').textContent = ['检查项目', '下一步：确认执行', adopting() ? '准备并检查接入' : '部署并检查'][step];
     $('wizardDeploy').hidden = !prepared;
     $('wizardRecheck').hidden = !prepared;
     $('wizardWebhookSetup').hidden = !prepared;
@@ -66,6 +110,11 @@ window.ProjectWizard = (() => {
     error('');
   }
   function restore() {
+    document.querySelectorAll('.wizard-added-help').forEach(node => {
+      const input = node.closest('label')?.querySelector('input, select, textarea');
+      input?.removeAttribute('aria-describedby');
+      node.remove();
+    });
     $('projectForm').noValidate = originalValidation;
     moved.splice(0).reverse().forEach(({node, marker}) => { marker.replaceWith(node); node.hidden = false; });
     hidden.splice(0).forEach(({node, value}) => { node.hidden = value; });
@@ -88,6 +137,10 @@ window.ProjectWizard = (() => {
     $('projectForm').noValidate = true;
     detection = null; savedKey = ''; prepared = false; preview = ''; entryTemplate = ''; entryChoices = [];
     dockerChoices = []; dockerMode = '';
+    localProjects = []; localProject = null;
+    $('wizardLocalProjects').replaceChildren();
+    $('wizardDiscoverStatus').textContent = '';
+    $('projectWizard').querySelectorAll('details').forEach(node => { node.open = false; });
     $('wizardSituation').value = '';
     $('wizardSituation').required = true;
     $('wizardExistingDirectory').value = '';
@@ -100,11 +153,19 @@ window.ProjectWizard = (() => {
     $('wizardDockerPersist').checked = false;
     $('wizardDockerVolumes').value = '';
     $('wizardCustomCommand').checked = false;
-    $('projectModalHint').textContent = '了解项目现状，确认部署方案，再决定何时执行。';
+    $('projectModalHint').textContent = '连接代码，检查配置，再部署到当前服务器。';
     Array.from($('projectForm').children).filter(node => node.id !== 'projectWizard').forEach(node => {
       hidden.push({node, value: node.hidden}); node.hidden = true;
     });
     Object.entries(groups).forEach(([target, ids]) => ids.forEach(id => move($(id).closest('label'), target)));
+    fieldHelp('projectRepoInput', '复制仓库的 HTTPS 或 SSH 克隆地址，例如 https://github.com/your-name/my-app.git。');
+    fieldHelp('projectBranchInput', '留空使用仓库默认分支；指定分支可填 main 或 release。');
+    fieldHelp('projectWorkdirInput', '首次部署自动分配 /srv/项目名；已有项目必须使用原 Git 目录。');
+    fieldHelp('projectScriptInput', '例如 deploy/deploy.sh（相对仓库根目录）。沿用原脚本，不会替你改写。');
+    fieldHelp('projectBuildStepInput', '沿用项目文档中的构建步骤，例如 npm ci && npm run build；不需要构建可留空。');
+    fieldHelp('projectRestartStepInput', '例如 systemctl restart my-app；my-app 必须是已有服务名。不要填写长期占用前台的 python main.py。');
+    fieldHelp('projectServicePortInput', '程序实际监听的端口，例如 8000；面板不会改写业务代码中的端口。');
+    fieldHelp('projectHealthInput', '可选，例如 http://127.0.0.1:8000/health，必须是业务实际存在的地址。');
     $('projectBranchInput').value = '';
     $('projectBranchInput').placeholder = '留空自动识别默认分支';
     $('projectBranchInput').setAttribute('list', 'wizardBranches');
@@ -179,6 +240,9 @@ window.ProjectWizard = (() => {
       $('wizardDockerFile').value = choice?.file || '';
       const ports = detection?.docker?.ports || [];
       $('wizardDockerContainerPort').value = ports.length === 1 ? String(ports[0]) : '';
+      $('wizardDockerPortHint').textContent = ports.length === 1
+        ? `从 Dockerfile 识别到 ${ports[0]}，请确认程序实际监听此端口。`
+        : '没有识别到唯一端口。查看程序启动配置，例如 uvicorn 的 --port；以业务实际监听端口为准。';
       $('wizardDockerEnvironment').replaceChildren();
       $('wizardDockerEnvironmentEmpty').hidden = false;
       (choice?.environment || detection?.docker?.environment || []).forEach(item => addEnvironment(item.name, item.required, item.required));
@@ -232,15 +296,24 @@ window.ProjectWizard = (() => {
     }
     const custom = $('wizardCustomCommand').checked;
     $('wizardEntryFields').hidden = !service || custom;
-    $('wizardEntryChoiceField').hidden = !entryChoices.length;
+    $('wizardEntryChoiceField').hidden = entryChoices.length < 2;
     $('wizardPythonKindField').hidden = template !== 'python';
+    $('wizardEntryOptions').hidden = template !== 'python';
     $('wizardEntryObjectField').hidden = template !== 'python' || $('wizardEntryKind').value !== 'fastapi';
+    const entryKind = $('wizardEntryKind').value;
+    $('wizardEntryOptionsLabel').textContent = entryKind === 'fastapi'
+      ? `FastAPI · 应用对象 ${$('wizardEntryObject').value || '待填写'}（可修改）`
+      : entryKind === 'python' ? '普通 Python 程序（可修改）' : '请选择运行类型';
+    if (template === 'python' && (!entryKind || (entryKind === 'fastapi' && !$('wizardEntryObject').value))) $('wizardEntryOptions').open = true;
     $('wizardEntryKind').required = service && template === 'python' && !custom;
     $('wizardEntryPath').required = service && !custom;
     $('wizardEntryObject').required = !$('wizardEntryObjectField').hidden && !custom;
     $('wizardCustomCommandField').hidden = !service;
     $('wizardEntryLabel').textContent = template === 'go' ? '入口目录（仓库内路径）' : template === 'java' ? '构建生成的可执行 JAR' : '启动入口（仓库内路径）';
     $('wizardEntryPath').placeholder = template === 'go' ? '例如 cmd/server，仓库根目录填写 .' : template === 'java' ? '例如 target/app.jar' : '例如 main.py 或 app/main.py';
+    $('wizardEntryHelp').textContent = template === 'go' ? '填写包含 package main 和 func main 的目录，例如 cmd/server。'
+      : template === 'java' ? '填写构建后的 JAR 路径，例如 target/my-app.jar；不是 Main.java 的路径。'
+      : '填写仓库内的 Python 文件路径，例如 app/main.py，不需要填写 python 或 uvicorn 命令。';
     $('projectStartCommandInput').closest('label').hidden = !service;
     $('projectServicePortInput').closest('label').hidden = !service;
     $('projectServiceNameInput').closest('label').hidden = !service;
@@ -266,6 +339,11 @@ window.ProjectWizard = (() => {
       : template === 'go' ? '入口目录需包含 main 包。程序监听的端口以业务配置为准。'
       : template === 'java' ? '默认 target/deploy/app.jar 会自动选取根模块构建出的唯一 JAR；多模块项目请填写实际产物路径。'
       : '入口路径相对于仓库根目录。FastAPI 应用对象对应代码中的 app = FastAPI()；普通 Python 程序的监听端口以业务配置为准。';
+    $('wizardRecommendation').textContent = !method() ? '暂未找到明确的部署方案，请选择项目实际使用的方式。'
+      : method() === 'script' ? '沿用已有部署脚本'
+      : method() === 'commands' ? localProject?.command ? `沿用 ${localProject.name} 的 Compose 项目名与配置路径` : '使用已有的构建和重启步骤'
+      : `使用${projectTemplateLabel(template)}方案`;
+    $('wizardRuntimeHint').hidden = method() === 'template' && ['python', 'go', 'java'].includes(template);
     window.AppSelects?.syncAll();
     preview = '';
     $('projectConfigConfirmed').checked = false;
@@ -326,9 +404,22 @@ window.ProjectWizard = (() => {
     $('projectTemplateInput').value = method() === 'template' ? adopting() ? 'docker' : candidate?.template || 'custom' : 'custom';
     applyTemplateDefaults(false);
     if (method() !== 'template') $('projectScriptInput').value = result.existing_script || '';
+    if (adopting() && localProject && $('wizardExistingDirectory').value === (localProject.git_directory || localProject.directory)) {
+      // Compose project names, config files and working directories must travel together.
+      $('wizardDeployMethod').value = 'commands';
+      $('projectTemplateInput').value = 'custom';
+      $('projectRestartStepInput').value = localProject.command || '';
+      $('projectBuildStepInput').value = '';
+      $('projectScriptInput').value = '';
+      result.warnings = [...(result.warnings || []), localProject.command
+        ? '已保留检测到的 Compose 项目名、配置和环境文件路径。请核对原部署是否还有额外环境变量或启动参数；执行更新会重建该 Compose 项目中的服务。'
+        : '未能完整确认原 Compose 配置，不能自动生成更新命令。请填写原部署步骤或沿用已有脚本。'];
+    }
+    $('wizardPlanOptions').open = !method();
     const facts = [...new Set((result.candidates || []).flatMap(item => item.evidence || []))];
     if (result.existing_script) facts.push(result.existing_script);
-    $('wizardDetectedFacts').textContent = facts.length ? `仓库文件：${facts.join('、')}。请确认实际运行方案。` : '没有识别到明确的部署配置。可以提供现有脚本，或填写实际部署步骤。';
+    $('wizardDetectedFacts').textContent = facts.length ? `仓库文件：${facts.join('、')}。请确认实际运行方案。`
+      : candidate ? '已识别项目类型，请核对入口与运行配置。' : '没有识别到明确的部署配置。可以提供现有脚本，或填写实际部署步骤。';
     $('wizardWarnings').innerHTML = (result.warnings || []).map(message => `<p>${escapeHtml(message)}</p>`).join('');
     $('wizardWarnings').hidden = !result.warnings?.length;
     methodFields();
@@ -346,8 +437,9 @@ window.ProjectWizard = (() => {
       return !valid;
     });
     if (invalid) {
-      const details = invalid.closest('details');
-      if (details) details.open = true;
+      for (let parent = invalid.parentElement; parent; parent = parent.parentElement) {
+        if (parent.tagName === 'DETAILS') parent.open = true;
+      }
       invalid.disabled = false;
       invalid.reportValidity();
       throw new Error('请检查标出的配置项。');
@@ -381,10 +473,10 @@ window.ProjectWizard = (() => {
     ].map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
     $('wizardPlanSteps').innerHTML = [...(result.plan_steps || []), ...(result.execution_steps || [])].map(value => `<li>${escapeHtml(value)}</li>`).join('');
     $('wizardFiles').innerHTML = (result.files || []).map(file => `<details><summary>${escapeHtml(file.path)} · ${file.exists ? file.managed ? '将更新面板配置' : '保留现有文件' : method() === 'script' ? '准备时检查脚本，不生成' : '将生成初版'}</summary><pre class="command-output">${escapeHtml(file.content)}</pre></details>`).join('');
-    $('wizardReviewTitle').textContent = '确认并准备部署';
+    $('wizardReviewTitle').textContent = adopting() ? '确认接入，暂不更新服务' : '确认首次部署';
     $('wizardReviewHint').textContent = adopting()
       ? '接入准备不拉取、切换代码或重启服务。可以先完成接入；只有点击执行更新或启用并收到 Push WebHook 才运行部署方案。'
-      : '准备阶段拉取代码、检查或补齐确认过的文件，不执行构建和重启。数据库、运行环境和网络权限仍需按业务准备。';
+      : '确认后先准备文件、检查环境，通过后自动提交首次部署。检查失败会停在这里，修正后可重试。数据库、运行环境和网络权限仍需按业务准备。';
     platformAdvice();
     $('wizardProgress').replaceChildren();
     show(2);
@@ -440,6 +532,7 @@ window.ProjectWizard = (() => {
     show(2);
     $('wizardReviewTitle').textContent = adopting() ? '准备完成，可接入或执行一次更新' : '准备完成，开始首次部署';
     if (!await check()) error('运行环境还有缺少项，处理后点击重新检查环境。');
+    else if (!adopting()) await deploy(false);
   }
   async function task(action) {
     if (busy || !active) return;
@@ -462,9 +555,9 @@ window.ProjectWizard = (() => {
     closeProjectModal(); refresh();
   }));
   $('wizardRecheck').addEventListener('click', () => task(async () => { if (!await check()) error('运行环境仍有缺少项，请处理后重试。'); }));
-  $('wizardDeploy').addEventListener('click', () => task(async () => {
+  async function deploy(recheck = true) {
     if (preview !== signature()) throw new Error('配置已变化，请重新确认并准备。');
-    if (!await check()) throw new Error('运行环境尚未就绪，请先处理检查结果。');
+    if (recheck && !await check()) throw new Error('运行环境尚未就绪，请先处理检查结果。');
     const project = {...collectProjectForm(), enabled: true, manual_deploy_enabled: true};
     remember(await postJsonBody('projects-config/save', {original_key: savedKey, project}));
     await postJson(`redeploy?project=${encodeURIComponent(savedKey)}`);
@@ -472,7 +565,21 @@ window.ProjectWizard = (() => {
     closeProjectModal();
     setView('deploy');
     $('logs').textContent = '部署已加入队列，正在等待执行…';
-  }));
+  }
+  $('wizardDeploy').addEventListener('click', () => task(() => deploy()));
+  $('wizardDiscover').addEventListener('click', () => task(discover));
+  $('wizardLocalProjects').addEventListener('click', event => {
+    const button = event.target.closest('[data-local-project]');
+    if (button && !busy) selectLocalProject(Number(button.dataset.localProject));
+  });
+  $('wizardExistingDirectory').addEventListener('input', () => {
+    if (localProject) $('wizardDiscoverStatus').textContent = '目录已修改，将按你填写的目录检查。';
+    localProject = null;
+    $('wizardLocalProjects').querySelectorAll('button').forEach(button => {
+      button.textContent = '选择'; button.setAttribute('aria-pressed', 'false');
+    });
+  });
+  document.querySelectorAll('[data-wizard-copy]').forEach(button => button.addEventListener('click', () => task(() => copyText($(button.dataset.wizardCopy).textContent))));
   $('wizardSituation').addEventListener('change', situationFields);
   $('wizardDeployMethod').addEventListener('change', () => methodFields(true));
   $('projectTriggerInput').addEventListener('change', () => platformAdvice());

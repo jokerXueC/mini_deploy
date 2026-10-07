@@ -4,6 +4,7 @@ import io
 import http.client
 import json
 import queue
+import shlex
 import subprocess
 import threading
 from http.server import ThreadingHTTPServer
@@ -13,6 +14,67 @@ import pytest
 
 import agent
 import project_guidance as guidance
+
+
+def test_local_discovery_groups_compose_and_preserves_original_arguments(monkeypatch):
+    monkeypatch.setattr(Path, "is_dir", lambda path: True)
+    monkeypatch.setattr(Path, "is_file", lambda path: True)
+    monkeypatch.setattr(Path, "is_absolute", lambda path: True)
+    commands = []
+    directory = "/srv/my app"
+    # On Windows, Path uses backslashes; fake Git accepts the platform representation.
+    def run(command, timeout):
+        commands.append(command)
+        assert timeout <= 5
+        if command[:2] == ["docker", "ps"]:
+            return 0, "a" * 64 + "\n" + "b" * 64
+        if command[:2] == ["docker", "inspect"]:
+            assert '.Config.Env' not in command[5]
+            return 0, '\n'.join(json.dumps([name, 'running', 'original', directory,
+                '/srv/my app/compose.yaml,/srv/my app/production.yaml', '/srv/my app/prod.env'])
+                for name in ['/original-api-1', '/original-db-1'])
+        if 'rev-parse' in command:
+            return 0, directory
+        if 'config' in command:
+            return 0, 'https://example.test/app.git'
+        raise AssertionError(command)
+    result = guidance.discover_local_projects(run)
+    assert len(result['projects']) == 1
+    project = result['projects'][0]
+    assert len(project['containers']) == 2
+    assert project['repo'] == 'https://example.test/app.git'
+    assert project['git_directory'] == directory
+    args = shlex.split(project['command'])
+    assert args[:2] == ['docker', 'compose']
+    assert args[args.index('--project-name') + 1] == 'original'
+    assert args.count('--file') == 2
+    assert '--env-file' in args
+    assert args[-3:] == ['up', '-d', '--build']
+    assert not any('up' in command or 'pull' in command or 'checkout' in command for command in commands)
+
+
+def test_local_discovery_omits_credentials_and_does_not_guess_missing_config(monkeypatch):
+    monkeypatch.setattr(Path, 'is_dir', lambda path: True)
+    monkeypatch.setattr(Path, 'is_file', lambda path: False)
+    def run(command, timeout):
+        if command[:2] == ['docker', 'ps']:
+            return 0, 'c' * 64
+        if command[:2] == ['docker', 'inspect']:
+            return 0, json.dumps(['/api', 'running', 'app', '/srv/app', '/missing.yaml', ''])
+        if 'rev-parse' in command:
+            return 0, '/srv/app'
+        return 0, 'https://user:secret@example.test/app.git'
+    result = guidance.discover_local_projects(run)
+    assert result['projects'][0]['repo'] == ''
+    assert result['projects'][0]['command'] == ''
+    assert 'secret' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('code,output', [(1, 'permission denied'), (0, '')])
+def test_local_discovery_unavailable_is_actionable(code, output):
+    result = guidance.discover_local_projects(lambda *args, **kwargs: (code, output))
+    assert result['projects'] == []
+    assert '手动' in result['notice']
 
 
 @pytest.fixture
@@ -251,6 +313,18 @@ def test_guidance_http_auth_csrf_and_empty_status(empty_runtime, tmp_path, monke
         return response.status, json.loads(response.read())
 
     try:
+        discovery_calls = []
+        monkeypatch.setattr(guidance, 'discover_local_projects', lambda run: discovery_calls.append(True) or {'projects': []})
+        connection.request('GET', '/projects-config/discover')
+        response = connection.getresponse()
+        assert response.status == 401
+        response.read()
+        assert not discovery_calls
+        connection.request('GET', '/projects-config/discover', headers=cookie_headers)
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())['projects'] == []
+        assert discovery_calls == [True]
         body = {"project": {"repo": "https://example.test/api.git", "branch": "main"}}
         for path in ("/projects-config/inspect", "/projects-config/preview"):
             assert request(path, body, {})[0] == 401

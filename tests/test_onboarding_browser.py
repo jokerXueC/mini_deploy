@@ -58,6 +58,8 @@ def browser_page():
                 result = dict(projects=state['projects'], state={}, system={}, events=[], alerts=[], csrf_token='test')
             elif path == '/projects-config':
                 result = dict(projects=state['projects'], notifications={})
+            elif path == '/projects-config/discover':
+                result = state.get('local_projects', {'projects': [], 'notice': '未发现 Compose 项目，可手动填写。'})
             elif path == '/projects-config/inspect':
                 result = dict(ok=True, branch=project.get('branch') or 'master', branches=['master', 'release'],
                               existing_script='', warnings=[], candidates=[dict(template='python', entry='main:app')],
@@ -154,6 +156,49 @@ def browser_page():
             worker.join(timeout=5)
 
 
+@pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'light'), (1440, 'dark'), (390, 'dark')])
+def test_compact_header_actions_and_menu(browser_page, width, theme, tmp_path):
+    page, state = browser_page
+    page.locator('#closeProjectModalBtn').click()
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
+    assert page.locator('#projectSelectButton').is_disabled()
+    assert page.locator('#redeployBtn').is_hidden()
+    assert page.locator('#rollbackBtn').is_hidden()
+    page.locator('.hero').screenshot(path=str(tmp_path / f'header-empty-{width}-{theme}.png'))
+    state['projects'] = [dict(key='demo', name='业务服务 / 一个比较长的项目名称', branch='main',
+                             enabled=True, manual_deploy_enabled=True, rollback_available=True, running=True)]
+    page.locator('#refreshBtn').click()
+    page.wait_for_function("!document.querySelector('#projectSelectButton').disabled")
+    page.locator('#projectSelectButton').click()
+    page.locator('#projectSelectMenu [data-project-key="demo"]').click()
+    page.wait_for_function("!document.querySelector('#cancelDeployBtn').disabled")
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('.hero').screenshot(path=str(tmp_path / f'header-{width}-{theme}.png'))
+    page.locator('#toolbarMoreButton').click()
+    assert page.locator('#toolbarMoreMenu').is_visible()
+    page.keyboard.press('Escape')
+    assert page.locator('#toolbarMoreMenu').is_hidden()
+    assert page.locator('#toolbarMoreButton').evaluate('(el) => el === document.activeElement')
+    page.keyboard.press('ArrowDown')
+    assert page.locator('#rollbackBtn').evaluate('(el) => el === document.activeElement')
+    page.keyboard.press('ArrowDown')
+    assert page.locator('#cancelDeployBtn').evaluate('(el) => el === document.activeElement')
+    page.locator('.hero').screenshot(path=str(tmp_path / f'header-menu-{width}-{theme}.png'))
+    page.locator('#cancelDeployBtn').click()
+    page.wait_for_selector('#confirmCancelBtn', state='visible')
+    assert page.locator('#toolbarMoreMenu').is_hidden()
+    page.locator('#confirmCancelBtn').click()
+    assert not any(path == '/cancel' for path, _ in state['posts'])
+    page.locator('#toolbarMoreButton').click()
+    page.locator('#panelTitle').click()
+    assert page.locator('#toolbarMoreMenu').is_hidden()
+    page.locator('#requestsViewTab').click()
+    assert page.locator('#projectSwitcher').is_hidden()
+    page.locator('#toolbarMoreButton').click()
+    assert page.locator('#toolbarMoreMenu').get_by_role('menuitem').count() == 1
+
+
 def connect_and_review(page):
     page.locator('#projectRepoInput').fill('https://example.test/demo.git')
     page.locator('#projectRepoInput').press('Enter')
@@ -165,6 +210,75 @@ def connect_and_review(page):
     assert page.locator('#projectStartCommandInput').is_hidden()
     page.locator('#wizardNext').click()
     page.wait_for_selector('#wizardReview', state='visible')
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_guided_onboarding_keeps_optional_fields_collapsed(browser_page, width, tmp_path):
+    page, state = browser_page
+    page.set_viewport_size({'width': width, 'height': 950})
+    assert page.locator('#projectRepoInput').is_visible()
+    assert page.locator('#projectBranchInput').is_hidden()
+    assert page.locator('#projectProviderInput').is_hidden()
+    assert 'github.com' in page.locator('#projectRepoInputHelp').inner_text()
+    page.locator('#projectModal .project-modal').screenshot(path=str(tmp_path / f'connect-{width}.png'))
+    connect_and_review(page)
+    page.locator('#wizardBack').click()
+    assert page.locator('#projectWorkdirInput').is_hidden()
+    assert page.locator('#projectHealthInput').is_hidden()
+    assert page.locator('#projectTriggerInput').is_hidden()
+    assert page.locator('#wizardPlanOptions').get_attribute('open') is None
+    assert 'Python' in page.locator('#wizardRecommendation').inner_text()
+    assert page.locator('#wizardEntryPath').input_value() == 'main.py'
+    assert '不需要填写' in page.locator('#wizardEntryHelp').inner_text()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#projectModal .project-modal').screenshot(path=str(tmp_path / f'configure-{width}.png'))
+    assert not any(path == '/projects-config/bootstrap' for path, _ in state['posts'])
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_existing_project_discovery_prefills_without_updating(browser_page, width, tmp_path):
+    page, state = browser_page
+    page.set_viewport_size({'width': width, 'height': 950})
+    command = 'docker compose --project-directory /opt/aimore/deploy --project-name aimore --file /opt/aimore/deploy/compose.yaml up -d --build'
+    state['local_projects'] = {'notice': '只读检查完成', 'projects': [dict(name='aimore',
+        directory='/opt/aimore/deploy', git_directory='/opt/aimore', repo='https://example.test/aimore.git',
+        command=command, containers=[dict(name='aimore-cloud-1', state='running')])]}
+    page.locator('#wizardSituation').select_option('existing', force=True)
+    page.locator('#wizardDiscover').click()
+    page.locator('[data-local-project="0"]').click()
+    assert page.locator('#wizardExistingDirectory').input_value() == '/opt/aimore'
+    assert page.locator('#projectRepoInput').input_value() == 'https://example.test/aimore.git'
+    assert not state['posts']
+    page.locator('#projectModal .project-modal').screenshot(path=str(tmp_path / f'discovery-{width}.png'))
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardConfigure', state='visible')
+    assert page.locator('#projectRestartStepInput').input_value() == command
+    assert '额外环境变量' in page.locator('#wizardWarnings').inner_text()
+    assert page.locator('#wizardDockerFields').is_hidden()
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardReview', state='visible')
+    assert command in page.locator('#wizardSummary').inner_text()
+    assert not any(path == '/redeploy' for path, _ in state['posts'])
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#projectConfigConfirmed').check()
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardDeploy', state='visible')
+    page.locator('#wizardFinish').click()
+    page.wait_for_selector('#projectModal', state='hidden')
+    assert not any(path == '/redeploy' for path, _ in state['posts'])
+
+
+def test_discovery_fallback_shows_instructions_and_preserves_input(browser_page):
+    page, _state = browser_page
+    page.locator('#wizardSituation').select_option('existing', force=True)
+    page.locator('#wizardExistingDirectory').fill('/srv/already-running')
+    page.locator('#wizardDiscover').click()
+    page.wait_for_function('!ProjectWizard.busy()')
+    assert '手动' in page.locator('#wizardDiscoverStatus').inner_text()
+    assert page.locator('#wizardExistingDirectory').input_value() == '/srv/already-running'
+    page.locator('#wizardExistingTools summary').click()
+    assert 'git rev-parse' in page.locator('#wizardGitQuery').inner_text()
+    assert 'systemctl show' in page.locator('#wizardServiceQuery').inner_text()
 
 
 @pytest.mark.parametrize('width', [1440, 390])
@@ -229,7 +343,8 @@ def test_connection_retry_and_failed_initialization_reuse_saved_project(browser_
     assert not any(path == '/redeploy' for path, _ in state['posts'])
     state['failed_bootstrap'] = False
     page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDeploy', state='visible')
+    page.wait_for_selector('#projectModal', state='hidden')
+    assert sum(path == '/redeploy' for path, _ in state['posts']) == 1
     attempts = [body for path, body in state['posts'] if path == '/projects-config/bootstrap']
     assert len(attempts) == 2
     assert attempts[-1]['original_key'] == 'demo'
@@ -281,7 +396,7 @@ def test_custom_command_and_invalid_relative_entry(browser_page):
     page.locator('#wizardNext').click()
     page.wait_for_selector('#wizardError', state='visible')
     assert '相对路径' in page.locator('#wizardError').inner_text()
-    page.locator('#wizardConfigure details summary').click()
+    page.locator('#wizardAdvancedOptions summary').click()
     page.locator('#wizardCustomCommand').check()
     page.locator('#projectStartCommandInput').fill('/usr/bin/custom-runner')
     assert page.locator('#wizardEntryPath').is_hidden()
@@ -315,14 +430,11 @@ def test_dockerfile_wizard_autofills_port_and_keeps_secrets_out_of_preview(brows
     assert preview['project']['docker_config']['environment'] == ['DATABASE_URL']
     page.locator('#projectConfigConfirmed').check()
     page.locator('#wizardNext').click()
-    page.wait_for_selector('#wizardDeploy', state='visible')
+    page.wait_for_selector('#projectModal', state='hidden')
     bootstrap = next(body for path, body in state['posts'] if path == '/projects-config/bootstrap')
     assert bootstrap['options']['environment']['DATABASE_URL'] == 'postgres://secret@db/app'
     assert 'postgres://secret' not in json.dumps(bootstrap['project'])
-    page.locator('#wizardWebhookSetup summary').click()
-    assert '/webhook' in page.locator('#wizardWebhookUrl').inner_text()
-    page.locator('#wizardDeploy').click()
-    page.wait_for_selector('#projectModal', state='hidden')
+    assert sum(path == '/redeploy' for path, _ in state['posts']) == 1
     saved = next(body for path, body in state['posts'] if path == '/projects-config/save')
     assert 'postgres://secret' not in json.dumps(saved)
     assert page.locator('[data-env-value]').count() == 0
@@ -427,6 +539,7 @@ def test_unknown_repository_can_use_commands_without_script_or_service(browser_p
     assert body['project']['repository_provider'] == 'gitea'
     assert body['project']['trigger_mode'] == 'manual'
     page.locator('#projectConfigConfirmed').check()
+    state['blocked'] = True
     page.locator('#wizardNext').click()
     page.wait_for_selector('#wizardDeploy', state='visible')
     page.locator('#wizardWebhookSetup summary').click()
@@ -501,6 +614,57 @@ def test_existing_compose_avoids_new_container_plan_and_supports_explicit_script
 
 
 @pytest.mark.parametrize('width', [1440, 390])
+def test_request_groups_average_history_and_expansion(browser_page, width, tmp_path):
+    page, state = browser_page
+    page.locator('#closeProjectModalBtn').click()
+    page.set_viewport_size({'width': width, 'height': 950})
+    spec = request_gateway.normalize({'key': 'api', 'name': 'API', 'upstream': 'http://127.0.0.1:8000'})
+    state['gateway_entries'] = [{**spec, 'state': 'running', 'local_address': '127.0.0.1:18080',
+                                'caddy_upstream': '127.0.0.1:18080',
+                                'connection': {'state': 'connected', 'site': 'site.test', 'scope': '/cloud/*'}}]
+    base = dict(at='2026-10-07T12:00:00Z', host='site.test', method='GET',
+                path='/cloud/tasks', status=200, duration_ms=100, upstream_ms=None)
+    records = [base, {**base, 'status': 500, 'duration_ms': 300, 'upstream_ms': 0},
+               {**base, 'duration_ms': 500, 'upstream_ms': 60}]
+    records += [{**base, 'path': '/cloud/health', 'status': 502 if i == 20 else 200,
+                 'duration_ms': 6290, 'upstream_ms': 23.4} for i in range(65)]
+    records += [{**base, 'method': 'POST'}, {**base, 'host': 'other.test'}]
+    state['gateway_requests'] = {'records': records}
+    page.locator('#requestsViewTab').click()
+    page.wait_for_selector('.request-group')
+    assert page.locator('.request-group').count() == 4
+    group = page.locator('.request-group').first
+    assert '300.00 ms' in group.locator('summary').inner_text()
+    assert '30.00 ms' in group.locator('summary').inner_text()
+    assert '66.7%' in group.locator('summary').inner_text()
+    assert group.locator('.request-tick').count() == 3
+    health = page.locator('.request-group').nth(1)
+    assert health.locator('.request-tick').count() == 30
+    assert health.locator('.request-tick.is-error').count() == 1
+    assert health.locator('.request-tick.is-error').bounding_box()['height'] <= 10
+    assert '6.29 s' in health.locator('summary').inner_text()
+    assert '98.5%' in health.locator('summary').inner_text()
+    assert '70 条' in page.locator('#requestSampleSummary').inner_text()
+    group.locator('summary').click()
+    assert group.locator('.request-detail-row').count() == 3
+    page.evaluate('window.keptRequestGroup = document.querySelector(".request-group")')
+    page.locator('#requestRefresh').click()
+    page.wait_for_function('!document.getElementById("requestRefresh").disabled')
+    assert page.evaluate('window.keptRequestGroup === document.querySelector(".request-group")')
+    assert group.get_attribute('open') is not None
+    page.locator('#requestStatus').select_option('error', force=True)
+    assert page.locator('.request-group').count() == 2
+    assert '66.7%' in page.locator('.request-group').first.locator('summary').inner_text()
+    page.locator('#requestStatus').select_option('success', force=True)
+    assert page.locator('.request-group').count() == 2
+    page.locator('#requestStatus').select_option('all', force=True)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    for theme in ('light', 'dark'):
+        page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
+        page.locator('#requestData').screenshot(path=str(tmp_path / f'request-groups-{width}-{theme}.png'), animations='disabled')
+
+
+@pytest.mark.parametrize('width', [1440, 390])
 def test_nginx_request_view_filters_and_escapes(browser_page, width):
     page, state = browser_page
     page.locator('#closeProjectModalBtn').click()
@@ -517,14 +681,14 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
     page.locator('#requestsViewTab').click()
     page.locator('#manageRequestGateways').click()
     page.locator('#requestBackend').select_option('nginx', force=True)
-    page.wait_for_selector('.request-row:not(.request-columns)')
-    assert page.locator('.request-row:not(.request-columns)').count() == 2
+    page.wait_for_selector('.request-group')
+    assert page.locator('.request-group').count() == 2
     assert page.locator('#requestRows script').count() == 0
     page.locator('#requestStatus').select_option('error', force=True)
-    assert page.locator('.request-row:not(.request-columns)').count() == 1
+    assert page.locator('.request-group').count() == 1
     assert '/failed' in page.locator('#requestRows').inner_text()
     page.locator('#requestSearch').fill('missing')
-    assert page.locator('.request-row:not(.request-columns)').count() == 0
+    assert page.locator('.request-group').count() == 0
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
 
 
@@ -541,7 +705,7 @@ def test_caddy_request_view_selects_and_filters(browser_page, width):
     page.locator('#requestsViewTab').click()
     page.locator('#manageRequestGateways').click()
     page.locator('#requestBackend').select_option('caddy', force=True)
-    page.wait_for_selector('.request-row:not(.request-columns)')
+    page.wait_for_selector('.request-group')
     assert page.locator('#requestBackend').input_value() == 'caddy'
     assert page.locator('#requestContainer').input_value() == 'aimore-caddy-1'
     assert page.locator('#requestEnable').is_hidden()
@@ -588,8 +752,8 @@ def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
         {'at': '2026-10-07T10:00:01+08:00', 'host': 'aimore.meetpeak.tech', 'method': 'POST',
          'path': '/cloud/session', 'status': 502, 'duration_ms': 25, 'upstream_ms': None}]}
     page.locator('[data-gateway-action="records"]').click()
-    page.wait_for_selector('.request-row:not(.request-columns)')
-    assert page.locator('.request-row:not(.request-columns)').count() == 2
+    page.wait_for_selector('.request-group')
+    assert page.locator('.request-group').count() == 2
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=str(tmp_path / f'gateway-running-{width}.png'), full_page=True)
     page.locator('[data-gateway-action="edit"]').click()

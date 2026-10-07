@@ -5006,6 +5006,10 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._write_json(200, _projects_config_payload(include_secret=True))
             return
+        if path == "/projects-config/discover":
+            if self._require_auth_json():
+                self._write_json(200, project_guidance.discover_local_projects(_run_command))
+            return
         if path == "/certificates":
             if self._require_auth_json():
                 self._write_json(200, _certificates_payload())

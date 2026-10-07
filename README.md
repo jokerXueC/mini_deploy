@@ -141,8 +141,8 @@ In the web panel:
 
 1. Click “添加仓库”, paste the repository URL, then connect. Leave the branch empty to detect the default branch.
 2. Confirm the detected runtime. Existing Compose files are preserved. For a Dockerfile, confirm the application and public ports, add required variables and optionally select persistent data directories. Common non-container backends use structured startup entries instead of a full command.
-3. Review the generated files and confirm. Click “准备项目” to pull code and prepare files without starting the application.
-4. Resolve any environment-check failures, then click “开始首次部署”. The panel enables the project and opens deployment logs. You can return to fix ports or variables and retry using the same project.
+3. Review the plan and confirm. Click “部署并检查” to prepare files, check prerequisites, and submit the first deployment if checks pass. Missing prerequisites stop the flow so you can fix them and retry using the same project.
+4. Follow progress in deployment logs. For an existing service, use “检测本机项目” to discover Compose metadata, verify the original update arguments, and choose “完成接入（不更新服务）” to register it without restarting it. Directory and service query commands are available when discovery cannot identify the project.
 5. For future automatic deployments, copy the webhook URL and secret from the wizard into your Git platform's webhook settings and select push events. Use Gitee's password/Token field, GitLab's Secret token field, or GitHub's Secret field.
 
 Generated Dockerfile run configuration is kept outside the business repository.

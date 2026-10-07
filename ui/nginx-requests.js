@@ -1,26 +1,92 @@
 window.NginxRequests = (() => {
   let records = [], pending = false, generation = 0, sourceChosen = false, pendingRefresh = false;
   const source = $('requestSource'), notice = $('requestNotice'), rows = $('requestRows');
+  const rendered = new WeakMap();
+
+  function updateHtml(element, html) {
+    if (rendered.get(element) === html) return;
+    element.innerHTML = html;
+    rendered.set(element, html);
+  }
 
   function formatDuration(value, empty = '未记录') {
     if (!Number.isFinite(value) || value < 0) return empty;
     return value > 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(2)} ms`;
   }
 
+  function groupRequests(items) {
+    const groups = new Map();
+    const ordered = items.slice().sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+    for (const item of ordered) {
+      const key = JSON.stringify([item.host || '', item.method || '', item.path || '']);
+      if (!groups.has(key)) groups.set(key, {key, host: item.host || '', method: item.method || '', path: item.path || '',
+        items: [], successes: 0, errors: 0, durationSum: 0, durationCount: 0, upstreamSum: 0, upstreamCount: 0});
+      const group = groups.get(key);
+      group.items.push(item);
+      if (item.status >= 200 && item.status < 400) group.successes++;
+      if (item.status >= 400) group.errors++;
+      if (Number.isFinite(item.duration_ms) && item.duration_ms >= 0) {
+        group.durationSum += item.duration_ms; group.durationCount++;
+      }
+      if (Number.isFinite(item.upstream_ms) && item.upstream_ms >= 0) {
+        group.upstreamSum += item.upstream_ms; group.upstreamCount++;
+      }
+    }
+    return [...groups.values()].map(group => ({...group, count: group.items.length,
+      average: group.durationCount ? group.durationSum / group.durationCount : null,
+      upstreamAverage: group.upstreamCount ? group.upstreamSum / group.upstreamCount : null,
+      successRate: group.successes / group.items.length * 100}));
+  }
+
   function render() {
     const term = $('requestSearch').value.trim().toLowerCase();
     const status = $('requestStatus').value;
-    const visible = records.filter(item => {
-      if (status === 'success' && (item.status < 200 || item.status >= 400)) return false;
-      if (status === 'error' && item.status < 400) return false;
-      return !term || `${item.path} ${item.host}`.toLowerCase().includes(term);
+    const groups = groupRequests(records).filter(group => {
+      if (status === 'success' && group.successes !== group.count) return false;
+      if (status === 'error' && !group.errors) return false;
+      return !term || `${group.path} ${group.host}`.toLowerCase().includes(term);
     });
-    if (!visible.length) {
+    $('requestSampleSummary').textContent = records.length
+      ? `本次读取 ${records.length} 条 · 显示 ${groups.length} 个地址 · 2xx / 3xx 计为成功` : '';
+    if (!groups.length) {
       rows.innerHTML = '<p class="request-empty">暂无匹配的请求</p>';
       return;
     }
-    rows.innerHTML = `<div class="request-row request-columns" aria-hidden="true"><span>时间</span><span>状态</span><span>方法</span><span>请求路径</span><span>域名</span><span>总耗时</span><span>上游</span></div>` + visible.map(item =>
-      `<div class="request-row"><time>${escapeHtml(item.at || '-')}</time><strong class="request-status ${item.status >= 400 ? 'failed' : ''}">${escapeHtml(item.status)}</strong><span>${escapeHtml(item.method)}</span><code title="${escapeHtml(item.path)}">${escapeHtml(item.path)}</code><span class="request-host">${escapeHtml(item.host)}</span><span>${formatDuration(item.duration_ms)}</span><span>${formatDuration(item.upstream_ms, '-')}</span></div>`).join('');
+    let header = rows.querySelector('.request-summary-head');
+    if (!header) {
+      rows.replaceChildren();
+      header = document.createElement('div');
+      header.className = 'request-summary request-summary-head';
+      header.setAttribute('aria-hidden', 'true');
+      header.innerHTML = '<span>请求地址</span><span>次数</span><span>平均耗时</span><span>平均上游</span><span>最近请求 / 成功率</span>';
+      rows.append(header);
+    }
+    const existing = new Map([...rows.querySelectorAll('.request-group')].map(element => [element.dataset.key, element]));
+    groups.forEach((group, index) => {
+      let element = existing.get(group.key);
+      if (!element) {
+        element = document.createElement('details');
+        element.className = 'request-group';
+        element.dataset.key = group.key;
+        element.innerHTML = '<summary class="request-summary"></summary><div class="request-detail-list"></div>';
+      }
+      existing.delete(group.key);
+      const samples = group.items.slice(0, 30).reverse();
+      const bars = samples.map((item, position) => `<span class="request-tick ${item.status >= 200 && item.status < 400 ? 'is-ok' : item.status >= 400 ? 'is-error' : 'is-unknown'}" ${position === 0 ? `style="grid-column-start:${31 - samples.length}"` : ''} title="${escapeHtml(item.at || '-')} · ${escapeHtml(item.status)}"></span>`).join('');
+      const summary = `<span class="request-route"><span class="request-route-top"><i class="request-expand" aria-hidden="true"></i><b>${escapeHtml(group.method)}</b><code>${escapeHtml(group.path)}</code></span><span class="request-route-host">${escapeHtml(group.host || '-')}</span></span>
+        <span class="request-metric" data-label="次数">${group.count}</span>
+        <span class="request-metric" data-label="平均耗时" title="${group.durationCount} 条有效耗时样本">${formatDuration(group.average)}</span>
+        <span class="request-metric" data-label="平均上游" title="${group.upstreamCount} 条有效上游样本">${formatDuration(group.upstreamAverage, '-')}</span>
+        <span class="request-reliability"><span class="request-spark" role="img" aria-label="最近 ${samples.length} 次请求，由旧到新">${bars}</span><strong class="${group.errors ? 'has-errors' : ''}" title="${group.successes} / ${group.count} 次成功">${group.successRate.toFixed(1)}%</strong></span>`;
+      const summaryNode = element.querySelector('summary');
+      updateHtml(summaryNode, summary);
+      const detail = '<div class="request-detail-head"><span>时间</span><span>状态</span><span>耗时</span><span>上游</span></div>' + group.items.map(item =>
+        `<div class="request-detail-row"><time>${escapeHtml(item.at || '-')}</time><strong class="${item.status >= 400 ? 'failed' : ''}">${escapeHtml(item.status)}</strong><span>${formatDuration(item.duration_ms)}</span><span>${formatDuration(item.upstream_ms, '-')}</span></div>`).join('');
+      const detailNode = element.querySelector('.request-detail-list');
+      updateHtml(detailNode, detail);
+      if (rows.children[index + 1] !== element) rows.insertBefore(element, rows.children[index + 1] || null);
+    });
+    for (const element of existing.values()) element.remove();
   }
 
   async function refresh() {

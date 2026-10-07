@@ -6,6 +6,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import tempfile
@@ -17,6 +18,72 @@ from urllib.parse import urlsplit
 
 import entrypoint_checks
 import docker_onboarding
+
+
+def discover_local_projects(run) -> dict[str, Any]:
+    """Read only selected Compose metadata; never return container environments."""
+    code, output = run(["docker", "ps", "-a", "-q", "--no-trunc", "--filter",
+                        "label=com.docker.compose.project"], timeout=4)
+    if code:
+        return {"projects": [], "notice": "无法查询 Docker。可手动填写代码目录；本机 systemd 项目请使用下方查询指令。"}
+    ids = [value for value in output.splitlines() if re.fullmatch(r"[a-f0-9]{64}", value)]
+    if not ids:
+        return {"projects": [], "notice": "未发现 Compose 项目。普通容器或本机服务可手动接入。"}
+    fields = ['.Name', '.State.Status'] + [f'index .Config.Labels "com.docker.compose.project{suffix}"'
+        for suffix in ['', '.working_dir', '.config_files', '.environment_file']]
+    template = '[' + ','.join('{{json (' + field + ')}}' for field in fields) + ']'
+    code, output = run(["docker", "inspect", "--type", "container", "--format", template, *ids[:100]], timeout=5)
+    if code:
+        return {"projects": [], "notice": "容器状态可能发生了变化，请重新检查或手动填写。"}
+    groups = {}
+    for line in output.splitlines():
+        try:
+            values = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(values, list) or len(values) != 6:
+            continue
+        name, status, project, directory, files, env_files = [str(value or '') for value in values]
+        if (not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,127}", project)
+                or not directory.startswith('/') or len(directory) > 512
+                or len(files) + len(env_files) > 8192
+                or any(ord(char) < 32 for char in directory + files + env_files)):
+            continue
+        key = (project, directory, files, env_files)
+        entry = groups.setdefault(key, {"name": project, "directory": directory, "config_files": files,
+            "environment_files": env_files, "containers": [], "repo": "", "git_directory": "", "command": ""})
+        entry["containers"].append({"name": name.lstrip('/')[:128], "state": status[:32]})
+    projects = list(groups.values())[:12]
+    deadline = time.monotonic() + 8
+    for entry in projects:
+        directory = Path(entry["directory"])
+        if not directory.is_dir() or time.monotonic() >= deadline:
+            continue
+        code, root = run(["git", "--no-optional-locks", "-C", str(directory), "rev-parse", "--show-toplevel"], timeout=2)
+        if code or not root.startswith('/') or len(root) > 512 or any(ord(char) < 32 for char in root):
+            continue
+        entry["git_directory"] = root
+        code, repo = run(["git", "--no-optional-locks", "-C", root, "config", "--local", "--get", "remote.origin.url"], timeout=2)
+        if not code:
+            try:
+                validate_repository(repo, "main")
+                entry["repo"] = repo
+            except ValueError:
+                pass
+        files = [Path(value) for value in entry["config_files"].split(',') if value]
+        env_files = [Path(value) for value in entry["environment_files"].split(',') if value]
+        if not files or len(files) + len(env_files) > 16 or not all(path.is_absolute() and path.is_file() for path in files + env_files):
+            continue
+        args = ["docker", "compose", "--project-directory", str(directory), "--project-name", entry["name"]]
+        for path in files:
+            args += ["--file", str(path)]
+        for path in env_files:
+            args += ["--env-file", str(path)]
+        command = shlex.join(args + ["up", "-d", "--build"])
+        if len(command) <= 4096:
+            entry["command"] = command
+    return {"projects": projects, "notice": "读取 Compose 标签和本机 Git 信息，未执行更新。请选择项目并核对原来的启动参数。"
+            + (" 本次最多检查 100 个容器、展示 12 个项目。" if len(ids) > 100 or len(groups) > 12 else "")}
 
 
 PROVIDERS = {

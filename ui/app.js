@@ -660,7 +660,7 @@ function updateProjectActionHint(activeProject, projects = []) {
   if (!activeProject) {
     hint.textContent = projects.length > 1
       ? '选择具体项目后可重新部署或回滚；全部项目用于总览。'
-      : '尚未接入项目。';
+      : projects.length ? '选择具体项目后可重新部署或回滚。' : '尚未接入项目。';
     return;
   }
   if (!activeProject.enabled) {
@@ -683,8 +683,9 @@ function updateProjectSelect(projects = []) {
   if (!button || !label || !menu) return;
   const known = new Set(projects.map(item => item.key));
   if (selectedProjectKey && !known.has(selectedProjectKey)) selectedProjectKey = '';
-  label.textContent = selectedProjectLabel(projects);
-  button.title = selectedProjectKey ? selectedProjectLabel(projects) : '全部项目';
+  label.textContent = projects.length ? selectedProjectLabel(projects) : '尚未接入项目';
+  button.disabled = !projects.length;
+  button.title = projects.length ? (selectedProjectKey ? selectedProjectLabel(projects) : '全部项目') : '请先添加项目';
   menu.innerHTML = [
     `<button type="button" class="project-option ${selectedProjectKey ? '' : 'active'}" role="option" data-project-key="" aria-selected="${selectedProjectKey ? 'false' : 'true'}">
       <span>全部</span><small>总览</small>
@@ -2987,6 +2988,7 @@ function renderStatus(data) {
   }
   const redeployBtn = $('redeployBtn');
   if (redeployBtn) {
+    redeployBtn.hidden = !projects.length;
     redeployBtn.disabled = !activeProject || !activeProject.enabled || !activeProject.manual_deploy_enabled;
     redeployBtn.title = !activeProject
       ? '请选择一个具体项目'
@@ -3458,6 +3460,42 @@ async function cancelDeploy() {
     }, 1200);
   }
 }
+
+(() => {
+  const root = $('toolbarMore'), button = $('toolbarMoreButton'), menu = $('toolbarMoreMenu');
+  const items = () => [...menu.querySelectorAll('[role="menuitem"]')].filter(item => !item.disabled && item.getClientRects().length);
+  const close = (restoreFocus = false) => {
+    menu.hidden = true;
+    button.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) button.focus();
+  };
+  const open = (last = false) => {
+    closeProjectMenu();
+    menu.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    const choices = items();
+    choices[last ? choices.length - 1 : 0]?.focus();
+  };
+  button.addEventListener('click', () => menu.hidden ? open() : close(true));
+  button.addEventListener('keydown', event => {
+    if (['ArrowDown', 'ArrowUp'].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation(); open(event.key === 'ArrowUp');
+    }
+  });
+  menu.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const choices = items(), index = choices.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1
+      : (index + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
+    choices[next]?.focus();
+  });
+  menu.addEventListener('click', event => { if (event.target.closest('[role="menuitem"]')) close(); });
+  root.addEventListener('focusout', () => queueMicrotask(() => { if (!root.contains(document.activeElement)) close(); }));
+  document.addEventListener('pointerdown', event => { if (!root.contains(event.target)) close(); });
+  document.querySelectorAll('.view-tab').forEach(tab => tab.addEventListener('click', () => close()));
+})();
 
 $('refreshBtn').addEventListener('click', () => {
   if (activeView === 'server') refreshServerStatus();
