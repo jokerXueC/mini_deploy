@@ -552,6 +552,7 @@ function renderProjectPreflightPanel(project, lock = {}) {
         <div class="project-preflight-actions">
           ${status}
           <button class="ghost-button compact-action" type="button" data-project-preflight="${escapeHtml(project.key)}">运行体检</button>
+          <button class="ghost-button compact-action danger-text" type="button" data-project-remove="${escapeHtml(project.key)}">删除接入记录</button>
         </div>
       </div>
       ${renderProjectLock(project, lock)}
@@ -637,6 +638,14 @@ function renderProjectOverview(projects = [], agent = {}, lock = {}, state = {})
       updateProjectSelect(projects);
       renderLogs();
       refresh();
+    });
+  });
+  list.querySelectorAll('[data-project-remove]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const target = $('projectRecordError');
+      target.hidden = true;
+      try { await removeProjectRecord(button.dataset.projectRemove); }
+      catch (err) { target.textContent = `删除失败：${err.message}`; target.hidden = false; }
     });
   });
   list.querySelectorAll('[data-project-preflight]').forEach(button => {
@@ -1071,7 +1080,7 @@ async function postJson(path) {
   });
   if (res.status === 401) location.reload();
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `${path} ${res.status}`);
+  if (!res.ok) throw new Error(data.detail || data.error || `${path} ${res.status}`);
   return data;
 }
 
@@ -1084,7 +1093,11 @@ async function postJsonBody(path, payload) {
   });
   if (res.status === 401) location.reload();
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.error || `${path} ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(data.detail || data.error || `${path} ${res.status}`);
+    error.directory_conflict = data.directory_conflict;
+    throw error;
+  }
   return data;
 }
 
@@ -2127,21 +2140,26 @@ async function saveProjectForm(event) {
   }
 }
 
+async function removeProjectRecord(key) {
+  if (!key) return false;
+  const confirmed = await showConfirmDialog({
+    title: '删除接入记录',
+    message: `确认从面板移除 ${key}？服务器文件、容器和业务服务全部保留，后续此记录的自动部署将停止。`,
+    confirmText: '删除记录',
+  });
+  if (!confirmed) return false;
+  lastConfig = await postJson(`projects-config/delete?project=${encodeURIComponent(key)}`);
+  lastProjects = lastConfig.projects || [];
+  if (selectedProjectKey === key) selectedProjectKey = '';
+  projectPreflightResults.delete(key);
+  await refresh();
+  return true;
+}
+
 async function deleteCurrentProject() {
   const key = $('projectOriginalKey').value || editingProjectKey;
-  if (!key) return;
-  const confirmed = await showConfirmDialog({
-    title: '删除项目',
-    message: `确认删除项目 ${key}？运行中的项目不能删除。`,
-    confirmText: '删除',
-  });
-  if (!confirmed) return;
   try {
-    lastConfig = await postJson(`projects-config/delete?project=${encodeURIComponent(key)}`);
-    lastProjects = lastConfig.projects || [];
-    selectedProjectKey = '';
-    closeProjectModal();
-    await refresh();
+    if (await removeProjectRecord(key)) closeProjectModal();
   } catch (err) {
     setProjectFormError(`删除失败: ${err.message}`);
   }

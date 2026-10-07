@@ -112,20 +112,41 @@ def test_empty_install_add_first_delete_last_and_reload(empty_runtime, tmp_path)
     assert list((tmp_path / "backups").glob("*.bak"))
 
 
-@pytest.mark.parametrize("state", ["running", "queued", "certificate", "nginx"])
+@pytest.mark.parametrize("state", ["running", "queued"])
 def test_last_project_still_protects_active_resources(empty_runtime, tmp_path, monkeypatch, state):
     agent._save_project_transaction({"key": "first", "enabled": False, "workdir": str(tmp_path)})
     if state == "running":
         agent._state["current_deploy"] = {"project_key": "first", "status": "running"}
     elif state == "queued":
         agent._jobs.put({"project_key": "first"})
-    elif state == "certificate":
-        (tmp_path / "certificates" / "first").mkdir(parents=True)
-    else:
-        monkeypatch.setattr(agent, "_nginx_project_has_site", lambda project: True)
     with pytest.raises((agent._ProjectRunningError, agent.certificates.CertificateError)):
         agent._delete_project_transaction("first")
     assert "first" in agent.PROJECTS
+
+
+def test_delete_record_preserves_all_business_files_and_services(empty_runtime, tmp_path, monkeypatch):
+    agent._save_project_transaction({"key": "first", "enabled": False, "workdir": str(tmp_path)})
+    monkeypatch.setattr(agent, 'PROJECT_CONFIG_BACKUP_LIMIT', 1)
+    agent.PROJECT_CONFIG_BACKUP_DIR.mkdir(exist_ok=True)
+    backups = [agent.PROJECT_CONFIG_BACKUP_DIR / f'projects.json.old-{index}.bak' for index in range(3)]
+    for path in backups:
+        path.write_bytes(b'old backup')
+    paths = [tmp_path / name for name in ["app/main.py", "app/untracked.py", "app/data.db",
+        "certificates/first/key.pem", "managed-projects/first/compose.yaml", "command-plans/first/deploy.sh",
+        "bootstrap-sources/first.json", "nginx/mini-deploy-first.conf", "deploy.log"]]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"keep unchanged")
+    monkeypatch.setattr(agent, "_nginx_project_has_site", lambda project: True)
+    monkeypatch.setattr(agent, "_run_command", lambda *args, **kwargs: pytest.fail("Must not stop or remove services"))
+    agent._delete_project_transaction("first")
+    assert "first" not in agent.PROJECTS
+    assert json.loads(agent.PROJECTS_CONFIG_FILE.read_text())["projects"] == []
+    assert all(path.read_bytes() == b"keep unchanged" for path in paths)
+    assert all(path.read_bytes() == b'old backup' for path in backups)
+    with pytest.raises(ValueError, match="资源已保留"):
+        agent._save_project_transaction({"key": "first", "workdir": str(tmp_path)})
+    assert all(path.read_bytes() == b"keep unchanged" for path in paths)
 
 
 @pytest.mark.parametrize(("files", "expected", "entry"), [
@@ -339,6 +360,19 @@ def test_guidance_http_auth_csrf_and_empty_status(empty_runtime, tmp_path, monke
         assert not (tmp_path / "api").exists()
         assert not agent.PROJECTS_CONFIG_FILE.exists()
         assert request("/projects-config/preview", {"project": []}, auth_headers)[0] == 400
+        occupied = tmp_path / "existing-app"
+        occupied.mkdir()
+        (occupied / ".git").mkdir()
+        (occupied / "local.py").write_text("local changes")
+        occupied_body = {"project": {"key": "occupied", "workdir": str(occupied),
+            "repo": "https://example.test/api.git", "branch": "main", "template": "custom",
+            "deployment_plan": {"situation": "new", "method": "commands", "restart": "echo restart"}}}
+        status, result = request("/projects-config/preview", occupied_body, auth_headers)
+        assert status == 200 and result["directory_conflict"]["can_adopt"]
+        status, result = request("/projects-config/bootstrap", occupied_body, auth_headers)
+        assert status == 409 and result["error"] == "existing_directory"
+        assert not agent.PROJECTS_CONFIG_FILE.exists()
+        assert (occupied / "local.py").read_text() == "local changes"
         connection.request("GET", "/status", headers=cookie_headers)
         response = connection.getresponse()
         assert response.status == 200

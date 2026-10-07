@@ -78,6 +78,17 @@ def browser_page():
                     return
                 result = {'start_command': resolved.start_command, 'script': resolved.script,
                           'files': [dict(kind='deploy.sh', path=project['script'], content='# preview', exists=False)]}
+                if state.get('directory_conflict') and project.get('deployment_plan', {}).get('situation') == 'new':
+                    result = {'directory_conflict': {'path': project['workdir'], 'can_adopt': True,
+                        'message': '该目录已有代码，请改为接入已有项目。尚未更新代码。'}, 'files': []}
+            elif path == '/projects-config/delete':
+                if state.get('delete_blocked'):
+                    route.fulfill(status=409, json={'error': 'project_is_running', 'detail': '有部署任务正在执行或排队，请等待结束。'})
+                    return
+                from urllib.parse import parse_qs, urlsplit
+                key = parse_qs(urlsplit(route.request.url).query)['project'][0]
+                state['projects'] = [item for item in state['projects'] if item['key'] != key]
+                result = {'projects': state['projects']}
             elif path in ('/projects-config/bootstrap', '/projects-config/save'):
                 state['projects'] = [{**project, 'webhook_secret': 'test'}]
                 result = dict(projects=state['projects'], bootstrap=dict(ok=not state['failed_bootstrap'], results=[]))
@@ -279,6 +290,83 @@ def test_discovery_fallback_shows_instructions_and_preserves_input(browser_page)
     page.locator('#wizardExistingTools summary').click()
     assert 'git rev-parse' in page.locator('#wizardGitQuery').inner_text()
     assert 'systemctl show' in page.locator('#wizardServiceQuery').inner_text()
+
+
+def test_new_existing_directory_offers_adoption_before_saving(browser_page):
+    page, state = browser_page
+    state['directory_conflict'] = True
+    page.locator('#projectRepoInput').fill('https://example.test/demo.git')
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardConfigure', state='visible')
+    page.locator('#wizardAdvancedOptions summary').click()
+    page.locator('#projectWorkdirInput').fill('/opt/aimore')
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardDirectoryConflict', state='visible')
+    assert page.locator('#wizardDirectoryPath').inner_text() == '/opt/aimore'
+    assert not any(path in ('/projects-config/bootstrap', '/projects-config/save', '/redeploy') for path, _ in state['posts'])
+    page.locator('#wizardChangeDirectory').click()
+    assert page.locator('#projectWorkdirInput').is_visible()
+    page.locator('#wizardNext').click()
+    page.locator('#wizardAdoptExisting').click()
+    assert page.locator('#wizardSituation').input_value() == 'existing'
+    assert page.locator('#wizardExistingDirectory').input_value() == '/opt/aimore'
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardConfigure', state='visible')
+    assert page.locator('#projectWorkdirInput').input_value() == '/opt/aimore'
+    page.locator('#projectRestartStepInput').fill('systemctl restart existing-api')
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardReview', state='visible')
+    page.locator('#projectConfigConfirmed').check()
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardFinish', state='visible')
+    page.locator('#wizardFinish').click()
+    page.wait_for_selector('#projectModal', state='hidden')
+    assert not any(path == '/redeploy' for path, _ in state['posts'])
+
+
+def test_failed_preparation_record_can_be_deleted_in_wizard(browser_page):
+    page, state = browser_page
+    connect_and_review(page)
+    page.locator('#projectConfigConfirmed').check()
+    state['failed_bootstrap'] = True
+    page.locator('#wizardNext').click()
+    page.wait_for_selector('#wizardError', state='visible')
+    page.locator('#wizardDeleteRecord').click()
+    page.wait_for_selector('#confirmOkBtn', state='visible')
+    assert '服务器文件、容器和业务服务全部保留' in page.locator('#confirmMessage').inner_text()
+    page.locator('#confirmCancelBtn').click()
+    page.wait_for_function('!ProjectWizard.busy()')
+    assert len(state['projects']) == 1
+    page.locator('#wizardDeleteRecord').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('#projectModal', state='hidden')
+    assert not state['projects']
+    assert not any(path in ('/redeploy', '/docker/action') for path, _ in state['posts'])
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_project_list_delete_record_and_active_task_error(browser_page, width, tmp_path):
+    page, state = browser_page
+    page.set_viewport_size({'width': width, 'height': 950})
+    state['projects'] = [dict(key='demo', name='Demo', enabled=False)]
+    page.locator('#closeProjectModalBtn').click()
+    page.locator('#deployViewTab').click()
+    page.locator('#refreshBtn').click()
+    button = page.locator('[data-project-remove="demo"]')
+    button.wait_for(state='visible')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#projectOverview').screenshot(path=str(tmp_path / f'remove-{width}.png'))
+    state['delete_blocked'] = True
+    button.click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('#projectRecordError', state='visible')
+    assert '部署任务' in page.locator('#projectRecordError').inner_text()
+    assert len(state['projects']) == 1
+    state['delete_blocked'] = False
+    button.click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_function("document.querySelector('#projectOverview').textContent.includes('暂无项目')")
+    assert not state['projects']
 
 
 @pytest.mark.parametrize('width', [1440, 390])

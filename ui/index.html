@@ -365,6 +365,7 @@
         </div>
       </div>
       <div id="projectOverview" class="project-list skeleton-block"></div>
+      <p id="projectRecordError" class="form-error" role="alert" hidden></p>
     </section>
 
     <section class="panel-grid deploy-main-grid">
@@ -777,10 +778,15 @@
               <button id="wizardDeploy" class="danger-button compact-action" type="button" hidden>开始首次部署</button>
               <button id="wizardRecheck" class="ghost-button compact-action" type="button" hidden>重新检查环境</button>
             </section>
+            <div id="wizardDirectoryConflict" class="wizard-directory-conflict" hidden role="status">
+              <strong>这个目录已经有项目内容</strong><p id="wizardDirectoryMessage"></p><code id="wizardDirectoryPath"></code>
+              <div class="onboarding-tools"><button id="wizardAdoptExisting" type="button" class="ghost-button compact-action">改为接入已有项目</button><button id="wizardChangeDirectory" type="button" class="ghost-button compact-action">选择其他目录</button></div>
+            </div>
             <p id="wizardError" class="form-error" role="alert" hidden></p>
             <div class="modal-actions wizard-actions">
               <button id="wizardBack" class="ghost-button compact-action" type="button" hidden>上一步</button>
               <button id="wizardFinish" class="ghost-button compact-action" type="button" hidden>稍后部署</button>
+              <button id="wizardDeleteRecord" class="ghost-button compact-action danger-text" type="button" hidden>删除接入记录</button>
               <span class="modal-spacer"></span>
               <button id="wizardNext" class="danger-button compact-action" type="button">连接并识别</button>
             </div>
@@ -887,7 +893,7 @@
           </div>
           <div id="projectFormError" class="form-error" hidden></div>
           <div class="modal-actions">
-            <button id="deleteProjectBtn" class="ghost-button compact-action danger-text" type="button">删除项目</button>
+            <button id="deleteProjectBtn" class="ghost-button compact-action danger-text" type="button">删除接入记录</button>
             <button id="resetSecretBtn" class="ghost-button compact-action" type="button">重置 Token</button>
             <span class="modal-spacer"></span>
             <button class="ghost-button compact-action" type="button" id="cancelProjectBtn">取消</button>

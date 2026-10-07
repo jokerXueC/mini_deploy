@@ -1175,7 +1175,7 @@ def _project_from_form(raw: dict[str, Any], existing: DeployProject | None = Non
     )
 
 
-def _backup_projects_config() -> str:
+def _backup_projects_config(*, prune: bool = True) -> str:
     if not PROJECTS_CONFIG_FILE.exists():
         return ""
     backup_dir = PROJECT_CONFIG_BACKUP_DIR
@@ -1200,7 +1200,7 @@ def _backup_projects_config() -> str:
         key=lambda item: item.stat().st_mtime,
         reverse=True,
     )
-    for old in backups[max(PROJECT_CONFIG_BACKUP_LIMIT, 1):]:
+    for old in backups[max(PROJECT_CONFIG_BACKUP_LIMIT, 1):] if prune else []:
         try:
             old.unlink()
         except OSError:
@@ -1235,8 +1235,8 @@ def _atomic_write_private_text(path: Path, text: str) -> None:
 
 
 @_maintenance_shared_operation
-def _write_projects_config(projects: dict[str, DeployProject], notifications: dict[str, Any] | None = None) -> None:
-    backup_path = _backup_projects_config()
+def _write_projects_config(projects: dict[str, DeployProject], notifications: dict[str, Any] | None = None, *, preserve_backups: bool = False) -> None:
+    backup_path = _backup_projects_config(prune=False) if preserve_backups else _backup_projects_config()
     PROJECTS_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "projects": [_project_to_config(project, include_secret=True) for project in projects.values()],
@@ -1299,6 +1299,13 @@ def _save_project_transaction(raw_project: dict[str, Any], original_key: str = "
         projects = dict(PROJECTS)
         existing = projects.get(original_key) if original_key else None
         project = _project_from_form(raw_project, existing=existing)
+        if project.key not in projects and (
+            any((STATE_FILE.parent / directory / project.key).exists()
+                for directory in ("certificates", "managed-projects", "command-plans"))
+            or (STATE_FILE.parent / "bootstrap-sources" / f"{project.key}.json").exists()
+            or _nginx_project_has_site(project)
+        ):
+            raise ValueError("该项目标识关联的服务器资源已保留，请在高级设置中使用其他项目标识；不会覆盖或删除旧资源")
         if existing and existing.docker_config and project.key != existing.key:
             raise ValueError("面板托管的容器项目不能修改标识，以免丢失原数据目录和容器归属")
         if existing and (STATE_FILE.parent / "certificates" / existing.key).exists():
@@ -1321,10 +1328,6 @@ def _delete_project_transaction(key: str) -> None:
         projects = dict(PROJECTS)
         if key not in projects:
             raise _ProjectNotFoundError(key)
-        if (STATE_FILE.parent / "certificates" / key).exists():
-            raise certificates.CertificateError("请先在证书管理中停用并删除该项目的证书")
-        if _nginx_project_has_site(projects[key]):
-            raise certificates.CertificateError("请先在 Nginx 接入中移除该项目的域名入口")
         with _state_lock:
             current = _state.get("current_deploy")
         if (
@@ -1335,8 +1338,10 @@ def _delete_project_transaction(key: str) -> None:
             raise _ProjectRunningError(key)
         if any(job.get("project_key") == key for job in _queued_jobs_snapshot()):
             raise _ProjectRunningError(key)
+        # Removing registration must never clean up files, containers or services.
         projects.pop(key)
-        _save_and_reload_projects(projects)
+        _write_projects_config(projects, preserve_backups=True)
+        _replace_projects(projects)
 
 
 def _reset_project_secret_transaction(key: str) -> DeployProject:
@@ -2280,6 +2285,54 @@ def _bootstrap_result(step: str, ok: bool, detail: str, output: str = "") -> dic
             "diagnosis": [] if ok else project_guidance.diagnose(output or detail)}
 
 
+def _source_receipt_path(project: DeployProject) -> Path:
+    return STATE_FILE.parent / "bootstrap-sources" / f"{project.key}.json"
+
+
+def _source_identity(project: DeployProject) -> dict[str, Any]:
+    git = project.workdir / ".git"
+    if git.is_symlink() or project.workdir.is_symlink():
+        raise ValueError("代码目录或 Git 元数据为符号链接，请人工核对")
+    info = git.stat()
+    return {"workdir": str(project.workdir.resolve()), "repo": list(project_guidance.repository_identity(project.repo)),
+            "branch": project.branch, "device": info.st_dev, "inode": info.st_ino}
+
+
+def _source_was_initialized(project: DeployProject) -> bool:
+    path = _source_receipt_path(project)
+    try:
+        if path.parent.is_symlink() or path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
+            return False
+        return json.loads(path.read_text(encoding="utf-8")) == _source_identity(project)
+    except (OSError, ValueError):
+        return False
+
+
+def _remember_initialized_source(project: DeployProject) -> None:
+    path = _source_receipt_path(project)
+    if path.parent.is_symlink() or path.is_symlink():
+        raise ValueError("初始化记录目录不安全，请人工核对")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    _atomic_write_private_text(path, json.dumps(_source_identity(project)))
+
+
+def _new_project_directory_conflict(project: DeployProject) -> dict[str, Any] | None:
+    if project.deployment_plan.get("situation") != "new":
+        return None
+    directory = project.workdir
+    if _source_was_initialized(project):
+        return None
+    if not directory.exists() and not directory.is_symlink():
+        return None
+    if directory.is_dir() and not directory.is_symlink() and not next(directory.iterdir(), None):
+        return None
+    git_exists = (directory / ".git").exists()
+    return {"path": str(directory), "can_adopt": git_exists,
+            "message": "该目录已有代码，请改为接入已有项目，或选择新的空目录。尚未拉取、切换或合并代码。" if git_exists else
+                       "该目录已被占用，请选择新的空目录；不会覆盖或删除里面的文件。"}
+
+
 def _project_preview(project: DeployProject) -> dict[str, Any]:
     if project.template not in {"docker", "python", "go", "java", "node", "static", "custom"}:
         raise ValueError("请选择支持的项目类型")
@@ -2287,6 +2340,9 @@ def _project_preview(project: DeployProject) -> dict[str, Any]:
         raise ValueError("业务端口必须在 1 到 65535 之间")
     if not project.workdir.is_absolute():
         raise ValueError("服务器目录必须是绝对路径")
+    conflict = _new_project_directory_conflict(project)
+    if conflict:
+        return {"directory_conflict": conflict, "files": []}
     files = []
     paths = [("deploy.sh", _project_script_path(project), _deploy_script_text(project))]
     if project.docker_config:
@@ -2465,7 +2521,11 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True, en
         if project.deployment_plan.get("situation") == "unsure":
             raise ValueError("请先确认首次部署还是接入已有服务，不确定时只能检查仓库")
         project_guidance.validate_repository(project.repo, project.branch)
-        _project_preview(project)
+        preview = _project_preview(project)
+        if preview.get("directory_conflict"):
+            conflict = preview["directory_conflict"]
+            return {"ok": False, "project": project.key, "directory_conflict": conflict,
+                    "results": [{"step": "existing_directory", "ok": False, "detail": conflict["message"], "diagnosis": []}]}
     except (ValueError, OSError) as exc:
         return {"ok": False, "project": project.key,
                 "results": [_bootstrap_result("configuration", False, str(exc))]}
@@ -2492,7 +2552,8 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True, en
         results.append(local_check)
         if not local_check["ok"]:
             return {"ok": False, "project": project.key, "results": results}
-    ls_remote = (_existing_repository_check(project) if adopting else
+    initialized = project.deployment_plan.get("situation") == "new" and _source_was_initialized(project)
+    ls_remote = (_existing_repository_check(project) if adopting or initialized else
                  _run_bootstrap_command(["git", "ls-remote", project.repo, "HEAD"], step="repo_access", timeout=30.0))
     results.append(ls_remote)
     if not ls_remote["ok"]:
@@ -2505,9 +2566,14 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True, en
         }
 
     try:
-        if adopting:
+        if adopting or initialized:
             pass
         elif (project.workdir / ".git").exists():
+            if project.deployment_plan.get("situation") == "new":
+                conflict = {"path": str(project.workdir), "can_adopt": True,
+                            "message": "目录在检查后出现了已有代码，请重新检查或改为接入已有项目。尚未更新代码。"}
+                return {"ok": False, "project": project.key, "directory_conflict": conflict,
+                        "results": [{"step": "existing_directory", "ok": False, "detail": conflict["message"], "diagnosis": []}]}
             for step, args in (("git_fetch", ["fetch", "origin", project.branch]),
                                ("git_checkout", ["checkout", project.branch]),
                                ("git_pull", ["pull", "--ff-only", "origin", project.branch])):
@@ -2518,6 +2584,8 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True, en
         else:
             project.workdir.parent.mkdir(parents=True, exist_ok=True)
             results.append(_run_bootstrap_command(["git", "clone", "--branch", project.branch, project.repo, str(project.workdir)], step="git_clone", timeout=180.0))
+            if results[-1]["ok"] and project.deployment_plan.get("situation") == "new":
+                _remember_initialized_source(project)
         if not all(item["ok"] for item in results):
             return {"ok": False, "project": project.key, "results": results, "ssh_public_keys": _ssh_public_keys()}
 
@@ -5352,7 +5420,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             project_guidance.validate_repository(str(raw_project.get("repo") or ""), str(raw_project.get("branch") or "main"))
             candidate = _project_from_form(raw_project)
-            _project_preview(candidate)
+            preview = _project_preview(candidate)
+            if preview.get("directory_conflict"):
+                conflict = preview["directory_conflict"]
+                self._write_json(409, {"error": "existing_directory", "detail": conflict["message"], "directory_conflict": conflict})
+                return
             if environment is not None:
                 docker_onboarding.environment_values(environment, candidate.docker_config.get("environment", []))
         except (ValueError, OSError) as exc:
@@ -5449,7 +5521,7 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(404, {"error": "project_not_found"})
             return
         except _ProjectRunningError:
-            self._write_json(409, {"error": "project_is_running"})
+            self._write_json(409, {"error": "project_is_running", "detail": "该项目有正在执行或排队的部署任务，请等待任务结束后再删除接入记录；无需停止业务服务"})
             return
         except certificates.CertificateError as exc:
             self._write_json(409, {"error": "certificate_in_use", "detail": str(exc)})

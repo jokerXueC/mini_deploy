@@ -91,6 +91,7 @@ window.ProjectWizard = (() => {
   }
   function show(index) {
     step = index;
+    $('wizardDirectoryConflict').hidden = true;
     ['wizardConnect', 'wizardConfigure', 'wizardReview'].forEach((id, i) => { $(id).hidden = i !== step; });
     document.querySelectorAll('.project-wizard-steps li').forEach((node, i) => {
       node.classList.toggle('active', i === step);
@@ -99,6 +100,7 @@ window.ProjectWizard = (() => {
     });
     $('wizardBack').hidden = step === 0;
     $('wizardFinish').hidden = !savedKey;
+    $('wizardDeleteRecord').hidden = !savedKey;
     $('wizardNext').hidden = prepared;
     $('wizardNext').textContent = ['检查项目', '下一步：确认执行', adopting() ? '准备并检查接入' : '部署并检查'][step];
     $('wizardDeploy').hidden = !prepared;
@@ -180,6 +182,17 @@ window.ProjectWizard = (() => {
     show(0);
   }
   function close() { active = false; generation++; restore(); $('projectWizard').hidden = true; }
+  function directoryConflict(conflict) {
+    preview = '';
+    prepared = false;
+    $('projectConfigConfirmed').checked = false;
+    $('wizardDirectoryConflict').hidden = false;
+    $('wizardDirectoryMessage').textContent = conflict.message;
+    $('wizardDirectoryPath').textContent = conflict.path;
+    $('wizardAdoptExisting').hidden = !conflict.can_adopt;
+    $('wizardChangeDirectory').hidden = !!savedKey;
+    $('wizardDirectoryConflict').scrollIntoView({block: 'nearest'});
+  }
   function entrySettings() {
     if (!active) return {};
     const template = $('projectTemplateInput').value;
@@ -452,6 +465,10 @@ window.ProjectWizard = (() => {
     }
     const project = collectProjectForm();
     const result = await postJsonBody('projects-config/preview', {project});
+    if (result.directory_conflict) {
+      directoryConflict(result.directory_conflict);
+      return;
+    }
     if (result.script) {
       $('projectScriptInput').value = result.script;
       $('projectScriptInput').dataset.autoValue = result.script;
@@ -490,6 +507,7 @@ window.ProjectWizard = (() => {
     $('projectWorkdirInput').readOnly = true;
     $('projectOriginalKey').value = savedKey;
     editingProjectKey = savedKey;
+    $('wizardDeleteRecord').hidden = false;
     selectedProjectKey = savedKey;
     $('wizardWebhookUrl').textContent = projectWebhookUrl(savedKey);
   }
@@ -526,6 +544,7 @@ window.ProjectWizard = (() => {
       $('wizardProgress').innerHTML = (config.bootstrap?.results || []).filter(item => !item.ok).map(item =>
         `<p>${escapeHtml(item.detail)}</p>${renderFailureAdvice(item.diagnosis)}`).join('');
       $('wizardFinish').hidden = false;
+      if (config.bootstrap?.directory_conflict) directoryConflict(config.bootstrap.directory_conflict);
       throw new Error('项目准备未完成，可处理提示后重试。项目配置已保存。');
     }
     prepared = true;
@@ -539,7 +558,12 @@ window.ProjectWizard = (() => {
     const version = generation;
     error(''); lock(true);
     try { await action(); }
-    catch (err) { if (version === generation) error(err.message); }
+    catch (err) {
+      if (version === generation) {
+        error(err.message);
+        if (err.directory_conflict) directoryConflict(err.directory_conflict);
+      }
+    }
     finally { if (version === generation) lock(false); }
   }
   const next = () => task(() => step === 0 ? connect() : step === 1 ? review() : prepared ? Promise.resolve() : prepare());
@@ -567,6 +591,29 @@ window.ProjectWizard = (() => {
     $('logs').textContent = '部署已加入队列，正在等待执行…';
   }
   $('wizardDeploy').addEventListener('click', () => task(() => deploy()));
+  $('wizardAdoptExisting').addEventListener('click', () => {
+    if (busy) return;
+    $('wizardSituation').value = 'existing';
+    $('wizardExistingDirectory').value = $('projectWorkdirInput').value;
+    $('projectTriggerInput').value = 'manual';
+    situationFields();
+    show(0);
+    window.AppSelects?.syncAll();
+    $('wizardExistingDirectory').focus();
+  });
+  $('wizardChangeDirectory').addEventListener('click', () => {
+    if (busy || savedKey) return;
+    show(1);
+    $('wizardAdvancedOptions').open = true;
+    $('projectWorkdirInput').focus();
+    $('projectWorkdirInput').select();
+  });
+  $('wizardDeleteRecord').addEventListener('click', () => task(async () => {
+    if (await removeProjectRecord(savedKey)) {
+      lock(false);
+      closeProjectModal();
+    }
+  }));
   $('wizardDiscover').addEventListener('click', () => task(discover));
   $('wizardLocalProjects').addEventListener('click', event => {
     const button = event.target.closest('[data-local-project]');

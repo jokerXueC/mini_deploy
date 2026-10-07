@@ -134,6 +134,73 @@ def test_new_preparation_wont_pull_from_different_existing_origin(runtime, tmp_p
     assert not Path(project.script).exists()
 
 
+def test_new_project_blocks_existing_dirty_repository_before_any_commands(runtime, tmp_path, monkeypatch):
+    raw = project_form(tmp_path, situation="new")
+    path = Path(raw["workdir"])
+    make_repo(path)
+    (path / "main.py").write_text("local changes", encoding="utf-8")
+    (path / "new-route.py").write_text("new code", encoding="utf-8")
+    project = agent._project_from_form(raw)
+    monkeypatch.setattr(agent, "_run_bootstrap_command", lambda *args, **kwargs: pytest.fail("Existing code must not be mutated"))
+    monkeypatch.setattr(agent, "_run_command", lambda *args, **kwargs: pytest.fail("No Git command needed to detect occupied directory"))
+    conflict = agent._project_preview(project)["directory_conflict"]
+    assert conflict["can_adopt"] is True
+    assert conflict["path"] == str(path)
+    assert "接入已有" in conflict["message"]
+    result = agent._bootstrap_project(project)
+    assert not result["ok"]
+    assert result["directory_conflict"] == conflict
+    assert result["results"][0]["diagnosis"] == []
+    assert (path / "main.py").read_text() == "local changes"
+    assert (path / "new-route.py").read_text() == "new code"
+    assert not Path(project.script).exists()
+
+
+def test_new_project_non_git_occupied_directory_cannot_be_overwritten(runtime, tmp_path):
+    raw = project_form(tmp_path, situation="new")
+    path = Path(raw["workdir"])
+    path.mkdir()
+    project = agent._project_from_form(raw)
+    assert not agent._project_preview(project).get("directory_conflict")
+    (path / "data.db").write_bytes(b"business data")
+    conflict = agent._project_preview(project)["directory_conflict"]
+    assert not conflict["can_adopt"]
+    assert not agent._bootstrap_project(project)["ok"]
+    assert (path / "data.db").read_bytes() == b"business data"
+
+
+def test_first_clone_can_retry_without_fetch_checkout_or_pull(runtime, tmp_path, monkeypatch):
+    raw = project_form(tmp_path, situation="new")
+    project = agent._project_from_form(raw)
+    calls = []
+    def command(args, *, step, **kwargs):
+        calls.append(step)
+        if step == "git_clone":
+            make_repo(project.workdir)
+        return agent._bootstrap_result(step, True, "ok")
+    monkeypatch.setattr(agent, "_run_bootstrap_command", command)
+    assert agent._bootstrap_project(project)["ok"]
+    assert calls == ["repo_access", "git_clone"]
+    assert agent._source_receipt_path(project).is_file()
+    monkeypatch.setattr(agent, "_run_bootstrap_command", lambda *args, **kwargs: pytest.fail("Retry must reuse the initialized source without updating Git"))
+    assert agent._bootstrap_project(project)["ok"]
+    changed = agent._project_from_form({**raw, "branch": "release"})
+    assert agent._project_preview(changed).get("directory_conflict")
+
+
+def test_directory_created_after_check_never_falls_through_to_git_pull(runtime, tmp_path, monkeypatch):
+    project = agent._project_from_form(project_form(tmp_path, situation="new"))
+    def command(args, *, step, **kwargs):
+        assert step == "repo_access"
+        make_repo(project.workdir)
+        return agent._bootstrap_result(step, True, "ok")
+    monkeypatch.setattr(agent, "_run_bootstrap_command", command)
+    result = agent._bootstrap_project(project)
+    assert not result["ok"]
+    assert "检查后" in result["directory_conflict"]["message"]
+    assert not Path(project.script).exists()
+
+
 def test_existing_script_is_preserved_and_missing_script_is_not_generated(runtime, tmp_path):
     raw = project_form(tmp_path, method="script")
     make_repo(Path(raw["workdir"]))
