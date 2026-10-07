@@ -154,6 +154,7 @@ def test_attach_and_detach_preserve_inode_and_other_sites(setup):
     assert path.stat().st_ino == inode
     assert 'reverse_proxy mini-gateway-api:10000' in path.read_text()
     assert store.status('api')['state'] == 'connected'
+    assert '/cloud/*' in store.status('api')['scope']
     assert (store.directory('api') / 'before.conf').read_text() == CADDY
     with path.open('a', newline='') as stream:
         stream.write('# unrelated change\n')

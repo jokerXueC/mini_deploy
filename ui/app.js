@@ -945,7 +945,7 @@ function setView(view) {
     events: ['告警与事件', '集中查看部署、WebHook、容器和资源异常。'],
     notify: ['通知配置', '配置部署结果、服务器和 Docker 异常的推送渠道。'],
     certificates: ['域名与证书', '项目访问入口、证书有效期与 HTTPS 状态。'],
-    requests: ['请求记录', '统一网关与代理访问记录'],
+    requests: ['请求记录', '网站访问、响应状态与耗时'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;

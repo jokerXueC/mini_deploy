@@ -341,7 +341,8 @@ class Connections:
             return {'state': 'not_connected'}
         trusted_path(path)
         data = read_record(path)
-        return {k: data[k] for k in ('state', 'site', 'kind', 'source', 'token')}
+        return {**{k: data[k] for k in ('state', 'site', 'kind', 'source', 'token')},
+                'scope': data.get('scope', '静态网站' if data['kind'] == 'static' else '已接入的转发规则')}
 
     def inspect(self, raw: dict) -> dict:
         source = resolve(raw)
@@ -408,7 +409,7 @@ class Connections:
         if old and any(old['spec'][k] != spec[k] for k in ('upstream', 'network', 'port', 'bind', 'image')):
             raise CertificateError('该标识已有不同的网关配置，请使用新的入口标识，或先在网关管理中核对配置')
         plan = {'token': secrets.token_hex(16), 'created': time.time(), 'source': source, 'site': route['site'],
-                'kind': route['kind'], 'before': before, 'after': after, 'extra': extra,
+                'kind': route['kind'], 'scope': route['label'], 'before': before, 'after': after, 'extra': extra,
                 'source_revision': digest(text), 'candidate': candidate, 'spec': spec,
                 'probe_path': probe_path,
                 'gateway_revision': gateway.revision(old['spec']) if old else ''}

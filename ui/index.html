@@ -71,32 +71,32 @@
     <div id="requestsView" class="dashboard-view">
       <section class="request-section">
         <div class="panel-head request-head">
-          <div><h2>请求记录</h2><span id="requestSource" class="muted">检查中</span></div>
+          <div><h2>网站请求</h2><span id="requestSource" class="muted">检查中</span></div>
           <div class="request-actions">
-            <button id="manageRequestGateways" class="ghost-button compact-action" type="button" aria-expanded="false">管理网关</button>
-            <button id="requestEnable" class="ghost-button compact-action" type="button" hidden>开启记录</button>
-            <button id="requestDisable" class="ghost-button compact-action" type="button" hidden>关闭记录</button>
+            <button id="gatewayConnectOpen" class="danger-button compact-action" type="button">添加网站</button>
             <button id="requestRefresh" class="ghost-button compact-action" type="button" title="刷新请求" aria-label="刷新请求">刷新</button>
           </div>
         </div>
-        <section id="requestGatewayManager" class="request-gateway-manager" hidden>
-          <div class="panel-head"><h3>统一请求网关</h3><div class="request-actions"><button id="gatewayRefresh" class="ghost-button compact-action" type="button">刷新状态</button><button id="gatewayAdd" class="ghost-button compact-action" type="button">高级新建</button><button id="gatewayConnectOpen" class="danger-button compact-action" type="button">启用请求监控</button></div></div>
-          <p id="gatewayFeedback" role="status"></p>
           <section id="gatewayConnectPanel" class="gateway-connect" hidden aria-labelledby="gatewayConnectTitle">
-            <div class="panel-head"><h3 id="gatewayConnectTitle">接入网站流量</h3><button id="gatewayConnectClose" class="ghost-button compact-action" type="button">收起</button></div>
+            <div class="panel-head"><h3 id="gatewayConnectTitle">添加网站监控</h3><button id="gatewayConnectClose" class="ghost-button compact-action" type="button">收起</button></div>
             <p id="gatewayConnectFeedback" role="status"></p>
             <fieldset id="gatewayConnectFields">
               <div class="request-gateway-fields">
-                <label class="field gateway-image-field"><span>检测到的入口</span><select id="connectDetected"><option value="">手动填写</option></select></label>
+                <label id="connectDetectedField" class="field gateway-image-field"><span>网站所在服务</span><select id="connectDetected"><option value="">手动填写</option></select></label>
+              </div>
+              <details id="connectSourceAdvanced"><summary>手动配置服务</summary><div class="request-gateway-fields">
                 <label class="field"><span>代理类型</span><select id="connectKind"><option value="caddy">Caddy</option><option value="nginx">Nginx</option></select></label>
                 <label class="field"><span>运行位置</span><select id="connectMode"><option value="docker">Docker 容器</option><option value="local">服务器本机</option></select></label>
                 <label class="field" id="connectContainerField"><span>代理容器名称</span><input id="connectContainer" placeholder="例如 aimore-caddy-1" maxlength="128"></label>
                 <label class="field"><span>代理内的配置路径</span><input id="connectConfig" value="/etc/caddy/Caddyfile" maxlength="512"></label>
               </div>
-              <div class="request-actions"><button id="connectDiscover" class="ghost-button compact-action" type="button">重新检测入口</button><button id="connectInspect" class="danger-button compact-action" type="button">读取网站规则</button></div>
+              <div class="request-actions"><button id="connectDiscover" class="ghost-button compact-action" type="button">重新检测入口</button><button id="connectInspect" class="danger-button compact-action" type="button">重新读取网站</button></div></details>
               <div id="connectRouteFields" hidden>
                 <div class="request-gateway-fields">
-                  <label class="field gateway-image-field"><span>要监控的网站或转发规则</span><select id="connectRoute"><option value="">请选择</option></select></label>
+                  <label class="field gateway-image-field"><span>选择网站</span><select id="connectRoute"><option value="">请选择</option></select></label>
+                </div>
+                <p id="connectRouteNotice" class="muted"></p>
+                <details id="connectOptionsAdvanced"><summary>高级选项</summary><div class="request-gateway-fields">
                   <label class="field gateway-image-field"><span>使用的网关</span><select id="connectExisting"><option value="">新建网关</option></select></label>
                   <label class="field"><span>网关标识</span><input id="connectKey" maxlength="40" placeholder="例如 website-monitor"></label>
                   <label class="field"><span>监听端口</span><input id="connectPort" type="number" min="1024" max="65535" value="18080"></label>
@@ -105,18 +105,44 @@
                   <label class="field"><span>连通检测路径（不含域名）</span><input id="connectProbe" value="/" placeholder="例如 /cloud/health" maxlength="512"></label>
                   <label class="field gateway-image-field"><span>网关镜像</span><input id="connectImage" value="nginx:stable-alpine" maxlength="255"></label>
                 </div>
-                <p id="connectRouteNotice" class="muted"></p>
-                <button id="connectPreview" class="ghost-button compact-action" type="button">预览接入改动</button>
+                </details>
+                <button id="connectPreview" class="ghost-button compact-action" type="button">下一步</button>
               </div>
               <div id="connectReview" class="gateway-connect-review" hidden>
-                <h3>确认接入</h3><dl><dt>原入口</dt><dd id="connectBefore"></dd><dt>接入后</dt><dd id="connectAfter"></dd></dl>
+                <h3 id="connectReviewTitle">确认开启</h3><p id="connectReviewScope" class="muted"></p><details><summary>查看转发改动</summary><dl><dt>原入口</dt><dd id="connectBefore"></dd><dt>接入后</dt><dd id="connectAfter"></dd></dl></details>
                 <p id="connectReviewNotice" class="muted"></p>
-                <button id="connectApply" class="danger-button compact-action" type="button">确认并启用</button>
+                <button id="connectBack" class="ghost-button compact-action" type="button">返回选择</button>
+                <button id="connectApply" class="danger-button compact-action" type="button">开启记录</button>
               </div>
             </fieldset>
             <details id="connectHelp"><summary>不知道怎么填？查看查询指令</summary><div id="connectHelpItems"></div></details>
           </section>
-          <div id="gatewayEntries"></div>
+
+        <div id="requestData">
+        <div class="request-filters">
+          <label id="requestGatewayField">查看网站<select id="requestGatewayKey"><option value="">尚未添加网站</option></select></label>
+          <label>状态<select id="requestStatus"><option value="all">全部</option><option value="success">2xx / 3xx</option><option value="error">4xx / 5xx</option></select></label>
+          <label>查找路径<input id="requestSearch" type="search" placeholder="路径或域名" autocomplete="off"></label>
+          <button id="requestStopMonitoring" class="ghost-button compact-action" type="button" hidden>停止记录</button>
+        </div>
+        <p id="requestNotice" class="muted" role="status"></p>
+        <div id="requestRows" class="request-rows" aria-live="polite"></div>
+        </div>
+        <button id="manageRequestGateways" class="ghost-button compact-action request-advanced-toggle" type="button" aria-expanded="false" aria-controls="requestGatewayManager">高级设置</button>
+        <section id="requestGatewayManager" class="request-gateway-manager" hidden>
+          <h3>采集来源</h3>
+          <div class="request-filters">
+            <label>来源<select id="requestBackend"><option value="gateway">网站网关</option><option value="nginx">已有 Nginx 日志</option><option value="caddy">已有 Docker Caddy 日志</option></select></label>
+            <label id="requestContainerField" hidden>容器<input id="requestContainer" type="text" list="requestContainerOptions" placeholder="Caddy 容器名称" autocomplete="off"><datalist id="requestContainerOptions"></datalist></label>
+            <label>最近<select id="requestLimit"><option value="100">100 条</option><option value="300">300 条</option></select></label>
+            <button id="requestEnable" class="ghost-button compact-action" type="button" hidden>开启 Nginx 日志</button>
+            <button id="requestDisable" class="ghost-button compact-action" type="button" hidden>关闭 Nginx 日志</button>
+          </div>
+          <details id="gatewayMaintenance">
+            <summary>网关维护</summary>
+            <div class="panel-head"><h3>自定义转发入口</h3><div class="request-actions"><button id="gatewayRefresh" class="ghost-button compact-action" type="button">刷新状态</button><button id="gatewayAdd" class="ghost-button compact-action" type="button">手动新建</button></div></div>
+            <p id="gatewayFeedback" role="status"></p>
+            <div id="gatewayEntries"></div>
           <form id="requestGatewayForm" hidden>
             <h3 id="gatewayFormTitle">新增入口</h3>
             <div class="request-gateway-fields">
@@ -132,17 +158,8 @@
             <p id="gatewayNetworkNotice" class="muted" role="status"></p>
             <div class="request-actions"><button id="gatewaySave" class="danger-button compact-action" type="submit">保存配置</button><button id="gatewayCancel" class="ghost-button compact-action" type="button">取消</button></div>
           </form>
+          </details>
         </section>
-        <div class="request-filters">
-          <label>来源<select id="requestBackend"><option value="gateway">统一网关</option><option value="nginx">Nginx 日志</option><option value="caddy">Docker Caddy 日志</option></select></label>
-          <label id="requestGatewayField">入口<select id="requestGatewayKey"><option value="">尚无入口</option></select></label>
-          <label id="requestContainerField" hidden>容器<input id="requestContainer" type="text" list="requestContainerOptions" placeholder="Caddy 容器名称" autocomplete="off"><datalist id="requestContainerOptions"></datalist></label>
-          <label>状态<select id="requestStatus"><option value="all">全部</option><option value="success">2xx / 3xx</option><option value="error">4xx / 5xx</option></select></label>
-          <label>查找路径<input id="requestSearch" type="search" placeholder="路径或域名" autocomplete="off"></label>
-          <label>最近<select id="requestLimit"><option value="100">100 条</option><option value="300">300 条</option></select></label>
-        </div>
-        <p id="requestNotice" class="muted" role="status"></p>
-        <div id="requestRows" class="request-rows" aria-live="polite"></div>
       </section>
     </div>
 

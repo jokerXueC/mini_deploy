@@ -60,7 +60,11 @@ window.GatewayConnect = (() => {
     $('gatewayConnectClose').disabled = true;
     feedback.textContent = message;
     try { await operation(); }
-    catch (err) { feedback.textContent = err.message; $('connectHelp').open = true; }
+    catch (err) {
+      feedback.textContent = err.message;
+      $('connectHelp').open = true;
+      $(inspected ? 'connectOptionsAdvanced' : 'connectSourceAdvanced').open = true;
+    }
     finally {
       busy = false;
       $('gatewayConnectFields').disabled = false;
@@ -70,8 +74,10 @@ window.GatewayConnect = (() => {
   }
 
   async function discover() {
+    if (busy) return;
     invalidate(true);
     const current = version;
+    let autoInspectVersion = null;
     await work('正在检测代理入口…', async () => {
       const result = await fetchJson('gateway-connections/discover');
       if (current !== version) return;
@@ -82,25 +88,34 @@ window.GatewayConnect = (() => {
       if (sources.length === 1) {
         $('connectDetected').value = '0';
         showSource(sources[0]);
+        autoInspectVersion = version;
       }
+      $('connectDetectedField').hidden = sources.length === 1;
+      $('connectSourceAdvanced').open = !sources.length;
       feedback.textContent = sources.length ? `发现 ${sources.length} 个入口，请选择后读取网站规则。`
         : '没有找到可自动识别的入口，请根据下方查询结果填写。';
       if (result.errors?.length) feedback.textContent += ` ${result.errors.join('；')}`;
       if (!sources.length) $('connectHelp').open = true;
     });
+    if (autoInspectVersion === version && !panel.hidden) await inspectSource();
   }
 
   function chooseRoute() {
     invalidate();
     const route = inspected?.routes.find(item => item.id === $('connectRoute').value);
+    $('connectPreview').disabled = !route?.supported;
     $('connectInternalField').hidden = route?.kind !== 'static';
     adjustInternalPort();
     if (route) {
       $('connectRouteNotice').textContent = route.kind === 'static'
-        ? '静态文件仍由原 Caddy 提供；新增内部 HTTP 入口，不新增宿主机端口映射。'
-        : `原后端：${route.upstream}。Docker 服务名需选择与业务容器共有的网络。`;
+        ? `监控范围：${route.site} 的静态网站请求。`
+        : `监控范围：${route.site} · ${route.label}。其他转发规则不包含在内。`;
       if (!$('connectExisting').value) {
-        $('connectKey').value = ('web-' + route.site.toLowerCase().replace(/[^a-z0-9-]/g, '-')).slice(0, 40);
+        const base = ('web-' + route.site.toLowerCase().replace(/[^a-z0-9-]/g, '-')).slice(0, 35);
+        const keys = new Set(window.RequestGateway.list().map(entry => entry.key));
+        let key = base, suffix = 2;
+        while (keys.has(key)) key = `${base}-${suffix++}`;
+        $('connectKey').value = key;
         const match = route.label.match(/\/[A-Za-z0-9/_-]*\*/);
         $('connectProbe').value = match ? match[0].replace(/\*$/, '') : '/';
       }
@@ -110,6 +125,14 @@ window.GatewayConnect = (() => {
   $('gatewayConnectOpen').addEventListener('click', () => {
     if (busy) return;
     panel.hidden = false;
+    $('gatewayConnectTitle').textContent = '添加网站监控';
+    $('gatewayConnectFields').hidden = false;
+    $('connectHelp').hidden = false;
+    $('requestGatewayManager').hidden = true;
+    $('manageRequestGateways').setAttribute('aria-expanded', 'false');
+    $('connectOptionsAdvanced').open = false;
+    $('connectSourceAdvanced').open = false;
+    $('connectHelp').open = false;
     $('requestGatewayForm').hidden = true;
     discover();
   });
@@ -117,8 +140,8 @@ window.GatewayConnect = (() => {
   $('connectDiscover').addEventListener('click', discover);
   $('connectDetected').addEventListener('change', () => {
     const item = sources[Number($('connectDetected').value)];
-    if ($('connectDetected').value !== '' && item) showSource(item);
-    else invalidate(true);
+    if ($('connectDetected').value !== '' && item) { showSource(item); inspectSource(); }
+    else { invalidate(true); $('connectSourceAdvanced').open = true; }
   });
   sourceIds.forEach(id => $(id).addEventListener('input', () => {
     invalidate(true);
@@ -163,11 +186,11 @@ window.GatewayConnect = (() => {
     $('connectInternal').value = port;
   }
 
-  $('connectInspect').addEventListener('click', () => {
+  async function inspectSource() {
     if (busy) return;
     invalidate(true);
     const current = version, selected = source();
-    work('正在读取配置和网站规则…', async () => {
+    await work('正在读取网站…', async () => {
       const result = await postJsonBody('gateway-connections', {action: 'inspect', source: selected});
       await window.RequestGateway.refresh();
       if (current !== version) return;
@@ -180,18 +203,22 @@ window.GatewayConnect = (() => {
       }));
       $('connectNetwork').replaceChildren(new Option('请选择共有网络', ''), ...(result.networks || []).map(name => new Option(name === 'host' ? '服务器本机' : name, name)));
       if (result.networks?.length === 1) $('connectNetwork').value = result.networks[0];
+      $('connectOptionsAdvanced').open = result.networks?.length !== 1;
       $('connectExisting').replaceChildren(new Option('新建网关', ''), ...window.RequestGateway.list()
         .filter(entry => !entry.connection || entry.connection.state === 'not_connected')
         .map(entry => new Option(entry.name, entry.key)));
       ['connectKey', 'connectPort', 'connectImage'].forEach(id => $(id).disabled = false);
       $('connectPort').value = availablePort();
       const supported = (result.routes || []).filter(route => route.supported);
+      $('connectPreview').disabled = true;
       $('connectRouteFields').hidden = false;
       if (supported.length === 1) { $('connectRoute').value = supported[0].id; chooseRoute(); }
-      feedback.textContent = supported.length ? '请选择需要监控的规则，并预览接入改动。' : '没有可自动接入的规则，请查看规则说明和下方查询指引。';
+      feedback.textContent = supported.length ? '选择需要记录请求的网站。' : '没有可自动接入的网站，请查看规则说明和查询指引。';
+      if (supported.length && result.networks?.length !== 1) feedback.textContent += ' 检测到多个网络，请在高级选项中确认共有网络。';
       if (!supported.length) $('connectHelp').open = true;
     });
-  });
+  }
+  $('connectInspect').addEventListener('click', inspectSource);
 
   $('connectPreview').addEventListener('click', () => {
     if (busy || !inspected) return;
@@ -208,39 +235,47 @@ window.GatewayConnect = (() => {
       $('connectBefore').textContent = result.before_rule;
       $('connectAfter').textContent = result.after_rule;
       $('connectReviewNotice').textContent = result.notice;
+      $('connectReviewTitle').textContent = `开启 ${result.site} 的请求记录`;
+      $('connectReviewScope').textContent = $('connectRouteNotice').textContent;
       $('connectReview').hidden = false;
       feedback.textContent = '预览已生成，确认后才会改动代理配置。';
     });
   });
+  $('connectBack').addEventListener('click', () => { if (!busy) invalidate(); });
   $('connectApply').addEventListener('click', () => {
     if (busy || !plan) return;
     const current = version, reviewed = plan;
-    work('等待确认…', async () => {
-      const confirmed = await showConfirmDialog({title: '启用网站请求监控',
-        message: `${reviewed.after_rule}。${reviewed.notice}`, confirmText: '确认并启用', danger: true});
-      if (!confirmed || current !== version) { feedback.textContent = '未执行接入。'; return; }
+    work('正在开启记录…', async () => {
+      if (current !== version) return;
       feedback.textContent = '正在启动网关并应用入口配置，请等待…';
       try {
         await postJsonBody('gateway-connections', {action: 'apply', key: reviewed.gateway.key, token: reviewed.token, confirmed: true});
         invalidate(true);
-        feedback.textContent = '路由已配置接入。请访问所选网站或路径，再查看请求记录；原代理与网关均保留运行。';
+        feedback.textContent = '已开启，请访问网站后查看请求记录。';
       } finally { await window.RequestGateway.refresh(); }
+      panel.hidden = true;
+      window.NginxRequests?.view(reviewed.gateway.key);
     });
   });
 
   async function disconnect(entry) {
     if (busy) return;
     panel.hidden = false;
+    $('gatewayConnectTitle').textContent = '停止网站记录';
+    $('gatewayConnectFields').hidden = true;
+    $('connectHelp').hidden = true;
     await work('等待确认撤销…', async () => {
-      const confirmed = await showConfirmDialog({title: '撤销网站接入',
-        message: `恢复 ${entry.connection.site} 原有入口规则。Caddy 将重启，已有连接可能中断；网关保留运行，成功后可再停止或删除。`,
-        confirmText: '撤销接入', danger: true});
-      if (!confirmed) { feedback.textContent = '未执行撤销。'; return; }
+      const confirmed = await showConfirmDialog({title: '停止网站请求记录',
+        message: `恢复 ${entry.connection.site} 原有访问路径。${entry.connection.source?.kind === 'nginx' ? 'Nginx 将重载。' : '代理配置将重新应用，已有连接可能短暂中断。'} 网站继续提供服务，采集容器保留。`,
+        confirmText: '停止记录', danger: true});
+      if (!confirmed) { panel.hidden = true; return; }
       try {
         await postJsonBody('gateway-connections', {action: 'disconnect', key: entry.key, token: entry.connection.token, confirmed: true});
         invalidate(true);
         feedback.textContent = '原入口规则已恢复。网关仍保留，可按需停止或删除。';
       } finally { await window.RequestGateway.refresh(); }
+      panel.hidden = true;
+      window.NginxRequests?.refresh();
     });
   }
   return {disconnect, isBusy: () => busy};

@@ -515,6 +515,7 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
         ],
     }
     page.locator('#requestsViewTab').click()
+    page.locator('#manageRequestGateways').click()
     page.locator('#requestBackend').select_option('nginx', force=True)
     page.wait_for_selector('.request-row:not(.request-columns)')
     assert page.locator('.request-row:not(.request-columns)').count() == 2
@@ -538,6 +539,7 @@ def test_caddy_request_view_selects_and_filters(browser_page, width):
                                     'path': '/ok<script>alert(1)</script>', 'status': 200,
                                     'duration_ms': 12, 'upstream_ms': None}]}
     page.locator('#requestsViewTab').click()
+    page.locator('#manageRequestGateways').click()
     page.locator('#requestBackend').select_option('caddy', force=True)
     page.wait_for_selector('.request-row:not(.request-columns)')
     assert page.locator('#requestBackend').input_value() == 'caddy'
@@ -555,6 +557,7 @@ def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
     page.locator('#requestsViewTab').click()
     assert page.locator('#requestBackend').input_value() == 'gateway'
     page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayMaintenance > summary').click()
     page.locator('#gatewayAdd').click()
     page.locator('#gatewayKey').fill('aimore-api')
     page.locator('#gatewayName').fill('AimOre API <script>')
@@ -606,6 +609,7 @@ def test_gateway_save_error_keeps_form_values(browser_page):
     page.locator('#closeProjectModalBtn').click()
     page.locator('#requestsViewTab').click()
     page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayMaintenance > summary').click()
     page.locator('#gatewayAdd').click()
     page.locator('#gatewayKey').fill('api')
     page.locator('#gatewayName').fill('API')
@@ -625,13 +629,19 @@ def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp
     page.locator('#closeProjectModalBtn').click()
     page.set_viewport_size({'width': width, 'height': 950})
     page.locator('#requestsViewTab').click()
-    page.locator('#manageRequestGateways').click()
+    assert page.locator('#requestBackend').is_hidden()
+    assert page.locator('#gatewayAdd').is_hidden()
     page.locator('#gatewayConnectOpen').click()
     page.wait_for_function("document.querySelector('#connectContainer').value === 'edge'")
-    page.locator('#connectInspect').click()
     page.wait_for_selector('#connectRouteFields', state='visible')
+    assert page.locator('#connectContainer').is_hidden()
+    assert page.locator('#connectPort').is_hidden()
+    assert page.locator('#connectPreview').is_disabled()
+    page.locator('#connectRoute').select_option('api', force=True)
+    assert '/cloud/*' in page.locator('#connectRouteNotice').inner_text()
     page.locator('#connectRoute').select_option('static', force=True)
     assert page.locator('#connectNetwork').input_value() == 'app_default'
+    page.locator('#connectOptionsAdvanced > summary').click()
     assert page.locator('#connectInternalField').is_visible()
     page.locator('#connectPort').fill('18081')
     assert page.locator('#connectInternal').input_value() != '18081'
@@ -641,27 +651,33 @@ def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp
     page.locator('#connectPreview').click()
     page.wait_for_selector('#connectReview', state='visible')
     assert not any(p.get('action') == 'apply' for _, p in state['posts'])
+    page.locator('#connectBack').click()
     page.locator('#connectPort').fill('18083')
     assert page.locator('#connectReview').is_hidden()
     page.locator('#connectPreview').click()
     page.wait_for_selector('#connectReview', state='visible')
+    page.locator('#connectHelp summary').click()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=str(tmp_path / f'connection-review-{width}.png'), full_page=True)
-    page.locator('#connectApply').click()
-    page.locator('#confirmCancelBtn').click()
+    page.locator('#gatewayConnectClose').click()
     assert not any(p.get('action') == 'apply' for _, p in state['posts'])
+    page.locator('#gatewayConnectOpen').click()
+    page.wait_for_selector('#connectRouteFields', state='visible')
+    page.locator('#connectRoute').select_option('static', force=True)
+    page.locator('#connectPreview').click()
+    page.wait_for_selector('#connectReview', state='visible')
     page.locator('#connectApply').click()
-    page.locator('#confirmOkBtn').click()
-    page.wait_for_selector('[data-gateway-action="disconnect"]')
-    assert '路由已接入' in page.locator('#gatewayEntries').inner_text()
+    page.wait_for_selector('#requestStopMonitoring', state='visible')
+    assert page.locator('#gatewayConnectPanel').is_hidden()
+    assert 'site.test' in page.locator('#requestSource').inner_text()
     assert page.locator('[data-gateway-action="edit"]').is_disabled()
     assert page.locator('[data-gateway-action="stop"]').is_disabled()
     apply = next(p for _, p in state['posts'] if p.get('action') == 'apply')
     assert apply['confirmed'] is True and apply['token'] == 'reviewed-token'
-    page.locator('[data-gateway-action="disconnect"]').click()
+    page.locator('#requestStopMonitoring').click()
     page.locator('#confirmOkBtn').click()
     page.wait_for_selector('[data-gateway-action="disconnect"]', state='detached')
-    assert '尚未通过向导' in page.locator('#gatewayEntries').inner_text()
+    page.wait_for_selector('#requestStopMonitoring', state='hidden')
 
 
 def test_connection_errors_preserve_inputs_and_show_help(browser_page):

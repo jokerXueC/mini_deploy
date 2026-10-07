@@ -400,6 +400,27 @@ html[data-theme="light"] .theme-toggle-icon {
 #requestGatewayForm { padding: 18px 0 0; }
 .gateway-connect { padding: 18px 0; border-bottom: 1px solid var(--line); }
 .gateway-connect fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.gateway-connect details { margin: 14px 0; }
+.gateway-connect summary, #gatewayMaintenance > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.request-advanced-toggle { margin-top: 24px; }
+.page:has(#requestsView.active) .project-picker-row,
+.page:has(#requestsView.active) #redeployBtn,
+.page:has(#requestsView.active) #rollbackBtn,
+.page:has(#requestsView.active) #cancelDeployBtn,
+.page:has(#requestsView.active) #refreshBtn,
+.page:has(#requestsView.active) #projectActionHint,
+.page:has(#requestsView.active) .time-row { display: none; }
+.gateway-connect h3 { font-size: 16px; overflow-wrap: anywhere; }
+.request-section:has(#gatewayConnectPanel:not([hidden])) #requestData,
+.request-section:has(#gatewayConnectPanel:not([hidden])) #requestSource,
+.request-section:has(#gatewayConnectPanel:not([hidden])) #manageRequestGateways,
+.request-section:has(#gatewayConnectPanel:not([hidden])) #gatewayConnectOpen { display: none; }
+.request-section:has(#gatewayConnectPanel:not([hidden])) > .request-head { display: none; }
+.gateway-connect > .panel-head { flex-direction: row; align-items: center; justify-content: space-between; }
+.gateway-connect:has(#connectReview:not([hidden])) #connectRouteFields,
+.gateway-connect:has(#connectReview:not([hidden])) #connectSourceAdvanced,
+.gateway-connect:has(#connectReview:not([hidden])) #connectDetectedField { display: none; }
+#gatewayMaintenance > .panel-head { margin-top: 18px; }
 .gateway-connect-review { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--line); }
 .gateway-connect-review dl { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; font-size: 13px; }
 .gateway-connect-review dd { margin: 0; overflow-wrap: anywhere; }

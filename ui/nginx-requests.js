@@ -38,7 +38,7 @@ window.NginxRequests = (() => {
         if (version !== generation) return;
         const key = $('requestGatewayKey').value;
         result = key ? await fetchJson(`gateway-requests?key=${encodeURIComponent(key)}&limit=${$('requestLimit').value}`)
-          : {mode: 'gateway', records: [], notice: '尚未创建入口，请打开管理网关。'};
+          : {mode: 'gateway', records: [], notice: '尚未添加网站。'};
       } else {
         result = await fetchJson(`${backend}-requests?limit=${$('requestLimit').value}${backend === 'caddy' && $('requestContainer').value.trim() ? `&container=${encodeURIComponent($('requestContainer').value.trim())}` : ''}`);
       }
@@ -67,7 +67,16 @@ window.NginxRequests = (() => {
         }));
         if (result.container && !$('requestContainer').value.trim()) $('requestContainer').value = result.container;
       }
-      source.textContent = backend === 'gateway' ? `统一网关${result.container ? ` · ${result.container}` : ''}` : backend === 'caddy' ? `Docker Caddy${result.container ? ` · ${result.container}` : ''}` : result.mode === 'docker' ? `Docker Nginx · ${result.container}` : result.mode === 'local' ? '本机 Nginx' : '尚未接入 Nginx';
+      const entry = backend === 'gateway' ? window.RequestGateway.list().find(item => item.key === $('requestGatewayKey').value) : null;
+      const attached = entry?.connection?.state === 'connected';
+      const needsRecovery = entry?.connection && !['connected', 'not_connected'].includes(entry.connection.state);
+      source.textContent = backend === 'gateway'
+        ? attached ? `${entry.connection.site} · ${entry.state === 'running' ? '已开启' : '采集服务未运行'} · ${entry.connection.scope || '已接入的转发规则'}`
+          : needsRecovery ? `${entry.connection.site} · 接入操作待恢复`
+            : entry ? `自定义入口 · ${entry.name} · 仅记录经过该入口的请求` : '尚未开启网站请求记录'
+        : `正在查看已有${backend === 'caddy' ? ' Caddy' : ' Nginx'}日志${result.container ? ` · ${result.container}` : ''}`;
+      $('requestStopMonitoring').hidden = !entry?.connection || entry.connection.state === 'not_connected';
+      $('requestStopMonitoring').textContent = attached ? '停止记录' : '恢复原入口';
       notice.textContent = result.notice || '';
       $('requestEnable').hidden = backend !== 'nginx' || result.enabled || result.mode === 'none';
       $('requestDisable').hidden = backend !== 'nginx' || !result.enabled;
@@ -91,11 +100,16 @@ window.NginxRequests = (() => {
     source.textContent = '检查中';
     $('requestEnable').hidden = true;
     $('requestDisable').hidden = true;
+    $('requestStopMonitoring').hidden = true;
     if (pending) pendingRefresh = true;
     else refresh();
   }
 
   $('requestRefresh').addEventListener('click', refresh);
+  $('requestStopMonitoring').addEventListener('click', () => {
+    const entry = window.RequestGateway.list().find(item => item.key === $('requestGatewayKey').value);
+    if (entry?.connection && entry.connection.state !== 'not_connected') window.GatewayConnect.disconnect(entry);
+  });
   $('requestBackend').addEventListener('change', changeSource);
   $('requestContainer').addEventListener('change', changeSource);
   $('requestGatewayKey').addEventListener('change', changeSource);
@@ -133,5 +147,9 @@ window.NginxRequests = (() => {
     }
   });
   window.setInterval(refresh, 10000);
-  return {refresh};
+  return {refresh, view: key => {
+    $('requestBackend').value = 'gateway';
+    $('requestGatewayKey').value = key;
+    changeSource();
+  }};
 })();
