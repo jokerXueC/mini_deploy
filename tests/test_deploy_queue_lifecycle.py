@@ -118,6 +118,24 @@ def test_successful_deploy_records_history_and_cleans_runtime_state(
     assert released_locks == [91]
 
 
+def test_deploy_progress_state_writes_are_coalesced(monkeypatch):
+    writes = []
+    monkeypatch.setattr(agent, "_state", {
+        "current_deploy": {"status": "running", "phase": "starting", "started_ts": 1},
+        "queue_size": 0,
+    })
+    monkeypatch.setattr(agent, "_write_state", lambda: writes.append(1))
+    monkeypatch.setattr(agent, "_last_progress_state_write", 0.0)
+    clock = iter((100.0, 100.2, 101.1))
+    monkeypatch.setattr(agent.time, "monotonic", lambda: next(clock))
+
+    agent._update_current_deploy(phase="docker_build", phase_detail="开始构建")
+    agent._update_current_deploy(phase_detail="继续构建")
+    agent._update_current_deploy(phase_detail="构建完成")
+
+    assert len(writes) == 2
+
+
 def test_failure_advice_persists_with_its_deployment(monkeypatch, deploy_runtime):
     project, _ = deploy_runtime
     process = FakeProcess(returncode=1)

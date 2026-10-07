@@ -388,6 +388,7 @@ html[data-theme="light"] .theme-toggle-icon {
 .dashboard-view { display: none; }
 .dashboard-view.active { display: block; }
 .request-section { padding: 24px 0 40px; }
+.request-section [hidden] { display: none !important; }
 .request-head { align-items: center; }
 .request-head .muted { display: block; margin-top: 5px; }
 .request-actions, .request-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }

@@ -503,6 +503,7 @@ function projectState(project) {
   if (!project.enabled) return { label: '已禁用', level: 'neutral' };
   if (project.running) return { label: '部署中', level: 'running' };
   if (Number(project.queue_size || 0) > 0) return { label: '排队中', level: 'running' };
+  if (project.health?.status === 'failed') return { label: '健康检查失败', level: 'failed' };
   const last = project.last_deploy || {};
   if (last.status === 'success') return { label: '最近成功', level: 'success' };
   if (last.status === 'failed') return { label: '最近失败', level: 'failed' };
@@ -514,8 +515,8 @@ function projectRepoText(project) {
   return project.repo || project.project_dir || '未配置仓库地址';
 }
 
-function projectBadge(label, enabled) {
-  return `<span class="badge ${enabled ? 'success' : 'neutral'}">${label}</span>`;
+function projectBadge(label, enabled, level = 'success') {
+  return `<span class="badge ${enabled ? level : 'neutral'}">${label}</span>`;
 }
 
 function renderProjectLock(project, lock = {}) {
@@ -602,6 +603,9 @@ function renderProjectOverview(projects = [], agent = {}, lock = {}, state = {})
     const selected = selectedProjectKey === project.key || (!selectedProjectKey && projects.length === 1);
     const last = project.last_deploy || {};
     const head = project.short_head || shortSha(project.head);
+    const health = project.health || {};
+    const healthLabel = health.status === 'healthy' ? '健康正常' : health.status === 'failed' ? '健康失败' : health.status === 'pending' ? '健康检查中' : '未配置健康检查';
+    const healthLevel = health.status === 'healthy' ? 'success' : health.status === 'failed' ? 'failed' : 'neutral';
     return `
       <article class="project-row ${selected ? 'active' : ''}" data-project-key="${escapeHtml(project.key)}">
         <button class="project-select-area" type="button" data-project-select="${escapeHtml(project.key)}" aria-label="选择 ${escapeHtml(project.name || project.key)}">
@@ -615,6 +619,7 @@ function renderProjectOverview(projects = [], agent = {}, lock = {}, state = {})
           ${projectBadge(project.enabled ? '启用' : '禁用', project.enabled)}
           ${projectBadge(project.manual_deploy_enabled ? '手动部署' : '禁止手动', project.manual_deploy_enabled)}
           ${projectBadge(project.rollback_available ? '可回滚' : '无回滚', project.rollback_available)}
+          ${projectBadge(healthLabel, health.status !== 'not_configured', healthLevel)}
         </div>
         <div class="project-meta">
           <span>分支 <strong>${escapeHtml(project.branch || '-')}</strong></span>

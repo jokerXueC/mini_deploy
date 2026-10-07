@@ -24,6 +24,9 @@ mini_deploy receives Git webhooks, runs your project deploy script, and shows de
 - Generates per-project Nginx reverse proxy config for business domains
 - Manages uploaded PEM certificates for project domains from the UI: expiry, replacement, HTTPS activation and removal
 - Detects local and Docker Nginx, saves a shared runtime selection and checks each project's upstream connectivity
+- Reads request records from the selected Nginx or a local Docker Caddy container when JSON access logging is enabled
+- Deduplicates retried webhook deliveries and persists queued jobs across Agent restarts
+- Continuously probes configured health URLs and shows the latest result without automatically restarting business services
 - Uses a password-protected web UI
 - Requires no database
 
@@ -164,6 +167,11 @@ requires a local Docker Unix socket and directory bind mounts for `/etc/nginx/co
 and `/etc/mini-deploy/certificates`; bridge networks need a reachable backend service
 name or host address, not `127.0.0.1`. Existing containers are never recreated automatically.
 See [the quickstart](docs/QUICKSTART.zh-CN.md) and [new-container example](examples/nginx.compose.yml).
+
+If the server already uses Docker Caddy, do not install a second Nginx just for
+request monitoring. Select Docker Caddy in the panel's Request Records view and
+enable JSON access logging in the host-mounted Caddyfile. The panel reads
+`docker logs` and never rewrites an existing Caddy configuration.
 
 ## Important Boundary
 

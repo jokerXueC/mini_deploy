@@ -42,9 +42,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote_plus, urlparse
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 import certificates
+import caddy_requests
 import nginx_runtime
 import nginx_install
 import nginx_requests
@@ -128,9 +130,16 @@ LOG_TAIL_MAX_LINES = int(os.getenv("DEPLOY_LOG_TAIL_MAX_LINES", "5000"))
 LOG_DOWNLOAD_MAX_BYTES = int(os.getenv("DEPLOY_LOG_DOWNLOAD_MAX_BYTES", str(32 * 1024 * 1024)))
 SYSTEM_STATUS_CACHE_SECONDS = int(os.getenv("DEPLOY_SYSTEM_STATUS_CACHE_SECONDS", "5"))
 SYSTEM_METRIC_INTERVAL_SECONDS = int(os.getenv("DEPLOY_SYSTEM_METRIC_INTERVAL_SECONDS", str(30 * 60)))
+DOCKER_LOG_METRIC_INTERVAL_SECONDS = max(15, min(int(os.getenv("DEPLOY_DOCKER_LOG_METRIC_INTERVAL_SECONDS", "30")), 300))
+PROJECT_GIT_STATUS_CACHE_SECONDS = max(1, min(float(os.getenv("DEPLOY_PROJECT_GIT_STATUS_CACHE_SECONDS", "5")), 60))
+STATE_PROGRESS_WRITE_INTERVAL_SECONDS = max(0.2, min(float(os.getenv("DEPLOY_STATE_PROGRESS_WRITE_INTERVAL_SECONDS", "1")), 10))
 SYSTEM_METRIC_MAX_POINTS = int(os.getenv("DEPLOY_SYSTEM_METRIC_MAX_POINTS", "336"))
 NETWORK_MAX_MBPS = float(os.getenv("DEPLOY_NETWORK_MAX_MBPS", "100"))
 DOCKER_LOG_TAIL_MAX_LINES = int(os.getenv("DEPLOY_DOCKER_LOG_TAIL_MAX_LINES", "5000"))
+WEBHOOK_DEDUPE_LIMIT = max(50, min(int(os.getenv("DEPLOY_WEBHOOK_DEDUPE_LIMIT", "500")), 5000))
+WEBHOOK_DEDUPE_TTL_SECONDS = max(300, min(int(os.getenv("DEPLOY_WEBHOOK_DEDUPE_TTL_SECONDS", str(7 * 24 * 60 * 60))), 30 * 24 * 60 * 60))
+HEALTH_CHECK_INTERVAL_SECONDS = max(5, min(int(os.getenv("DEPLOY_HEALTH_CHECK_INTERVAL_SECONDS", "15")), 300))
+HEALTH_CHECK_TIMEOUT_SECONDS = max(1, min(float(os.getenv("DEPLOY_HEALTH_CHECK_TIMEOUT_SECONDS", "5")), 30))
 
 UI_PASSWORD_HASH = os.getenv("DEPLOY_UI_PASSWORD_HASH", "")
 UI_SESSION_SECRET = os.getenv("DEPLOY_UI_SESSION_SECRET", "").strip()
@@ -161,6 +170,7 @@ DEPLOY_PHASE_LABELS = {
     "canceling": "正在取消",
     "canceled": "已取消",
     "timeout": "部署超时",
+    "interrupted": "服务重启导致中断",
     "finished": "完成",
 }
 
@@ -458,6 +468,14 @@ _system_status_lock = threading.Lock()
 _notifications_lock = threading.Lock()
 _last_cpu_sample: tuple[int, int] | None = None
 _last_network_sample: tuple[float, int, int] | None = None
+_health_status_lock = threading.Lock()
+_health_status: dict[str, dict[str, Any]] = {}
+_docker_log_counts_lock = threading.Lock()
+_docker_log_counts: dict[str, dict[str, int]] = {}
+_project_git_status_lock = threading.Lock()
+_project_git_status_cache: dict[str, dict[str, Any]] = {}
+_project_rollback_cache: dict[str, dict[str, Any]] = {}
+_last_progress_state_write = 0.0
 _JOB_MAINTENANCE_LOCK_KEY = "_maintenance_lock_fd"
 _JOB_DEPLOY_LIFECYCLE_OWNER_KEY = "_deploy_lifecycle_owner"
 _JOB_INTERNAL_KEYS = frozenset({_JOB_MAINTENANCE_LOCK_KEY, _JOB_DEPLOY_LIFECYCLE_OWNER_KEY})
@@ -1237,6 +1255,7 @@ def _replace_projects(projects: dict[str, DeployProject]) -> None:
     with _projects_lock:
         PROJECTS = dict(projects)
         DEFAULT_PROJECT_KEY = next(iter(PROJECTS), "")
+    _invalidate_project_git_status_cache()
 
 
 def _save_and_reload_projects(projects: dict[str, DeployProject]) -> None:
@@ -1523,7 +1542,21 @@ def _read_state() -> None:
         return
     if isinstance(data, dict):
         with _state_lock:
+            interrupted = data.get("current_deploy")
+            history = list(data.get("history") or []) if isinstance(data.get("history"), list) else []
+            if isinstance(interrupted, dict) and interrupted.get("status") == "running":
+                interrupted = {
+                    **interrupted,
+                    "status": "interrupted",
+                    "phase": "interrupted",
+                    "phase_label": _phase_label("interrupted"),
+                    "finished_at": _now_text(),
+                    "exit_code": None,
+                    "error": "Agent 在部署执行期间重启，任务未自动续跑，请人工确认后重试",
+                }
+                history.insert(0, interrupted)
             _state.update(data)
+            _state["history"] = history[:MAX_HISTORY]
             _state["running"] = False
             _state["current_deploy"] = None
             _state["queue_size"] = 0
@@ -1536,6 +1569,7 @@ def _write_state() -> None:
             with _state_lock:
                 data = dict(_state)
                 data["queue_size"] = _jobs.qsize()
+                data["queued_jobs"] = _queued_jobs_snapshot()
             _atomic_write_private_text(
                 STATE_FILE,
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -1551,11 +1585,78 @@ def _update_state(**changes: Any) -> None:
     _write_state()
 
 
+def _webhook_delivery_id(headers: Any, payload: dict[str, Any]) -> str:
+    for name in ("X-GitHub-Delivery", "X-Gitlab-Event-UUID", "X-Gitea-Delivery", "X-Gitee-Delivery"):
+        value = str(headers.get(name, "") or "").strip()
+        if value:
+            return value[:200]
+    for key in ("delivery", "delivery_id", "event_id"):
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return value[:200]
+    return ""
+
+
+def _webhook_dedupe_key(project_key: str, ref: str, before: str, after: str,
+                        delivery_id: str, body: bytes) -> str:
+    identity = delivery_id or after or hashlib.sha256(body).hexdigest()
+    return f"{project_key}:{ref}:{identity}"
+
+
+def _prune_webhook_dedupe_locked(now: float | None = None) -> list[dict[str, Any]]:
+    current = time.time() if now is None else now
+    raw = _state.get("webhook_dedupe")
+    entries = raw if isinstance(raw, list) else []
+    fresh = [item for item in entries if isinstance(item, dict) and
+             isinstance(item.get("key"), str) and
+             isinstance(item.get("at"), (int, float)) and
+             0 <= current - float(item["at"]) <= WEBHOOK_DEDUPE_TTL_SECONDS]
+    fresh.sort(key=lambda item: float(item.get("at", 0)), reverse=True)
+    return fresh[:WEBHOOK_DEDUPE_LIMIT]
+
+
+def _reserve_webhook_delivery(key: str, job: dict[str, Any]) -> dict[str, Any] | None:
+    with _state_lock:
+        entries = _prune_webhook_dedupe_locked()
+        duplicate = next((item for item in entries if item.get("key") == key), None)
+        if duplicate:
+            _state["webhook_dedupe"] = entries
+            return dict(duplicate)
+        entries.insert(0, {"key": key, "at": time.time(), "status": "queued",
+                           "project_key": job.get("project_key", ""), "after": job.get("after", "")})
+        _state["webhook_dedupe"] = entries[:WEBHOOK_DEDUPE_LIMIT]
+    _write_state()
+    return None
+
+
+def _remove_webhook_delivery(key: str) -> None:
+    with _state_lock:
+        _state["webhook_dedupe"] = [item for item in _prune_webhook_dedupe_locked()
+                                     if item.get("key") != key]
+    _write_state()
+
+
+def _set_webhook_delivery_status(key: str, status: str) -> None:
+    if not key:
+        return
+    with _state_lock:
+        entries = _prune_webhook_dedupe_locked()
+        for item in entries:
+            if item.get("key") == key:
+                item["status"] = status
+                item["updated_at"] = time.time()
+                break
+        _state["webhook_dedupe"] = entries
+    _write_state()
+
+
 def _phase_label(phase: str | None) -> str:
     return DEPLOY_PHASE_LABELS.get(str(phase or "").strip(), str(phase or "") or "-")
 
 
 def _update_current_deploy(**changes: Any) -> None:
+    global _last_progress_state_write
+    should_write = False
     with _state_lock:
         current = _state.get("current_deploy")
         if not isinstance(current, dict) or current.get("status") != "running":
@@ -1581,7 +1682,14 @@ def _update_current_deploy(**changes: Any) -> None:
         if isinstance(started_ts, (int, float)):
             current["duration_seconds"] = round(max(time.time() - float(started_ts), 0), 1)
         _state["queue_size"] = _jobs.qsize()
-    _write_state()
+        phase_changed = bool(new_phase and old_phase and new_phase != old_phase)
+        force_write = phase_changed or new_phase in {"canceled", "timeout"}
+        monotonic_now = time.monotonic()
+        should_write = force_write or monotonic_now - _last_progress_state_write >= STATE_PROGRESS_WRITE_INTERVAL_SECONDS
+        if should_write:
+            _last_progress_state_write = monotonic_now
+    if should_write:
+        _write_state()
 
 
 def _close_current_phase(current: dict[str, Any], finished_ts: float) -> None:
@@ -1666,6 +1774,34 @@ def _run_git(args: list[str], project: DeployProject | None = None) -> str:
     except Exception:
         return ""
     return (proc.stdout or "").strip()
+
+
+def _project_git_status(project: DeployProject) -> dict[str, str]:
+    identity = (str(project.workdir), project.repo, project.branch)
+    now = time.monotonic()
+    with _project_git_status_lock:
+        cached = _project_git_status_cache.get(project.key)
+        if (cached and cached.get("identity") == identity and
+                now - float(cached.get("at") or 0) < PROJECT_GIT_STATUS_CACHE_SECONDS):
+            return dict(cached.get("value") or {})
+        revisions = _run_git(["rev-parse", "HEAD", "--short", "HEAD"], project).splitlines()
+        value = {
+            "head": revisions[0] if revisions else "",
+            "short_head": revisions[1] if len(revisions) > 1 else "",
+            "branch": _run_git(["branch", "--show-current"], project),
+        }
+        _project_git_status_cache[project.key] = {"at": now, "identity": identity, "value": value}
+        return dict(value)
+
+
+def _invalidate_project_git_status_cache(project_key: str | None = None) -> None:
+    with _project_git_status_lock:
+        if project_key:
+            _project_git_status_cache.pop(project_key, None)
+            _project_rollback_cache.pop(project_key, None)
+        else:
+            _project_git_status_cache.clear()
+            _project_rollback_cache.clear()
 
 
 def _system_metric_history() -> list[dict[str, Any]]:
@@ -2874,6 +3010,24 @@ def _enqueue_job(job: dict[str, Any]) -> None:
         _release_maintenance_lock(descriptor)
 
 
+def _restore_queued_jobs() -> int:
+    with _state_lock:
+        queued = list(_state.get("queued_jobs") or []) if isinstance(_state.get("queued_jobs"), list) else []
+        _state["queued_jobs"] = []
+    restored = 0
+    for job in queued[:_jobs.maxsize]:
+        if not isinstance(job, dict) or not job.get("project_key"):
+            continue
+        try:
+            _enqueue_job(dict(job))
+            restored += 1
+        except (_MaintenanceActiveError, _MaintenanceLockError, queue.Full, RuntimeError) as exc:
+            _log(f"queued deploy restore skipped: {exc}")
+    if restored or queued:
+        _update_state(queue_size=_jobs.qsize())
+    return restored
+
+
 def _dequeue_job() -> dict[str, Any]:
     while True:
         with _jobs_admin_lock:
@@ -3100,6 +3254,11 @@ def _run_command(command: list[str], timeout: float = 3.0) -> tuple[int, str]:
         return 1, str(exc)
 
 
+def _docker_log_counts_snapshot() -> dict[str, dict[str, int]]:
+    with _docker_log_counts_lock:
+        return {key: dict(value) for key, value in _docker_log_counts.items()}
+
+
 def _docker_status() -> dict[str, Any]:
     if not shutil.which("docker"):
         return {"available": False, "error": "docker command not found", "containers": []}
@@ -3171,22 +3330,54 @@ def _docker_status() -> dict[str, Any]:
             target["memory_usage"] = str(item.get("MemUsage") or "")
             target["net_io"] = str(item.get("NetIO") or "")
 
-    error_matcher, _ = _docker_log_matcher({"level": "error", "keyword": "", "regex": False, "context": 0})
-    warn_matcher, _ = _docker_log_matcher({"level": "warn", "keyword": "", "regex": False, "context": 0})
+    log_counts = _docker_log_counts_snapshot()
     for container in containers:
-        name = container.get("name") or container.get("id")
-        if not name:
-            continue
-        try:
-            lines = _docker_logs(str(name), tail=200)
-        except Exception:
-            continue
-        if error_matcher is not None:
-            container["recent_error_count"] = sum(1 for line in lines if error_matcher(line))
-        if warn_matcher is not None:
-            container["recent_warn_count"] = sum(1 for line in lines if warn_matcher(line))
+        counts = log_counts.get(str(container.get("id") or ""), {})
+        container["recent_error_count"] = int(counts.get("error", 0) or 0)
+        container["recent_warn_count"] = int(counts.get("warn", 0) or 0)
 
     return {"available": True, "error": "" if stats_code == 0 else stats_output, "containers": containers}
+
+
+def _sample_docker_log_counts() -> None:
+    global _docker_log_counts
+    if not shutil.which("docker"):
+        with _docker_log_counts_lock:
+            _docker_log_counts = {}
+        return
+    code, output = _run_command(["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"], timeout=4.0)
+    if code != 0:
+        return
+    error_matcher, _ = _docker_log_matcher({"level": "error", "keyword": "", "regex": False, "context": 0})
+    warn_matcher, _ = _docker_log_matcher({"level": "warn", "keyword": "", "regex": False, "context": 0})
+    counts: dict[str, dict[str, int]] = {}
+    for line in output.splitlines():
+        try:
+            container_id = str(json.loads(line).get("ID") or "")
+        except (TypeError, ValueError):
+            continue
+        if not re.fullmatch(r"[a-f0-9]{64}", container_id):
+            continue
+        try:
+            lines = _docker_logs(container_id, tail=200)
+        except Exception:
+            continue
+        counts[container_id] = {
+            "error": sum(1 for item in lines if error_matcher and error_matcher(item)),
+            "warn": sum(1 for item in lines if warn_matcher and warn_matcher(item)),
+        }
+    with _docker_log_counts_lock:
+        _docker_log_counts = counts
+
+
+def _docker_log_metric_sampler() -> None:
+    time.sleep(2)
+    while True:
+        try:
+            _sample_docker_log_counts()
+        except Exception as exc:  # noqa: BLE001 - sampling must survive transient Docker errors
+            _log(f"docker log metric sample failed: {exc}")
+        time.sleep(DOCKER_LOG_METRIC_INTERVAL_SECONDS)
 
 
 def _docker_container_names() -> set[str]:
@@ -3400,25 +3591,47 @@ def _usable_commit(value: Any) -> str:
 
 
 def _commit_exists(project: DeployProject, commit: str) -> bool:
-    if not commit:
-        return False
+    return commit in _commits_exist(project, [commit])
+
+
+def _commits_exist(project: DeployProject, commits: list[str]) -> set[str]:
+    candidates = []
+    seen = set()
+    for commit in commits:
+        value = _usable_commit(commit)
+        if value and value not in seen:
+            seen.add(value)
+            candidates.append(value)
+    if not candidates:
+        return set()
     try:
         proc = subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            ["git", "cat-file", "--batch-check"],
             cwd=str(project.workdir),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            input="".join(f"{commit}^{{commit}}\n" for commit in candidates),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             timeout=3,
             check=False,
         )
-        return proc.returncode == 0
+        if proc.returncode != 0:
+            return set()
+        result = set()
+        for commit, line in zip(candidates, (proc.stdout or "").splitlines()):
+            fields = line.split(maxsplit=2)
+            if len(fields) >= 2 and fields[1] == "commit":
+                result.add(commit)
+        return result
     except Exception:
-        return False
+        return set()
 
 
-def _project_rollback_target(state: dict[str, Any], project: DeployProject) -> str:
+def _project_rollback_target(state: dict[str, Any], project: DeployProject, head: str | None = None) -> str:
     try:
-        head = _usable_commit(_run_git(["rev-parse", "HEAD"], project))
+        head = _usable_commit(_run_git(["rev-parse", "HEAD"], project) if head is None else head)
     except Exception:
         head = ""
     successful = [
@@ -3429,16 +3642,39 @@ def _project_rollback_target(state: dict[str, Any], project: DeployProject) -> s
         return ""
     latest = successful[0]
     before = _usable_commit(latest.get("before"))
-    if before and before != head and _commit_exists(project, before):
-        return before
-    for item in successful[1:]:
-        after = _usable_commit(item.get("after"))
-        if after and after != head and _commit_exists(project, after):
-            return after
+    candidates = []
+    if before and before != head:
+        candidates.append(before)
+    candidates.extend(
+        after for item in successful[1:]
+        if (after := _usable_commit(item.get("after"))) and after != head
+    )
+    existing = _commits_exist(project, candidates)
+    for candidate in candidates:
+        if candidate in existing:
+            return candidate
     return ""
 
 
-def _project_runtime_status(state: dict[str, Any], project: DeployProject, queued_jobs: list[dict[str, Any]]) -> dict[str, Any]:
+def _project_rollback_target_cached(state: dict[str, Any], project: DeployProject, head: str | None = None) -> str:
+    history_identity = tuple(
+        (item.get("status"), item.get("before"), item.get("after"))
+        for item in _project_history(state, project)
+    )
+    identity = (str(project.workdir), project.repo, project.branch, head or "", history_identity)
+    now = time.monotonic()
+    with _project_git_status_lock:
+        cached = _project_rollback_cache.get(project.key)
+        if (cached and cached.get("identity") == identity and
+                now - float(cached.get("at") or 0) < PROJECT_GIT_STATUS_CACHE_SECONDS):
+            return str(cached.get("value") or "")
+        value = _project_rollback_target(state, project, head=head)
+        _project_rollback_cache[project.key] = {"at": now, "identity": identity, "value": value}
+        return value
+
+
+def _project_runtime_status(state: dict[str, Any], project: DeployProject,
+                            queued_jobs: list[dict[str, Any]], head: str | None = None) -> dict[str, Any]:
     history = _project_history(state, project)
     current = state.get("current_deploy")
     running = bool(
@@ -3448,7 +3684,7 @@ def _project_runtime_status(state: dict[str, Any], project: DeployProject, queue
     )
     queued = sum(1 for job in queued_jobs if (job.get("project_key") or "default") == project.key)
     last_deploy = next((item for item in history if item.get("status") != "running"), None)
-    rollback_target = _project_rollback_target(state, project)
+    rollback_target = _project_rollback_target_cached(state, project, head=head)
     return {
         "enabled": project.enabled,
         "manual_deploy_enabled": project.manual_deploy_enabled,
@@ -3695,6 +3931,20 @@ def _alerts_payload(system: dict[str, Any], state: dict[str, Any], lock: dict[st
         if error_count > 0:
             alerts.append(_alert("warning", f"Container has recent error logs: {name}", f"{error_count} error lines in latest 200 lines", "docker", f"docker logs --tail=200 {name}"))
 
+    with _projects_lock:
+        projects = list(PROJECTS.values())
+    for project in projects:
+        if not project.enabled or not project.health_url:
+            continue
+        health = _health_status_for(project)
+        if health.get("status") != "failed":
+            continue
+        detail = str(health.get("detail") or "健康地址没有返回正常响应")
+        duration = health.get("duration_ms")
+        if isinstance(duration, (int, float)):
+            detail = f"{detail} · {duration:g}ms"
+        alerts.append(_alert("critical", f"健康检查失败：{project.name}", detail, "health"))
+
     current = state.get("current_deploy") if isinstance(state.get("current_deploy"), dict) else {}
     duration = current.get("duration_seconds")
     if lock.get("locked") and isinstance(duration, (int, float)) and duration > 600:
@@ -3755,6 +4005,95 @@ def _events_payload(state: dict[str, Any], system: dict[str, Any], alerts: list[
     for alert in alerts[:12]:
         events.append(_event_item("alert", str(alert.get("level") or "warning"), str(alert.get("title") or "Alert"), str(alert.get("detail") or ""), str(alert.get("at") or ""), str(alert.get("source") or "alert")))
     return events[:60]
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+_HEALTH_OPENER = build_opener(_NoRedirectHandler)
+
+
+def _probe_health_url(project: DeployProject) -> dict[str, Any]:
+    url = project.health_url.strip()
+    checked_at = _now_text()
+    started = time.monotonic()
+    if not url:
+        return {"status": "not_configured", "code": None, "duration_ms": None,
+                "checked_at": checked_at, "detail": "未配置健康检查地址"}
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError("健康检查地址必须是没有账号密码和片段的 HTTP/HTTPS 地址")
+        request = Request(url, headers={"User-Agent": "mini_deploy-health-check"}, method="GET")
+        with _HEALTH_OPENER.open(request, timeout=HEALTH_CHECK_TIMEOUT_SECONDS) as response:
+            code = int(response.status)
+            response.read(512)
+        ok = 200 <= code < 400
+        return {"status": "healthy" if ok else "failed", "code": code,
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "checked_at": checked_at, "detail": "HTTP 响应正常" if ok else f"HTTP 状态码 {code}"}
+    except HTTPError as exc:
+        return {"status": "failed", "code": int(exc.code),
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "checked_at": checked_at, "detail": f"HTTP 状态码 {exc.code}"}
+    except (OSError, URLError, ValueError) as exc:
+        return {"status": "failed", "code": None,
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "checked_at": checked_at, "detail": str(exc)[:240]}
+
+
+def _health_status_for(project: DeployProject) -> dict[str, Any]:
+    if not project.health_url:
+        return {"status": "not_configured", "code": None, "duration_ms": None,
+                "checked_at": None, "detail": "未配置健康检查地址"}
+    with _health_status_lock:
+        cached = _health_status.get(project.key)
+        return dict(cached) if cached else {
+            "status": "pending", "code": None, "duration_ms": None,
+            "checked_at": None, "detail": "等待首次检查",
+        }
+
+
+def _health_transition_notification(project: DeployProject, previous: dict[str, Any] | None,
+                                    current: dict[str, Any]) -> tuple[str, str] | None:
+    old_status = str((previous or {}).get("status") or "")
+    new_status = str(current.get("status") or "")
+    if old_status not in {"healthy", "failed"} or new_status not in {"healthy", "failed"}:
+        return None
+    if old_status == new_status:
+        return None
+    if new_status == "healthy":
+        title = f"mini_deploy 健康检查已恢复：{project.name}"
+        detail = "健康地址已恢复正常响应"
+    else:
+        title = f"mini_deploy 健康检查失败：{project.name}"
+        detail = str(current.get("detail") or "健康地址没有返回正常响应")
+    code = current.get("code")
+    if code is not None:
+        detail += f"；HTTP 状态码 {code}"
+    duration = current.get("duration_ms")
+    if isinstance(duration, (int, float)):
+        detail += f"；耗时 {duration:g}ms"
+    return title, detail
+
+
+def _health_check_sampler() -> None:
+    while True:
+        with _projects_lock:
+            projects = list(PROJECTS.values())
+        for project in projects:
+            if not project.enabled or not project.health_url:
+                continue
+            result = _probe_health_url(project)
+            with _health_status_lock:
+                previous = _health_status.get(project.key)
+                _health_status[project.key] = result
+            notification = _health_transition_notification(project, previous, result)
+            if notification:
+                _send_notifications_async(*notification)
+        time.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
 
 
 def _manual_deploy_job(actor: str, project: DeployProject) -> dict[str, str]:
@@ -3882,8 +4221,12 @@ def _status_payload() -> dict[str, Any]:
     default_project = projects.get(default_key)
     queued_jobs = _queued_jobs_snapshot()
     project_payloads = []
+    git_by_project: dict[str, dict[str, str]] = {}
     for project in projects.values():
-        runtime = _project_runtime_status(state, project, queued_jobs)
+        git = _project_git_status(project)
+        head = git["head"]
+        git_by_project[project.key] = git
+        runtime = _project_runtime_status(state, project, queued_jobs, head=head)
         project_payloads.append({
             "key": project.key,
             "name": project.name,
@@ -3892,10 +4235,11 @@ def _status_payload() -> dict[str, Any]:
             "project_dir": str(project.workdir),
             "deploy_script": project.script,
             "health_url": project.health_url,
+            "health": _health_status_for(project),
             **runtime,
-            "head": _run_git(["rev-parse", "HEAD"], project),
-            "short_head": _run_git(["rev-parse", "--short", "HEAD"], project),
-            "git_branch": _run_git(["branch", "--show-current"], project),
+            "head": git["head"],
+            "short_head": git["short_head"],
+            "git_branch": git["branch"],
         })
     system_payload = _system_status_payload()
     lock = _deploy_lock_status(state)
@@ -3914,11 +4258,7 @@ def _status_payload() -> dict[str, Any]:
             "projects_config_exists": PROJECTS_CONFIG_FILE.exists(),
             "ui_auth_configured": bool(UI_PASSWORD_HASH and UI_SESSION_SECRET),
         },
-        "git": {
-            "head": _run_git(["rev-parse", "HEAD"], default_project) if default_project else "",
-            "short_head": _run_git(["rev-parse", "--short", "HEAD"], default_project) if default_project else "",
-            "branch": _run_git(["branch", "--show-current"], default_project) if default_project else "",
-        },
+        "git": git_by_project.get(default_key, {"head": "", "short_head": "", "branch": ""}),
         "projects": project_payloads,
         "default_project": default_key,
         "system": system_payload,
@@ -4167,6 +4507,8 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
         _log(f"deploy skipped because project no longer exists project={project_key} after={job.get('after')}")
         _release_deploy_worker_lifecycle()
         return
+    dedupe_key = str(job.get("dedupe_key") or "")
+    _set_webhook_delivery_status(dedupe_key, "running")
     try:
         action = str(job.get("action") or "deploy")
         script_path = _project_script_path(project, action=action)
@@ -4320,7 +4662,9 @@ def _run_deploy_locked(job: dict[str, Any]) -> None:
             entry["diagnosis"] = project_guidance.diagnose(
                 "\n".join([*list(diagnostic_tail), diagnostic_error]), exit_code=exit_code,
             )
+        _invalidate_project_git_status_cache(project.key)
         _append_history(entry)
+        _set_webhook_delivery_status(dedupe_key, entry["status"])
         _notify_deploy_finished(entry)
         _release_deploy_worker_lifecycle()
 
@@ -4665,6 +5009,16 @@ class Handler(BaseHTTPRequestHandler):
                     self._write_json(200, _nginx_requests_payload(count))
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "nginx_requests_failed", "detail": str(exc)})
+            return
+        if path == "/caddy-requests":
+            if self._require_auth_json():
+                try:
+                    query = parse_qs(parsed.query)
+                    count = int(query.get("limit", ["100"])[0])
+                    container = query.get("container", [""])[0]
+                    self._write_json(200, caddy_requests.recent(count, container))
+                except (ValueError, OSError) as exc:
+                    self._write_json(400, {"error": "caddy_requests_failed", "detail": str(exc)})
             return
         if path == "/projects-config/doctor":
             if self._require_auth_json():
@@ -5412,17 +5766,36 @@ class Handler(BaseHTTPRequestHandler):
             "actor": self.headers.get("X-Gitee-Event", "") or self.client_address[0],
             **_extract_commit_details(payload),
         }
+        delivery_id = _webhook_delivery_id(self.headers, payload)
+        dedupe_key = _webhook_dedupe_key(
+            project.key, ref, str(job.get("before") or ""), str(job.get("after") or ""), delivery_id, body,
+        )
+        job["dedupe_key"] = dedupe_key
+        duplicate = _reserve_webhook_delivery(dedupe_key, job)
+        if duplicate:
+            _log(f"webhook duplicate ignored project={project.key} key={dedupe_key[:80]}")
+            self._write_json(202, {"status": "duplicate", "project": project.key,
+                                   "queue_size": _jobs.qsize(), "previous": duplicate.get("status", "queued")})
+            return
         try:
             _enqueue_job(job)
         except _MaintenanceActiveError:
+            _remove_webhook_delivery(dedupe_key)
             self._write_json(503, {"error": "maintenance_in_progress"})
             return
         except _MaintenanceLockError as exc:
+            _remove_webhook_delivery(dedupe_key)
             _log(f"webhook rejected because maintenance lock is unavailable: {exc}")
             self._write_json(503, {"error": "maintenance_lock_unavailable"})
             return
         except queue.Full:
+            _remove_webhook_delivery(dedupe_key)
             self._write_json(429, {"error": "deploy_queue_full"})
+            return
+        except RuntimeError as exc:
+            _remove_webhook_delivery(dedupe_key)
+            _log(f"webhook enqueue failed project={project.key}: {exc}")
+            self._write_json(503, {"error": "deploy_queue_unavailable"})
             return
 
         _update_state(last_webhook_at=_now_text(), queue_size=_jobs.qsize())
@@ -5636,11 +6009,16 @@ def main() -> None:
         raise SystemExit(f"maintenance lock is unavailable: {exc}") from exc
 
     _read_state()
+    restored_jobs = _restore_queued_jobs()
+    if restored_jobs:
+        _log(f"restored queued deploy jobs count={restored_jobs}")
     if ALLOW_QUERY_WEBHOOK_TOKEN:
         _log("security warning: query-string webhook tokens are enabled and may leak through access logs")
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_realtime_metric_sampler, name="realtime-metric-sampler", daemon=True).start()
     threading.Thread(target=_system_metric_sampler, name="system-metric-sampler", daemon=True).start()
+    threading.Thread(target=_docker_log_metric_sampler, name="docker-log-metric-sampler", daemon=True).start()
+    threading.Thread(target=_health_check_sampler, name="health-check-sampler", daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     _log(f"deploy agent listening on {HOST}:{PORT}, projects={len(PROJECTS)} default={DEFAULT_PROJECT_KEY}")
     server.serve_forever()

@@ -1,6 +1,42 @@
 from collections import deque
+import json
 
 import agent
+
+
+def test_docker_status_uses_background_log_counts(monkeypatch):
+    container_id = "a" * 64
+    ps_line = json.dumps({
+        "ID": container_id,
+        "Names": "api",
+        "Image": "example/api:latest",
+        "State": "running",
+        "Status": "Up 2 hours",
+        "Ports": "",
+        "Labels": "",
+    })
+    monkeypatch.setattr(agent.shutil, "which", lambda _: "docker")
+    monkeypatch.setattr(agent, "_docker_log_counts", {
+        container_id: {"error": 3, "warn": 5},
+    })
+
+    def run(command, **_kwargs):
+        if command[1] == "ps":
+            return 0, ps_line
+        if command[1] == "stats":
+            return 0, ""
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(agent, "_run_command", run)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("status requests must not read container logs")
+
+    monkeypatch.setattr(agent, "_docker_logs", forbidden)
+
+    container = agent._docker_status()["containers"][0]
+    assert container["recent_error_count"] == 3
+    assert container["recent_warn_count"] == 5
 
 
 def test_realtime_samples_are_bounded_independent_and_do_not_write_disk(monkeypatch):

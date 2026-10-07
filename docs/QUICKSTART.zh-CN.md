@@ -132,6 +132,17 @@ api.example.com -> http://127.0.0.1:8001
 
 需要查看访问情况时，先在 **域名与证书** 接入本机或 Docker Nginx，再打开 **请求记录** 点击“开启记录”。面板只显示所选 Nginx 启用后的新请求、状态与耗时，不读取旧日志或应用内部接口；记录路径不含查询参数、请求体和 Cookie。本机写入 `/var/log/nginx/mini-deploy-requests.log`，请按服务器日志轮转策略清理；Docker 从 `docker logs` 读取，需使用支持读取的日志驱动。站点自行设置 `access_log` 时可能覆盖面板的记录配置。切换 Nginx 实例前，先在请求记录页关闭记录；关闭不会删除已写入的日志。
 
+如果现有入口是 **Docker Caddy**，不用安装 Nginx。在 **请求记录 → 来源** 选择 Docker Caddy；容器名含 `caddy` 时会自动识别，其他名称可手动填写。面板只读容器日志，不修改 Caddyfile。若页面提示没有访问日志，在现有站点块加入下面的 Caddy 原生配置（已有 `log` 块则修改原块，不要重复添加）：
+
+```caddyfile
+log {
+    output stdout
+    format json
+}
+```
+
+先用 `docker inspect 容器名 --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'` 找到宿主机挂载的 Caddyfile，并备份后编辑；不要只改容器内部文件。然后执行 `docker exec 容器名 caddy validate --config /etc/caddy/Caddyfile`，检查通过后执行 `docker exec 容器名 caddy reload --config /etc/caddy/Caddyfile`。若你的镜像使用其他配置路径或禁用了 Caddy 管理 API，请按原有 Compose 流程验证和重启。新请求经过该 Caddy 容器后才会显示；页面不回显查询参数、请求体或 Cookie，容器原始日志仍按 Docker 日志驱动配置保留。
+
 如果勾选“业务域名申请 HTTPS”，本机模式会在服务器已安装 certbot 时尝试申请证书；Docker 模式请在证书页上传证书。没有 HTTPS 时，HTTP 访问仍然可用。
 
 ## 重要边界
@@ -155,6 +166,10 @@ pip install -r requirements.txt
 systemctl restart fastapi-demo
 curl -fsS http://127.0.0.1:8001/health
 ```
+
+项目配置了健康检查地址后，面板会后台定时检查并在项目卡片显示“健康正常 / 健康失败”。它只报告状态，不会因为一次失败自动重启业务；部署脚本中的健康检查仍然是发布是否成功的重要依据。
+
+同一个 Push WebHook 被代码平台重试时，面板会按 Delivery ID 或提交标识去重，不会重复入队。Agent 重启后会恢复已经保存但尚未执行的队列任务；正在执行的任务会标记为中断，需要人工确认后重新部署。
 
 但是 `fastapi-demo.service` 这种服务文件仍然属于你的业务项目配置。mini_deploy 可以给模板和检查，但不能保证自动生成适合所有项目的 service。
 
@@ -253,7 +268,7 @@ python3 /opt/mini_deploy/scripts/verify_backup.py \
 
 Agent、安装器和独立备份通过 `/run/mini-deploy-agent/maintenance.lock` 协调。部署或项目回滚任务从进入队列起到结束都持有共享锁；安装或备份持有独占维护锁时，新 WebHook、手动部署和项目回滚触发会返回 HTTP `503`，配置、状态和审计写入会等待维护结束。systemd 使用 `RuntimeDirectoryPreserve=yes` 在服务重启时保留这个 root 私有运行目录，并在服务器重启后重新创建。`/run/mini-deploy-agent` 仍是临时运行目录，不应存放持久数据。
 
-当前版本尚未完成版本目录切换、失败自动回滚、恢复、版本回滚和卸载命令，生产升级前仍需保留可用的服务器快照并查看[开源开发路线图](ROADMAP.zh-CN.md)。
+当前版本仍未完成版本目录切换、完整失败自动回滚、恢复、版本回滚和卸载命令，生产升级前仍需保留可用的服务器快照并查看[开源开发路线图](ROADMAP.zh-CN.md)。安装失败会尽力重新启动升级前的 Agent，但不会自动回滚所有业务文件。
 
 项目部署日志在面板里可以直接看，也可以看你配置的日志文件。
 

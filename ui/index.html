@@ -71,7 +71,7 @@
     <div id="requestsView" class="dashboard-view">
       <section class="request-section">
         <div class="panel-head request-head">
-          <div><h2>Nginx 请求</h2><span id="requestSource" class="muted">检查中</span></div>
+          <div><h2>请求记录</h2><span id="requestSource" class="muted">检查中</span></div>
           <div class="request-actions">
             <button id="requestEnable" class="ghost-button compact-action" type="button" hidden>开启记录</button>
             <button id="requestDisable" class="ghost-button compact-action" type="button" hidden>关闭记录</button>
@@ -79,6 +79,8 @@
           </div>
         </div>
         <div class="request-filters">
+          <label>来源<select id="requestBackend"><option value="nginx">Nginx</option><option value="caddy">Docker Caddy</option></select></label>
+          <label id="requestContainerField" hidden>容器<input id="requestContainer" type="text" list="requestContainerOptions" placeholder="Caddy 容器名称" autocomplete="off"><datalist id="requestContainerOptions"></datalist></label>
           <label>状态<select id="requestStatus"><option value="all">全部</option><option value="success">2xx / 3xx</option><option value="error">4xx / 5xx</option></select></label>
           <label>查找路径<input id="requestSearch" type="search" placeholder="路径或域名" autocomplete="off"></label>
           <label>最近<select id="requestLimit"><option value="100">100 条</option><option value="300">300 条</option></select></label>

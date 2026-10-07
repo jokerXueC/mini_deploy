@@ -121,6 +121,35 @@ def test_project_webhook_rejects_missing_or_incorrect_secret(project: agent.Depl
     assert not agent._valid_signature_for_project(project_without_secret, {}, BODY, {})
 
 
+def test_webhook_delivery_key_prefers_platform_delivery_id() -> None:
+    payload = {"after": "commit-a"}
+    first = agent._webhook_delivery_id({"X-GitHub-Delivery": "delivery-1"}, payload)
+    fallback = agent._webhook_delivery_id({}, payload)
+    assert first == "delivery-1"
+    assert fallback == ""
+    assert agent._webhook_dedupe_key("api", "refs/heads/main", "before", "after", first, BODY) != \
+        agent._webhook_dedupe_key("api", "refs/heads/main", "before", "after", "delivery-2", BODY)
+
+
+def test_webhook_delivery_reservation_is_idempotent(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(agent, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(agent, "_write_state", lambda: None)
+    with agent._state_lock:
+        previous = agent._state.get("webhook_dedupe")
+    with agent._state_lock:
+        agent._state["webhook_dedupe"] = []
+    try:
+        job = {"project_key": "api", "after": "commit-a"}
+        assert agent._reserve_webhook_delivery("api:commit-a", job) is None
+        duplicate = agent._reserve_webhook_delivery("api:commit-a", job)
+        assert duplicate and duplicate["status"] == "queued"
+        agent._set_webhook_delivery_status("api:commit-a", "success")
+        assert agent._reserve_webhook_delivery("api:commit-a", job)["status"] == "success"
+    finally:
+        with agent._state_lock:
+            agent._state["webhook_dedupe"] = previous
+
+
 @pytest.mark.parametrize("weak_secret", ["x" * 31, "replace-with-a-long-random-token"])
 def test_project_webhook_rejects_an_exact_match_for_a_weak_secret(
     project: agent.DeployProject,

@@ -84,6 +84,9 @@ def browser_page():
                 result = {'items': [dict(title='Project is disabled', detail='', level='critical')]}
             elif path == '/nginx-requests':
                 result = state.get('nginx_requests', {'mode': 'none', 'enabled': False, 'records': [], 'notice': 'No Nginx'})
+            elif path == '/caddy-requests':
+                result = state.get('caddy_requests', {'mode': 'caddy', 'container': '', 'candidates': [],
+                                                      'records': [], 'notice': 'No Caddy logs'})
             route.fulfill(json=result)
 
         server_url = f'http://127.0.0.1:{server.server_port}'
@@ -470,4 +473,23 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
     assert '/failed' in page.locator('#requestRows').inner_text()
     page.locator('#requestSearch').fill('missing')
     assert page.locator('.request-row:not(.request-columns)').count() == 0
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_caddy_request_view_auto_selects_and_filters(browser_page, width):
+    page, state = browser_page
+    page.locator('#closeProjectModalBtn').click()
+    page.set_viewport_size({'width': width, 'height': 844})
+    state['caddy_requests'] = {'mode': 'caddy', 'container': 'aimore-caddy-1',
+                               'candidates': ['aimore-caddy-1'], 'notice': 'Active', 'records': [
+                                   {'at': '2026-09-30T06:34:56Z', 'host': 'example.test', 'method': 'GET',
+                                    'path': '/ok<script>alert(1)</script>', 'status': 200,
+                                    'duration_ms': 12, 'upstream_ms': None}]}
+    page.locator('#requestsViewTab').click()
+    page.wait_for_selector('.request-row:not(.request-columns)')
+    assert page.locator('#requestBackend').input_value() == 'caddy'
+    assert page.locator('#requestContainer').input_value() == 'aimore-caddy-1'
+    assert page.locator('#requestEnable').is_hidden()
+    assert page.locator('#requestRows script').count() == 0
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')

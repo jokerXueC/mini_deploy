@@ -1,5 +1,5 @@
 window.NginxRequests = (() => {
-  let records = [], pending = false, generation = 0, timer = null;
+  let records = [], pending = false, generation = 0, sourceChosen = false, pendingRefresh = false;
   const source = $('requestSource'), notice = $('requestNotice'), rows = $('requestRows');
 
   function render() {
@@ -24,23 +24,59 @@ window.NginxRequests = (() => {
     $('requestRefresh').disabled = true;
     const version = ++generation;
     try {
-      const result = await fetchJson(`nginx-requests?limit=${$('requestLimit').value}`);
+      let backend = $('requestBackend').value;
+      let result = await fetchJson(`${backend}-requests?limit=${$('requestLimit').value}${backend === 'caddy' && $('requestContainer').value.trim() ? `&container=${encodeURIComponent($('requestContainer').value.trim())}` : ''}`);
+      if (backend === 'nginx' && result.mode === 'none' && !sourceChosen) {
+        try {
+          const caddy = await fetchJson(`caddy-requests?limit=${$('requestLimit').value}`);
+          if (caddy.container || caddy.candidates?.length) {
+            backend = 'caddy';
+            $('requestBackend').value = backend;
+            result = caddy;
+          }
+        } catch (_) {
+          // Keep the existing Nginx empty state when Docker is unavailable.
+        }
+      }
       if (version !== generation || !$('requestsView').classList.contains('active')) return;
       records = result.records || [];
-      source.textContent = result.mode === 'docker' ? `Docker · ${result.container}` : result.mode === 'local' ? '服务器本机' : '尚未接入';
+      $('requestContainerField').hidden = backend !== 'caddy';
+      if (backend === 'caddy') {
+        const names = result.candidates || [];
+        $('requestContainerOptions').replaceChildren(...names.map(name => {
+          const option = document.createElement('option');
+          option.value = name;
+          return option;
+        }));
+        if (result.container && !$('requestContainer').value.trim()) $('requestContainer').value = result.container;
+      }
+      source.textContent = backend === 'caddy' ? `Docker Caddy${result.container ? ` · ${result.container}` : ''}` : result.mode === 'docker' ? `Docker Nginx · ${result.container}` : result.mode === 'local' ? '本机 Nginx' : '尚未接入 Nginx';
       notice.textContent = result.notice || '';
-      $('requestEnable').hidden = result.enabled || result.mode === 'none';
-      $('requestDisable').hidden = !result.enabled;
+      $('requestEnable').hidden = backend !== 'nginx' || result.enabled || result.mode === 'none';
+      $('requestDisable').hidden = backend !== 'nginx' || !result.enabled;
       render();
     } catch (err) {
       if (version === generation) notice.textContent = `请求读取失败：${err.message}`;
     } finally {
       pending = false;
       $('requestRefresh').disabled = false;
+      if (pendingRefresh) {
+        pendingRefresh = false;
+        refresh();
+      }
     }
   }
 
+  function changeSource() {
+    sourceChosen = true;
+    generation++;
+    if (pending) pendingRefresh = true;
+    else refresh();
+  }
+
   $('requestRefresh').addEventListener('click', refresh);
+  $('requestBackend').addEventListener('change', changeSource);
+  $('requestContainer').addEventListener('change', changeSource);
   $('requestLimit').addEventListener('change', refresh);
   $('requestSearch').addEventListener('input', render);
   $('requestStatus').addEventListener('change', render);
@@ -74,6 +110,6 @@ window.NginxRequests = (() => {
       $('requestDisable').disabled = false;
     }
   });
-  timer = window.setInterval(refresh, 10000);
+  window.setInterval(refresh, 10000);
   return {refresh};
 })();
