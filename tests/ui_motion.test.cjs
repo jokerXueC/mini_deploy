@@ -21,6 +21,26 @@ function environment(reduced = false) {
   }};
 }
 
+test('CPU text holds real readings for three seconds and resets on missing data', () => {
+  const e = environment(), el = {};
+  const format = n => `${n.toFixed(1)}%`;
+  e.motion.reading(el, 12, format);
+  assert.equal(el.textContent, '12.0%');
+  e.tick(1000);
+  e.motion.reading(el, 30, format);
+  e.tick(2000);
+  e.motion.reading(el, 90, format);
+  assert.equal(el.textContent, '12.0%');
+  e.tick(3000);
+  e.motion.reading(el, 25, format);
+  assert.equal(el.textContent, '25.0%');
+  assert.equal(e.frames.size, 0);
+  e.motion.reading(el, null, format);
+  assert.equal(el.textContent, '-');
+  e.motion.reading(el, 0, format);
+  assert.equal(el.textContent, '0.0%');
+});
+
 test('resource values ease over time, retarget from visible state and finish exactly', () => {
   const e = environment(), el = {isConnected: true};
   let shown = 0;

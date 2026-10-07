@@ -1,8 +1,24 @@
 /* Shared, interruptible transitions for real sampled values. */
 const DashboardMotion = (() => {
   const states = new WeakMap();
+  const readings = new WeakMap();
   const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const ease = t => t * t * (3 - 2 * t);
+
+  // Keep text on real samples; chart and bar interpolation is independent.
+  function reading(element, target, formatter, interval = 3000) {
+    const now = performance.now();
+    if (target == null || target === '' || !Number.isFinite(Number(target))) {
+      readings.delete(element);
+      element.textContent = '-';
+      return;
+    }
+    const previous = readings.get(element);
+    if (!previous || now - previous.at >= interval) {
+      readings.set(element, {at: now});
+      element.textContent = formatter(Number(target));
+    }
+  }
 
   function cancel(element) {
     const state = states.get(element);
@@ -174,5 +190,5 @@ const DashboardMotion = (() => {
     if (changes.length) value(svg, 1, t => changes.forEach(draw => draw(t)), {initial: 0, duration: 850});
   }
 
-  return {value, cancel, curve, show, morph, reduced};
+  return {value, reading, cancel, curve, show, morph, reduced};
 })();

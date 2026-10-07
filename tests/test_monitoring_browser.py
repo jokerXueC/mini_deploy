@@ -81,10 +81,30 @@ def dashboard():
                     result = {"container": "web", "lines": ["healthy"]}
                 elif path == "/request-gateways":
                     result = {"entries": []}
+                elif path == "/gateway-connections/discover":
+                    result = {"sources": [item["source"] for item in state.get("connections", [])]}
+                elif path == "/gateway-connections":
+                    if payload["action"] == "inspect":
+                        item = next(item for item in state["connections"] if item["source"] == payload["source"])
+                        if item.get("error"):
+                            route.fulfill(status=400, json={"detail": item["error"]})
+                            return
+                        result = item
+                    elif payload["action"] == "preview":
+                        if state.get("preview_error"):
+                            route.fulfill(status=409, json={"detail": state["preview_error"]})
+                            return
+                        result = {"gateway": {"key": payload["key"]}, "token": "review-token",
+                            "site": "api.example.com", "before_rule": "backend:8000", "after_rule": "gateway → backend:8000",
+                            "notice": "应用后将重载入口配置"}
+                    else:
+                        assert payload["action"] == "apply" and payload["confirmed"] and payload["token"] == "review-token"
                 elif path == "/request-gateways/networks":
                     result = {"networks": []}
                 elif path == "/nginx-requests":
                     result = {"available": True, "enabled": True, "records": [], "containers": []}
+                elif path == "/gateway-requests":
+                    result = {"records": [], "notice": "暂无请求"}
                 elif path != "/docker/action":
                     state["errors"].append(f"Unexpected API: {path}")
                     route.fulfill(status=404, json={"error": "Removed endpoint"})
@@ -114,6 +134,138 @@ def test_routes_and_monitoring_only_requests(dashboard, view):
         page.locator(f"#{tab}ViewTab").click()
         page.wait_for_timeout(100)
         page.clock.run_for(31000)
+    assert not state["errors"]
+
+
+def connection_source(name="proxy", networks=None):
+    return {"source": {"kind": "caddy", "mode": "docker", "container": name,
+                "config_path": "/etc/caddy/Caddyfile", "label": name},
+            "revision": "original-revision", "networks": networks or ["app_default"], "routes": [
+                {"id": "static", "site": "example.com", "kind": "static", "label": "静态网站", "supported": True},
+                {"id": "api", "site": "api.example.com", "kind": "proxy", "label": "handle /api/*",
+                 "upstream": "http://backend:8000", "supported": True}]}
+
+
+def test_cpu_text_is_stable_while_bars_and_chart_receive_new_samples(dashboard):
+    page, state, origin = dashboard
+    page.goto(f"{origin}/ui")
+    playwright.expect(page.locator("#updatedAt")).to_contain_text("服务器刷新于")
+    page.clock.install()
+    page.evaluate("activeView = 'requests'; clearServerRefresh()")
+
+    def sample(cpu, offset):
+        page.evaluate("""([cpu, offset]) => {
+            const ts = Math.floor(Date.now() / 1000) + offset;
+            renderSystemStatus({server: {cpu_percent: cpu, sampled_ts: ts},
+                realtime_history: [{ts, cpu_percent: cpu}, {ts: ts - 1, cpu_percent: 12}],
+                docker: {available: true, containers: [{name: 'api', state: 'running', cpu_percent: cpu}]}});
+        }""", [cpu, offset])
+
+    sample(12, 1)
+    playwright.expect(page.locator("#cpuValue")).to_have_text("12%")
+    page.clock.run_for(1000)
+    sample(80, 2)
+    playwright.expect(page.locator("#cpuValue")).to_have_text("12%")
+    playwright.expect(page.locator(".trend-card.cpu .trend-card-head strong")).to_have_text("12%")
+    playwright.expect(page.locator(".meter-line").first.locator("strong")).to_have_text("12%")
+    assert page.locator("#cpuBar").get_attribute("aria-valuenow") == "80"
+    page.clock.run_for(1100)
+    assert float(page.locator("#cpuBar").get_attribute("data-display-value")) > 60
+    page.clock.run_for(1000)
+    sample(30, 3)
+    playwright.expect(page.locator("#cpuValue")).to_have_text("30%")
+    playwright.expect(page.locator(".trend-card.cpu .trend-card-head strong")).to_have_text("30%")
+    playwright.expect(page.locator(".meter-line").first.locator("strong")).to_have_text("30%")
+    assert not state["errors"]
+
+
+def connection_calls(state, action):
+    return [payload for path, _, payload in state["calls"]
+            if path == "/gateway-connections" and payload.get("action") == action]
+
+
+@pytest.mark.parametrize("width", [390, 1440])
+def test_backend_onboarding_uses_detected_defaults_and_requires_confirmation(dashboard, tmp_path, width):
+    page, state, origin = dashboard
+    state["connections"] = [connection_source()]
+    page.set_viewport_size({"width": width, "height": 1000})
+    page.goto(f"{origin}/ui?view=requests")
+    page.locator("#gatewayConnectOpen").click()
+    playwright.expect(page.locator("#connectReview")).to_be_visible()
+    assert page.locator("#connectService option").count() == 2  # Placeholder and backend; no static site.
+    playwright.expect(page.locator("#connectRouteNotice")).to_contain_text("http://backend:8000")
+    assert not page.locator("#connectSourceAdvanced").get_attribute("open")
+    assert not page.locator("#connectOptionsAdvanced").get_attribute("open")
+    playwright.expect(page.locator("#connectNetworkField")).to_be_hidden()
+    assert not connection_calls(state, "apply")
+    preview = connection_calls(state, "preview")[0]
+    assert preview["route_id"] == "api" and preview["network"] == "app_default"
+    assert preview["source_revision"] == "original-revision" and preview["probe_path"] == "/api/"
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path=str(tmp_path / f"backend-connect-{width}.png"), full_page=True)
+    page.locator("#connectApply").click()
+    playwright.expect(page.locator("#gatewayConnectPanel")).to_be_hidden()
+    assert len(connection_calls(state, "apply")) == 1
+    assert not state["errors"]
+
+
+def test_backend_discovery_preserves_partial_results_and_network_choice(dashboard):
+    page, state, origin = dashboard
+    failed = {**connection_source("unreadable"), "error": "配置无法读取"}
+    state["connections"] = [connection_source(networks=["app_default", "other"]), failed]
+    page.goto(f"{origin}/ui?view=requests")
+    page.locator("#gatewayConnectOpen").click()
+    playwright.expect(page.locator("#gatewayConnectFeedback")).to_contain_text("无法唯一确定网络")
+    playwright.expect(page.locator("#connectDiscoveryNotice")).to_contain_text("unreadable")
+    assert not connection_calls(state, "preview")
+    page.locator("#connectNetwork-button").click()
+    page.locator("#connectNetwork-menu").get_by_role("option", name="app_default", exact=True).click()
+    playwright.expect(page.locator("#connectReview")).to_be_visible()
+    assert connection_calls(state, "preview")[-1]["network"] == "app_default"
+    page.locator("#connectBack").click()
+    page.locator("#connectOptionsAdvanced > summary").click()
+    page.locator("#connectPort").fill("18090")
+    playwright.expect(page.locator("#connectReview")).to_be_hidden()
+    assert not connection_calls(state, "apply")
+    page.locator("#connectPreview").click()
+    playwright.expect(page.locator("#connectReview")).to_be_visible()
+    assert connection_calls(state, "preview")[-1]["port"] == 18090
+    assert not state["errors"]
+
+
+def test_multiple_backends_and_preview_failure_do_not_apply_stale_plan(dashboard):
+    page, state, origin = dashboard
+    second = connection_source("another-proxy")
+    second["routes"][1]["upstream"] = "http://java-service:8080"
+    state["connections"] = [connection_source(), second]
+    page.goto(f"{origin}/ui?view=requests")
+    page.locator("#gatewayConnectOpen").click()
+    playwright.expect(page.locator("#connectService-button")).to_be_enabled()
+    page.locator("#connectService-button").click()
+    page.locator("#connectService-menu").get_by_role("option", name="http://backend:8000", exact=False).click()
+    playwright.expect(page.locator("#connectReview")).to_be_visible()
+    state["preview_error"] = "入口配置已修改，请重新检测"
+    page.locator("#connectService-button").click()
+    page.locator("#connectService-menu").get_by_role("option", name="http://java-service:8080", exact=False).click()
+    playwright.expect(page.locator("#gatewayConnectFeedback")).to_contain_text("入口配置已修改")
+    playwright.expect(page.locator("#connectReview")).to_be_hidden()
+    assert not connection_calls(state, "apply")
+    assert not state["errors"]
+
+
+def test_no_backend_does_not_silently_select_static_site(dashboard):
+    page, state, origin = dashboard
+    item = connection_source()
+    item["routes"] = item["routes"][:1]
+    state["connections"] = [item]
+    page.goto(f"{origin}/ui?view=requests")
+    page.locator("#gatewayConnectOpen").click()
+    playwright.expect(page.locator("#gatewayConnectFeedback")).to_contain_text("未找到可自动接入的后端")
+    assert not connection_calls(state, "preview")
+    page.locator("#connectSourceAdvanced > summary").click()
+    page.locator("#connectIncludeStatic").check()
+    assert page.locator("#connectService option").count() == 2
+    assert not connection_calls(state, "apply")
     assert not state["errors"]
 
 

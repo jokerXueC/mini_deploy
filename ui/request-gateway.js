@@ -8,7 +8,7 @@ window.RequestGateway = (() => {
     $('requestGatewayKey').replaceChildren(...entries.map(entry => {
       const option = document.createElement('option');
       option.value = entry.key;
-      option.textContent = entry.connection?.site || `自定义入口 · ${entry.name}`;
+      option.textContent = entry.connection?.site ? `${entry.upstream} · ${entry.connection.site}` : `自定义入口 · ${entry.name}`;
       return option;
     }));
     if (entries.some(entry => entry.key === selected)) $('requestGatewayKey').value = selected;
@@ -16,7 +16,7 @@ window.RequestGateway = (() => {
       const connected = entries.find(entry => entry.connection?.state === 'connected');
       if (connected) $('requestGatewayKey').value = connected.key;
     }
-    if (!entries.length) $('requestGatewayKey').innerHTML = '<option value="">尚未添加网站</option>';
+    if (!entries.length) $('requestGatewayKey').innerHTML = '<option value="">尚未接入服务</option>';
     $('gatewayEntries').innerHTML = entries.length ? entries.map(entry => `
       <article class="request-gateway-entry">
         <div class="request-gateway-title"><strong>${escapeHtml(entry.name)}</strong><span class="badge ${entry.state === 'running' ? 'success' : 'neutral'}">${escapeHtml(states[entry.state] || entry.state)}</span></div>

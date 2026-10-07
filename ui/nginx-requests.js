@@ -104,7 +104,7 @@ window.NginxRequests = (() => {
         if (version !== generation) return;
         const key = $('requestGatewayKey').value;
         result = key ? await fetchJson(`gateway-requests?key=${encodeURIComponent(key)}&limit=${$('requestLimit').value}`)
-          : {mode: 'gateway', records: [], notice: '尚未添加网站。'};
+          : {mode: 'gateway', records: [], notice: '尚未接入后端服务。'};
       } else {
         result = await fetchJson(`${backend}-requests?limit=${$('requestLimit').value}${backend === 'caddy' && $('requestContainer').value.trim() ? `&container=${encodeURIComponent($('requestContainer').value.trim())}` : ''}`);
       }
@@ -139,7 +139,7 @@ window.NginxRequests = (() => {
       source.textContent = backend === 'gateway'
         ? attached ? `${entry.connection.site} · ${entry.state === 'running' ? '已开启' : '采集服务未运行'} · ${entry.connection.scope || '已接入的转发规则'}`
           : needsRecovery ? `${entry.connection.site} · 接入操作待恢复`
-            : entry ? `自定义入口 · ${entry.name} · 仅记录经过该入口的请求` : '尚未开启网站请求记录'
+            : entry ? `自定义入口 · ${entry.name} · 仅记录经过该入口的请求` : '尚未开启后端请求记录'
         : `正在查看已有${backend === 'caddy' ? ' Caddy' : ' Nginx'}日志${result.container ? ` · ${result.container}` : ''}`;
       $('requestStopMonitoring').hidden = !entry?.connection || entry.connection.state === 'not_connected';
       $('requestStopMonitoring').textContent = attached ? '停止记录' : '恢复原入口';

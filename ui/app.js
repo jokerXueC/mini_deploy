@@ -481,14 +481,16 @@ function updateResourceTrack(el, value) {
   else el.removeAttribute('aria-valuenow');
   el.setAttribute('aria-valuetext', valid ? formatPercent(percent) : '暂无数据');
   const bars = Array.from(el.children);
+  const label = el.closest('.meter-line')?.querySelector('strong');
+  const cpu = el.closest('.meter-line')?.firstElementChild?.textContent === 'CPU';
+  if (label && cpu) DashboardMotion.reading(label, valid ? n : null, formatPercent);
   DashboardMotion.value(el, percent, current => {
     el.dataset.displayValue = String(current);
     bars.forEach((bar, index) => {
       const fill = Math.max(0, Math.min(1, current / 100 * count - index));
       bar.style.setProperty('--fill', fill.toFixed(3));
     });
-    const label = el.closest('.meter-line')?.querySelector('strong');
-    if (label) label.textContent = valid ? formatPercent(current) : '-';
+    if (label && !cpu) label.textContent = valid ? formatPercent(current) : '-';
   }, {initial: 0});
 }
 
@@ -499,6 +501,11 @@ function setResourceBar(id, value) {
 function animateNumberText(id, value, formatter) {
   const el = $(id);
   if (!el) return;
+  if (id === 'cpuValue') {
+    el.dataset.value = value ?? '';
+    DashboardMotion.reading(el, value, formatter);
+    return;
+  }
   const next = value == null || value === '' ? NaN : Number(value);
   if (!Number.isFinite(next)) {
     DashboardMotion.cancel(el);
@@ -523,7 +530,7 @@ function setView(view) {
     events: ['监测与告警', '网站可用性、线上证书与服务器异常。'],
     notify: ['通知配置', '异常提醒与恢复通知。'],
     certificates: ['域名与证书', '已发现的网站、证书有效期与线上状态。'],
-    requests: ['请求记录', '网站访问、响应状态与耗时'],
+    requests: ['请求记录', '后端 HTTP 请求、响应状态与耗时'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
@@ -1159,6 +1166,7 @@ function renderSystemTrend(system = {}) {
   const cards = Array.from(chart.querySelectorAll('.trend-card'));
   if (cards.length !== 3) {
     chart.replaceChildren(template.content);
+    DashboardMotion.reading(chart.querySelector('.cpu .trend-card-head strong'), latest.cpu_percent, formatPercent);
     return;
   }
   hideTrendTooltip();
@@ -1169,18 +1177,27 @@ function renderSystemTrend(system = {}) {
     const nextSvg = next.querySelector('svg');
     if (!svg && !nextSvg) {
       ['.trend-card-head', '.trend-card-meta', '.trend-card-empty'].forEach(selector => {
+        if (i === 0 && selector === '.trend-card-head') {
+          DashboardMotion.reading(card.querySelector('strong'), latest.cpu_percent, formatPercent);
+          return;
+        }
         card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
       });
       return;
     }
     if (!svg || !nextSvg) {
       card.replaceWith(next);
+      if (i === 0) DashboardMotion.reading(next.querySelector('strong'), latest.cpu_percent, formatPercent);
       return;
     }
     const scroll = card.querySelector('.trend-chart-scroll');
     const atEnd = scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft < 8;
     card.style.cssText = next.style.cssText;
     ['.trend-card-head', '.trend-card-meta', '.trend-card-foot'].forEach(selector => {
+      if (i === 0 && selector === '.trend-card-head') {
+        DashboardMotion.reading(card.querySelector('strong'), latest.cpu_percent, formatPercent);
+        return;
+      }
       card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
     });
     DashboardMotion.morph(svg, nextSvg);

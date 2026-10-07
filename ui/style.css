@@ -340,7 +340,7 @@ html[data-theme="light"] .theme-toggle-icon {
 .gateway-connect-review { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--line); }
 .gateway-connect-review dl { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; font-size: 13px; }
 .gateway-connect-review dd { margin: 0; overflow-wrap: anywhere; }
-#gatewayConnectFeedback, #connectRouteNotice, #connectReviewNotice { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+#gatewayConnectFeedback, #connectDiscoveryNotice, #connectRouteNotice, #connectReviewNotice { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 #connectHelp { margin-top: 20px; font-size: 13px; }
 #connectHelp summary { cursor: pointer; }
 .gateway-command-help { padding: 12px 0; border-bottom: 1px solid var(--line); }
