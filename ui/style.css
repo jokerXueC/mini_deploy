@@ -380,7 +380,10 @@ html[data-theme="light"] .theme-toggle-icon {
 .request-route code { font: inherit; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
 .request-route-host { display: block; margin: 3px 0 0 15px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .request-expand { width: 5px; height: 5px; flex: 0 0 5px; border-right: 1px solid var(--muted); border-bottom: 1px solid var(--muted); transform: rotate(-45deg); transition: transform 180ms ease; }
-.request-group[open] .request-expand { transform: rotate(45deg); }
+.request-group[open] > summary .request-expand { transform: rotate(45deg); }
+.request-group > summary .request-route { padding-left: var(--request-indent, 0px); }
+.request-children > .request-group:last-child { border-bottom: 0; }
+.request-original-path { grid-column: 1 / -1; font: inherit; color: var(--muted); overflow-wrap: anywhere; }
 .request-metric, .request-reliability { font-variant-numeric: tabular-nums; }
 .request-metric { overflow-wrap: anywhere; }
 .request-reliability { display: flex; align-items: center; gap: 10px; }

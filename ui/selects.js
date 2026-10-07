@@ -199,7 +199,9 @@ window.AppSelects = (() => {
   });
   window.addEventListener('resize', () => close());
   document.addEventListener('scroll', event => {
-    if (opened && !opened.menu.contains(event.target)) close();
+    // Only scrolling an ancestor moves the anchor. Text inputs may scroll
+    // internally on blur, just after another control opens its menu.
+    if (opened && (event.target === document || event.target.contains?.(opened.button))) close();
   }, true);
   syncAll();
   return {syncAll, close};

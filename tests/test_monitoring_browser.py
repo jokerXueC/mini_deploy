@@ -80,7 +80,7 @@ def dashboard():
                 elif path == "/docker/logs":
                     result = {"container": "web", "lines": ["healthy"]}
                 elif path == "/request-gateways":
-                    result = {"entries": []}
+                    result = {"entries": state.get("gateways", [])}
                 elif path == "/gateway-connections/discover":
                     result = {"sources": [item["source"] for item in state.get("connections", [])]}
                 elif path == "/gateway-connections":
@@ -104,7 +104,7 @@ def dashboard():
                 elif path == "/nginx-requests":
                     result = {"available": True, "enabled": True, "records": [], "containers": []}
                 elif path == "/gateway-requests":
-                    result = {"records": [], "notice": "暂无请求"}
+                    result = {"records": state.get("records", []), "notice": "测试请求样本"}
                 elif path != "/docker/action":
                     state["errors"].append(f"Unexpected API: {path}")
                     route.fulfill(status=404, json={"error": "Removed endpoint"})
@@ -182,6 +182,58 @@ def test_cpu_text_is_stable_while_bars_and_chart_receive_new_samples(dashboard):
 def connection_calls(state, action):
     return [payload for path, _, payload in state["calls"]
             if path == "/gateway-connections" and payload.get("action") == action]
+
+
+@pytest.mark.parametrize("width", [390, 1440])
+def test_request_tree_ids_refresh_search_and_original_paths(dashboard, tmp_path, width):
+    page, state, origin = dashboard
+    state["gateways"] = [{"key": "api", "name": "API", "upstream": "http://backend:8000", "state": "running"}]
+    first_id = "01a10599-bccc-77d3-81b9-1538746408ce"
+    second_id = "01a10599-bccc-77d3-81b9-1538746408cf"
+    samples = [("heartbeat", 12, 200), ("commands/claim", 30, 200),
+        (f"sessions/{first_id}/mode", 100, 200), (f"sessions/{second_id}/mode", 300, 500),
+        (f"sessions/{first_id}/pending-inputs", 40, 200)]
+    state["records"] = [{"path": f"/cloud/runtime/{path}", "method": "GET", "host": "aimore.meetpeak.tech",
+        "at": "2026-10-07T12:00:00Z", "status": status, "duration_ms": duration, "upstream_ms": duration - 2}
+        for path, duration, status in samples]
+    page.set_viewport_size({"width": width, "height": 1000})
+    page.goto(f"{origin}/ui?view=requests")
+    root = page.locator("#requestRows > .request-branch")
+    playwright.expect(root).to_have_count(1)
+    playwright.expect(root.locator(":scope > summary code")).to_have_text("/cloud/runtime/")
+    playwright.expect(root.locator(':scope > summary [data-label="次数"]')).to_have_text("5")
+    playwright.expect(root.locator(':scope > summary [data-label="平均耗时"]')).to_have_text("96.40 ms")
+    assert root.get_attribute("open") is None
+    page.screenshot(path=str(tmp_path / f"request-tree-collapsed-{width}.png"), full_page=True)
+    root.locator(":scope > summary").click()
+    sessions = page.locator('.request-branch').filter(has=page.locator(':scope > summary code[title="/cloud/runtime/sessions/:id"]'))
+    assert sessions.get_attribute("open") is None
+    sessions.locator(":scope > summary").click()
+    mode = page.locator('.request-group').filter(has=page.locator(':scope > summary code[title="/cloud/runtime/sessions/:id/mode"]'))
+    playwright.expect(mode.locator(':scope > summary [data-label="次数"]')).to_have_text("2")
+    playwright.expect(mode.locator(':scope > summary [data-label="平均耗时"]')).to_have_text("200.00 ms")
+    mode.locator(":scope > summary").click()
+    playwright.expect(mode.locator(".request-original-path").first).to_contain_text(first_id)
+    mode.evaluate("el => el.dataset.retained = 'yes'")
+    state["records"].append({**state["records"][2], "duration_ms": 200})
+    page.locator("#requestRefresh").click()
+    playwright.expect(root.locator(':scope > summary [data-label="次数"]')).to_have_text("6")
+    assert mode.get_attribute("data-retained") == "yes" and mode.get_attribute("open") is not None
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path=str(tmp_path / f"request-tree-expanded-{width}.png"), full_page=True)
+    page.locator("#requestSearch").fill(second_id)
+    playwright.expect(page.locator("#requestSampleSummary")).to_contain_text("1 类请求")
+    playwright.expect(page.locator('#requestRows .request-group > summary [data-label="次数"]')).to_have_text("3")
+    page.locator("#requestStatus-button").scroll_into_view_if_needed()
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    page.locator("#requestStatus-button").click()
+    page.locator("#requestStatus-menu").get_by_role("option", name="含失败请求").click()
+    playwright.expect(page.locator('#requestRows .request-group > summary [data-label="次数"]')).to_have_text("3")
+    page.locator("#requestLayout-button").click()
+    page.locator("#requestLayout-menu").get_by_role("option", name="原始地址").click()
+    playwright.expect(page.locator('#requestRows .request-group > summary [data-label="次数"]')).to_have_text("1")
+    playwright.expect(page.locator("#requestRows > .request-group > summary code")).to_contain_text(second_id)
+    assert not state["errors"]
 
 
 @pytest.mark.parametrize("width", [390, 1440])
