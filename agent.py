@@ -51,6 +51,7 @@ import nginx_runtime
 import nginx_install
 import nginx_requests
 import request_gateway
+import gateway_connections
 import project_guidance
 import entrypoint_checks
 import docker_onboarding
@@ -2587,6 +2588,12 @@ def _request_gateway_operation(data: dict[str, Any]) -> dict[str, Any]:
     return request_gateway.Store(STATE_FILE.parent).operate(data)
 
 
+@_maintenance_shared_operation
+def _gateway_connection_operation(data: dict[str, Any]) -> dict[str, Any]:
+    with _config_transaction_lock, _nginx_lock:
+        return gateway_connections.Connections(STATE_FILE.parent).operate(data)
+
+
 def _nginx_serialized(function: Any) -> Any:
     @wraps(function)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -4711,6 +4718,7 @@ def _short_sha(value: Any) -> str:
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
     "request-gateway.js": "application/javascript; charset=utf-8",
+    "gateway-connect.js": "application/javascript; charset=utf-8",
     "selects.js": "application/javascript; charset=utf-8",
     "motion.js": "application/javascript; charset=utf-8",
     "nginx.js": "application/javascript; charset=utf-8",
@@ -5027,12 +5035,14 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "caddy_requests_failed", "detail": str(exc)})
             return
-        if path in {"/request-gateways", "/request-gateways/networks", "/gateway-requests"}:
+        if path in {"/request-gateways", "/request-gateways/networks", "/gateway-requests", "/gateway-connections/discover"}:
             if self._require_auth_json():
                 try:
                     store = request_gateway.Store(STATE_FILE.parent)
                     query = parse_qs(parsed.query)
-                    if path == "/gateway-requests":
+                    if path == "/gateway-connections/discover":
+                        result = gateway_connections.discover()
+                    elif path == "/gateway-requests":
                         result = store.records(query.get("key", [""])[0], int(query.get("limit", ["100"])[0]))
                     elif path.endswith("/networks"):
                         result = {"networks": request_gateway.networks()}
@@ -5061,6 +5071,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == "/gateway-connections":
+            if self._require_auth_json():
+                action = 'invalid'
+                try:
+                    data = _read_json_body(self, max_bytes=8192)
+                    action = str(data.get('action', 'invalid'))[:32]
+                    result = _gateway_connection_operation(data)
+                except (ValueError, OSError, _MaintenanceLockError) as exc:
+                    _audit_event('gateway_connection', actor=self.client_address[0], success=False, detail={'action': action})
+                    self._write_json(503 if isinstance(exc, _MaintenanceLockError) else 400,
+                                     {'error': 'gateway_connection_failed', 'detail': str(exc)})
+                    return
+                _audit_event('gateway_connection', actor=self.client_address[0], success=True, detail={'action': action})
+                self._write_json(200, result)
+            return
         if path == "/request-gateways":
             if self._require_auth_json():
                 self._handle_request_gateway()

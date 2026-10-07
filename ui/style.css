@@ -398,6 +398,19 @@ html[data-theme="light"] .theme-toggle-icon {
 .request-gateway-fields .field input:focus { outline: 2px solid var(--green); outline-offset: 2px; }
 .request-gateway-fields .field input:disabled { opacity: .6; }
 #requestGatewayForm { padding: 18px 0 0; }
+.gateway-connect { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.gateway-connect fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.gateway-connect-review { margin-top: 20px; padding: 16px 0; border-top: 1px solid var(--line); }
+.gateway-connect-review dl { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; font-size: 13px; }
+.gateway-connect-review dd { margin: 0; overflow-wrap: anywhere; }
+#gatewayConnectFeedback, #connectRouteNotice, #connectReviewNotice { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+#connectHelp { margin-top: 20px; font-size: 13px; }
+#connectHelp summary { cursor: pointer; }
+.gateway-command-help { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.gateway-command-help h4 { margin: 8px 0; font-size: 13px; }
+.gateway-command-help pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--field-bg); padding: 12px; font-size: 12px; user-select: all; }
+.gateway-command-help p { color: var(--muted); line-height: 1.7; }
+.gateway-connection-state { font-size: 12px; color: var(--muted); }
 .gateway-image-field, .gateway-trust { grid-column: 1 / -1; }
 .gateway-trust { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .request-gateway-entry { padding: 18px 0; border-bottom: 1px solid var(--line); }

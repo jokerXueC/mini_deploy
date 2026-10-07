@@ -18,13 +18,15 @@ window.RequestGateway = (() => {
         <div class="request-gateway-title"><strong>${escapeHtml(entry.name)}</strong><span class="badge ${entry.state === 'running' ? 'success' : 'neutral'}">${escapeHtml(states[entry.state] || entry.state)}</span></div>
         <div class="request-gateway-route"><code>${escapeHtml(entry.caddy_upstream)}</code><span aria-hidden="true"> → </span><code>${escapeHtml(entry.upstream)}</code></div>
         <div class="muted">本机地址：${escapeHtml(entry.local_address)} · 网络：${escapeHtml(entry.network)}</div>
+        <p class="gateway-connection-state">${entry.connection?.state === 'connected' ? `路由已接入 · ${escapeHtml(entry.connection.site)}` : entry.connection && entry.connection.state !== 'not_connected' ? '接入操作待恢复，请撤销接入后重试' : '尚未通过向导接入网站流量'}</p>
         <code class="gateway-caddy-command">reverse_proxy ${escapeHtml(entry.caddy_upstream)}</code>
         ${entry.error ? `<p class="form-error">${escapeHtml(entry.error)}</p>` : ''}
         <div class="request-actions">
-          <button type="button" class="ghost-button compact-action" data-gateway-action="edit" data-key="${escapeHtml(entry.key)}">编辑</button>
+          ${entry.connection && entry.connection.state !== 'not_connected' ? `<button type="button" class="ghost-button compact-action" data-gateway-action="disconnect" data-key="${escapeHtml(entry.key)}">撤销接入</button>` : ''}
+          <button type="button" class="ghost-button compact-action" data-gateway-action="edit" data-key="${escapeHtml(entry.key)}" ${entry.connection && entry.connection.state !== 'not_connected' ? 'disabled title="请先撤销网站接入"' : ''}>编辑</button>
           <button type="button" class="ghost-button compact-action" data-gateway-action="records" data-key="${escapeHtml(entry.key)}">查看请求</button>
-          <button type="button" class="ghost-button compact-action" data-gateway-action="${['running', 'paused', 'restarting'].includes(entry.state) ? 'stop' : 'start'}" data-key="${escapeHtml(entry.key)}">${['running', 'paused', 'restarting'].includes(entry.state) ? '停止' : '启动'}</button>
-          <button type="button" class="ghost-button compact-action" data-gateway-action="delete" data-key="${escapeHtml(entry.key)}" ${!['exited', 'created', 'not_created', 'dead'].includes(entry.state) ? 'disabled' : ''}>删除</button>
+          <button type="button" class="ghost-button compact-action" data-gateway-action="${['running', 'paused', 'restarting'].includes(entry.state) ? 'stop' : 'start'}" data-key="${escapeHtml(entry.key)}" ${entry.connection && entry.connection.state !== 'not_connected' && ['running', 'paused', 'restarting'].includes(entry.state) ? 'disabled title="请先撤销网站接入"' : ''}>${['running', 'paused', 'restarting'].includes(entry.state) ? '停止' : '启动'}</button>
+          <button type="button" class="ghost-button compact-action" data-gateway-action="delete" data-key="${escapeHtml(entry.key)}" ${!['exited', 'created', 'not_created', 'dead'].includes(entry.state) || (entry.connection && entry.connection.state !== 'not_connected') ? 'disabled' : ''}>删除</button>
         </div>
       </article>`).join('') : '<p class="request-empty">尚未创建入口</p>';
   }
@@ -77,12 +79,14 @@ window.RequestGateway = (() => {
   }
 
   async function act(data, message) {
-    if (busy) return;
+    if (busy || window.GatewayConnect?.isBusy()) return;
     busy = true;
+    let disabledButtons = [];
     try {
       const confirmed = await showConfirmDialog({title: '确认网关操作', message, confirmText: '确认', danger: ['stop', 'delete'].includes(data.action)});
       if (!confirmed) return;
-      $('requestGatewayManager').querySelectorAll('button').forEach(button => button.disabled = true);
+      disabledButtons = [...$('requestGatewayManager').querySelectorAll('button')].map(button => [button, button.disabled]);
+      disabledButtons.forEach(([button]) => button.disabled = true);
       feedback.textContent = data.action === 'start' ? '正在准备镜像并启动网关，首次启动可能需要几分钟…' : '正在处理…';
       await postJsonBody('request-gateways', {...data, confirmed: true});
       feedback.textContent = data.action === 'save' ? '配置已保存。运行中的网关已检查并重载；新入口请点击启动。' : '操作完成';
@@ -92,6 +96,7 @@ window.RequestGateway = (() => {
     } catch (err) { feedback.textContent = `操作失败：${err.message}`; }
     finally {
       busy = false;
+      disabledButtons.forEach(([button, disabled]) => button.disabled = disabled);
       $('gatewaySave').disabled = false; $('gatewayCancel').disabled = false;
       $('gatewayRefresh').disabled = false; $('gatewayAdd').disabled = false;
       draw();
@@ -104,7 +109,12 @@ window.RequestGateway = (() => {
     $('manageRequestGateways').setAttribute('aria-expanded', String(!manager.hidden));
     if (!manager.hidden) { try { await refresh(); } catch (err) { feedback.textContent = err.message; } }
   });
-  $('gatewayAdd').addEventListener('click', () => { if (!busy) openForm(); });
+  $('gatewayAdd').addEventListener('click', () => {
+    if (!busy && !window.GatewayConnect?.isBusy()) {
+      $('gatewayConnectPanel').hidden = true;
+      openForm();
+    }
+  });
   $('gatewayCancel').addEventListener('click', () => { formVersion++; $('requestGatewayForm').hidden = true; editing = null; });
   $('gatewayNetwork').addEventListener('change', networkNotice);
   $('gatewayRefresh').addEventListener('click', async () => { try { await refresh(); } catch (err) { feedback.textContent = err.message; } });
@@ -123,6 +133,7 @@ window.RequestGateway = (() => {
     const entry = entries.find(item => item.key === button.dataset.key);
     if (!entry) return;
     const action = button.dataset.gatewayAction;
+    if (action === 'disconnect') return void window.GatewayConnect.disconnect(entry);
     if (action === 'edit') return void openForm(entry);
     if (action === 'records') {
       $('requestBackend').value = 'gateway'; $('requestGatewayKey').value = entry.key;
@@ -133,5 +144,5 @@ window.RequestGateway = (() => {
         : `删除 ${entry.name} 的网关容器、配置及容器日志。请确认前置代理已切回原业务上游。`;
     act({action, key: entry.key, revision: entry.revision}, message);
   });
-  return {refresh, ensure: async () => { if (!loaded) await refresh(); }};
+  return {refresh, list: () => entries.slice(), ensure: async () => { if (!loaded) await refresh(); }};
 })();

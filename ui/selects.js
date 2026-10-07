@@ -182,9 +182,13 @@ window.AppSelects = (() => {
   }
 
   new MutationObserver(records => {
-    if (records.some(record => record.target.closest?.('select, fieldset') ||
-      [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 &&
-        (node.matches('select') || node.querySelector('select'))))) {
+    if (records.some(record => {
+      const element = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      // Ignore mutations made by our own buttons inside a fieldset.
+      return element?.closest('select') || (record.type === 'attributes' && element?.matches('fieldset')) ||
+        [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 &&
+          (node.matches('select') || node.querySelector('select')));
+    })) {
       if (opened) close();
       syncAll();
     }

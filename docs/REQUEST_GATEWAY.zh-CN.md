@@ -1,133 +1,98 @@
 # 统一请求网关
 
-让需要监控的业务请求经过 mini_deploy 管理的网关，就能在「请求记录」查看时间、方法、路径、状态码、总耗时和上游耗时。无需修改业务代码，也无需给不同代理分别配置访问日志。
+让请求经过 mini_deploy 网关，即可查看请求时间、路径、状态码和耗时。业务代码不用改，现有 Caddy/Nginx 继续管理域名和 HTTPS。
 
 ```mermaid
 flowchart LR
-    A[用户请求] --> B[现有 Caddy / Nginx / 其他入口]
-    B --> C[mini_deploy 请求网关]
-    C --> D[业务服务]
-    C -. 请求完成后记录 .-> E[面板请求记录]
+    A[浏览器] --> B[现有网站入口]
+    B --> C[mini_deploy 网关]
+    C --> D[业务服务或原静态站点]
+    C -. 请求完成后 .-> E[面板请求记录]
 ```
 
-网关内部使用成熟的 Nginx 转发核心，由面板生成并管理配置。每个入口对应一个独立 Docker 容器；Agent 重启不会停止网关。已有 Caddy 继续管理域名和 HTTPS，网关不占用 80、443 或面板的 6868。
+## 推荐：在网页启用
 
-## 1. 在页面创建入口
+需要 Linux、本机 Docker，以及以 root 运行的 Agent。
 
-服务器需要 Linux、本机 Docker，Agent 以 root 运行。没有 Docker 时先用安装向导安装。无需在「部署」页登记业务仓库。
+1. 打开「请求记录 → 管理网关 → 启用请求监控」。
+2. 选择检测到的 Caddy/Nginx，点击「读取网站规则」。
+3. 选择要监控的网站或转发规则。可以新建网关，也可以复用配置一致的已有网关。
+4. 核对共有网络、端口和检测路径。例如业务健康地址是 `https://example.com/cloud/health`，路径填 `/cloud/health`。
+5. 点击「预览接入改动」，核对接入前后的流向，再确认启用。
+6. 用浏览器访问所选网站或路径，在「请求记录」选择对应网关查看结果。
 
-打开「请求记录 → 管理网关 → 新增入口」，填写：
+系统会启动网关、备份入口配置、校验并应用，失败时尝试恢复。Caddy 使用重启，已有连接可能短暂中断；Nginx 使用重载。无需再复制一份接入脚本到服务器执行。
 
-| 配置 | 后端在服务器本机 | 后端在 Docker |
+**“运行中”仅代表网关已启动；“路由已接入”代表向导已应用配置。只有实际经过网关的请求才有记录。** 检测请求本身也会产生记录；请再用真实网址验证。只接入某个转发规则时，其余路径不采集。
+
+### 你的 Caddy 示例
+
+选择 Docker 容器 `aimore-caddy-1`，配置路径填容器内的 `/etc/caddy/Caddyfile`，系统会根据挂载自动找到宿主机文件。
+
+- API：选择 `aimore.meetpeak.tech` 的 `/cloud/*` 规则，网络选择与业务共有的 `aimore_default`，检测路径填 `/cloud/health`。已有 `aimore-api` 网关配置一致时可以复用。
+- 主站：另选 `meetpeak.tech` 静态站点，新建不同标识和监听端口的网关。向导保留原静态文件规则，增加内部 HTTP 入口，再接入网关。无需新增 Docker 宿主机端口映射。
+
+只接入 API，不会记录主站访问。网络名以检测结果为准；Docker 服务名不能在“服务器本机”网络中解析。
+
+## 不知道怎么填
+
+网页有「不知道怎么填？查看查询指令」，可直接复制。先在服务器终端运行，再按提示填写：
+
+| 查询内容 | 指令 | 填写方式 |
 | --- | --- | --- |
-| 入口标识 | `my-api` | `aimore-api` |
-| 名称 | 业务 API | AimOre API |
-| 后端 HTTP 地址 | `http://127.0.0.1:8000` | `http://aimore-cloud:8766` |
-| 后端所在网络 | 服务器本机 | 选择业务服务所在的自定义 bridge 网络 |
-| 宿主机监听端口 | `18080`，有占用就换一个 | 同左 |
-| 宿主机访问范围 | 默认「仅本机」 | 默认「仅本机」 |
+| 代理容器 | `docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'` | 将代理对应的 NAMES 填入容器名称 |
+| 配置挂载 | `docker inspect 容器名称 --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'` | 配置路径填写箭头右侧；挂载目录需补文件名 |
+| Caddy 启动参数 | `docker inspect 容器名称 --format '{{json .Config.Cmd}}'` | 填写 `--config` 后面的路径 |
+| Docker 网络 | `docker inspect 容器名称 --format '{{json .NetworkSettings.Networks}}'` | 代理和业务各查一次，选择共同网络 |
+| 本机代理 | `systemctl is-active caddy nginx` | 对应项为 active 才表示本机服务正在运行 |
+| 本机启动参数 | `systemctl show caddy nginx --property=ExecStart --value` | Caddy 的 `--config` 后面是配置路径 |
+| 应用错误 | `docker logs --tail 80 容器名称` | 查看原始错误，不用填进表单 |
 
-保存后点击「启动」。首次启动自动拉取网关镜像，沿用服务器已有 Docker 镜像源设置。拉取失败时可修改尚未创建容器的入口，填写官方 Nginx 的兼容镜像副本后重试。
+Nginx 不知道选哪个文件时，网页另有查询指令，按域名列出它所在的生效配置文件。查询失败会保留已填内容；对外提供日志前先遮盖密码和令牌。
 
-「仅本机」限制的是宿主机映射端口；同一 Docker 网络内的容器仍能访问网关的 `10000` 端口。
+## 自动接入的范围
 
-只允许可信前置代理连接时，可以勾选「信任前置代理」以向业务服务保留原始 HTTP/HTTPS 协议和转发链。网关默认不信任客户端传入的这两个请求头；不要对公开直连入口随意开启此项。HTTPS 在外层终止、业务依赖原始协议时应开启。
+- 本机或 Docker Caddy：常见单个 HTTP 后端，以及简单静态网站。
+- 本机或 Docker Nginx：单个 HTTP 后端，规则需明确设置 Host、X-Forwarded-Proto 和 X-Forwarded-For。
+- Docker 配置必须以 bind 方式挂载到宿主机；使用 host 或自定义 bridge 网络。
+- 复杂配置会给出原因并拒绝自动改写，例如 Caddy import、多上游、带高级选项的转发、依赖客户端 IP 的静态规则、Nginx 静态站点。
+- 本机 Caddy 的服务环境变量配置、Caddy --resume，以及 Nginx 自定义主配置/前缀暂不自动接入。
 
-## 2. 你当前的 AimOre / Caddy 怎么接
+其他代理可在「高级新建」创建网关，由维护者把对应转发目标改为页面给出的网关地址：本机代理用 `127.0.0.1:监听端口`，同网络容器用 `mini-gateway-标识:10000`。采集仍统一在网关完成，不依赖代理日志格式。
 
-先确认 Caddy 和业务服务共享的网络：
+## 撤销与维护
 
-```bash
-docker inspect aimore-caddy-1 aimore-aimore-cloud-1 \
-  --format '{{.Name}} {{range $name, $value := .NetworkSettings.Networks}}{{$name}} {{end}}'
-```
+点击网关的「撤销接入」恢复原网站规则，网关仍保留运行。成功后可以修改、停止或删除网关。多个站点可以独立撤销，不覆盖其他站点的后续修改。
 
-在页面选择输出中两者共有的网络，不要照抄猜测的网络名称。创建 `aimore-api`，后端填写 `http://aimore-cloud:8766`，保存并启动。
+配置备份在数据目录的 `gateway-connections/入口标识/`：`before.conf` 是接入前完整配置，`disconnect-before.conf` 是最近一次撤销前配置。备份不包含 Docker 容器或日志。
 
-在服务器先测试网关，不切换线上流量：
+如规则被外部修改、Compose 重建了代理容器，或自动恢复失败，系统会停止自动覆盖并保留网关。先由维护者核对当前配置、容器挂载和备份再恢复，不能直接用旧文件覆盖整个站点配置。Agent 文件备份不会替你恢复外部代理的配置。
 
-```bash
-curl --max-time 10 -i -H 'Host: aimore.meetpeak.tech' \
-  http://127.0.0.1:18080/cloud/health
-```
+## 记录范围
 
-确认返回业务正常响应，并能在面板的「统一网关 → AimOre API」看到记录。
-
-备份并打开你当前的 Caddyfile：
-
-```bash
-cp -p /opt/aimore/deploy/aimore-cloud/Caddyfile \
-  "/opt/aimore/deploy/aimore-cloud/Caddyfile.bak.$(date +%Y%m%d-%H%M%S)"
-nano /opt/aimore/deploy/aimore-cloud/Caddyfile
-```
-
-仅把 `aimore.meetpeak.tech` 中的这一段上游改为页面给出的容器地址：
-
-```caddyfile
-handle /cloud/* {
-    reverse_proxy mini-gateway-aimore-api:10000
-}
-```
-
-保留其他配置。主站静态文件和不经过这个 `handle` 的请求不会被网关记录。无需增加 Caddy 的 `log` 配置。
-
-你的 Caddy 设置了 `admin off`，不能调用管理 API 重载。先校验刚编辑的宿主机文件，再重启容器：
-
-```bash
-if docker exec -i aimore-caddy-1 caddy validate \
-    --config /dev/stdin --adapter caddyfile \
-    < /opt/aimore/deploy/aimore-cloud/Caddyfile; then
-  docker restart aimore-caddy-1
-else
-  echo '配置校验失败，未重启。请修正后重试。'
-fi
-curl --max-time 10 -i https://aimore.meetpeak.tech/cloud/health
-```
-
-用标准输入校验，是为了避免编辑器替换文件后，容器内单文件挂载仍暂时指向旧文件。重启可能短暂中断连接。若异常，把上游恢复为 `aimore-cloud:8766`，再次校验并重启；先恢复业务流量，再处理网关。
-
-## 3. 换成其他代理也一样
-
-只需把需要监控的转发目标改为网关地址。宿主机代理使用 `127.0.0.1:18080`；同网络容器代理使用页面给出的 `mini-gateway-入口标识:10000`。容器里的 `127.0.0.1` 不是宿主机。
-
-例如本机 Nginx 原来的 `location` 中，上游可改为：
-
-```nginx
-proxy_pass http://127.0.0.1:18080;
-```
-
-保留业务原有的路径匹配、请求头、SSE/WebSocket 等代理配置。外层代理同样需要支持对应协议；仅网关关闭缓冲，无法解除外层代理的缓冲。校验并重载原代理后生效。
-
-没有前置代理时，也可以选「所有网卡」，让客户端通过服务器 IP 和所填端口访问。此方式是 HTTP，不自动签发证书；仅在确实需要直连时开放该端口，网关不会替业务增加登录认证。
-
-## 4. 查看和维护
-
-- 请求页面每 10 秒刷新，可按路径、域名和状态筛选，最多展示最近 300 条。采集始终发生在网关，不依赖网页保持打开。
-- 耗时是网关观察到的时间，不是函数耗时或用户浏览器的完整加载时间。SSE/WebSocket 等长连接关闭后才形成完整记录。
-- 支持 HTTP 后端、普通 HTTP 转发、SSE 和 WebSocket。当前不支持 HTTPS 上游、gRPC、TCP/UDP 代理；外层 HTTPS 可继续使用。
-- 上传上限 64 MiB，上游读写空闲超时 1 小时；不是业务总执行时间上限。已有外层代理可以有更小的限制。
-- 不记录查询参数、认证头、Cookie 和请求体。路径本身仍可能包含业务标识，避免把密码或 Token 放进路径。
-- 日志使用 Docker 本地轮转，每个容器最多约 3 份、每份 10 MiB；页面读取最近 1000 行中的有效记录，不提供永久归档。删除容器会删除日志。
-- 修改运行中入口的后端地址会先校验再平滑重载；原有长连接可能继续连接旧后端。更新失败恢复旧配置，中断的更新在下次保存或启动时恢复。
-- 容器创建后，端口、网络和镜像不能原地修改。需要变更时新建入口，测试并切换流量，再停止、删除旧入口。
-- 停止或删除前，必须先把前置代理切回原业务上游。运行中的入口禁止直接删除。
-
-遇到 502，检查所选网络和后端服务名；「运行中」只代表网关启动，不代表业务接口健康。配置默认保存在 `/var/lib/mini-deploy-agent/request-gateways/`，随数据目录备份；Docker 容器、镜像和容器日志不在面板文件备份内。
+- 页面每 10 秒刷新，最多展示最近 300 条；采集不依赖网页保持打开。
+- 记录网关观察到的时间、方法、域名、路径、状态、总耗时和上游耗时，不代表浏览器完整加载时间。SSE/WebSocket 在连接结束后形成完整记录。
+- 支持 HTTP 后端、SSE/WebSocket；不支持 HTTPS 上游、gRPC、TCP/UDP。外层 HTTPS 保留。
+- 上传上限 64 MiB，上游读写空闲超时 1 小时。外层代理和业务仍可能有更小限制。
+- 不记录查询参数、认证头、Cookie 和请求体。不要把密码或令牌放进 URL 路径。
+- 日志由 Docker 轮转，每个容器约 3 份、每份 10 MiB；页面读取最近 1000 行中的有效记录，不做永久归档。删除容器会删除日志。
+- 向导默认只映射本机端口，并信任前置代理的转发头。只应允许可信代理和同网络容器连接，不要把网关端口直接暴露到公网。
 
 ## 开发验收
 
-普通单元测试与浏览器测试不需要启动 Docker。真实转发测试可以指定本机 Nginx 二进制：
+原生 Caddy/Nginx 联动测试：
 
 ```bash
+MINI_DEPLOY_TEST_CADDY=/usr/bin/caddy \
 MINI_DEPLOY_TEST_NGINX=/usr/sbin/nginx \
-  python -m pytest tests/test_request_gateway_integration.py -q
+python3 -m pytest tests/test_gateway_connections_integration.py -q
 ```
 
-在专用 Linux Docker 测试机以 root 运行以下命令，会创建临时网络及测试容器，检查实际容器权限、流式响应、WebSocket、网络解析、重载和生命周期，并在结束后清理测试资源：
+专用 Linux Docker 测试机以 root 运行（会创建并清理临时容器和网络）：
 
 ```bash
 MINI_DEPLOY_GATEWAY_DOCKER_TESTS=1 \
-  python3 -m pytest tests/test_request_gateway_integration.py -q
+python3 -m pytest tests/test_request_gateway_integration.py tests/test_gateway_connections_integration.py -q
 ```
 
-仓库 CI 已加入同一 Docker 验收任务。本地 Windows 上的原生 Nginx 通过不代表 Linux Docker 验收已经通过。
+CI 已配置 Docker 验收。本地 Windows 原生代理通过不代表 Linux Docker 验收已通过。

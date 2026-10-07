@@ -27,6 +27,7 @@ mini_deploy receives Git webhooks, runs your project deploy script, and shows de
 - Detects local and Docker Nginx, saves a shared runtime selection and checks each project's upstream connectivity
 - Reads request records from the selected Nginx or a local Docker Caddy container when JSON access logging is enabled
 - Optionally runs independent Docker request gateways: forward HTTP traffic, SSE and WebSocket, and record status and duration without configuring the existing proxy's access logs
+- Guides supported Caddy/Nginx traffic connections in the UI: detect, preview, back up, apply and disconnect; provides diagnostic commands and field guidance when detection is insufficient
 - Deduplicates retried webhook deliveries and persists queued jobs across Agent restarts
 - Continuously probes configured health URLs and shows the latest result without automatically restarting business services
 - Uses a password-protected web UI

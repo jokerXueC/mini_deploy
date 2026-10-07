@@ -80,8 +80,42 @@
           </div>
         </div>
         <section id="requestGatewayManager" class="request-gateway-manager" hidden>
-          <div class="panel-head"><h3>统一请求网关</h3><div class="request-actions"><button id="gatewayRefresh" class="ghost-button compact-action" type="button">刷新状态</button><button id="gatewayAdd" class="danger-button compact-action" type="button">新增入口</button></div></div>
+          <div class="panel-head"><h3>统一请求网关</h3><div class="request-actions"><button id="gatewayRefresh" class="ghost-button compact-action" type="button">刷新状态</button><button id="gatewayAdd" class="ghost-button compact-action" type="button">高级新建</button><button id="gatewayConnectOpen" class="danger-button compact-action" type="button">启用请求监控</button></div></div>
           <p id="gatewayFeedback" role="status"></p>
+          <section id="gatewayConnectPanel" class="gateway-connect" hidden aria-labelledby="gatewayConnectTitle">
+            <div class="panel-head"><h3 id="gatewayConnectTitle">接入网站流量</h3><button id="gatewayConnectClose" class="ghost-button compact-action" type="button">收起</button></div>
+            <p id="gatewayConnectFeedback" role="status"></p>
+            <fieldset id="gatewayConnectFields">
+              <div class="request-gateway-fields">
+                <label class="field gateway-image-field"><span>检测到的入口</span><select id="connectDetected"><option value="">手动填写</option></select></label>
+                <label class="field"><span>代理类型</span><select id="connectKind"><option value="caddy">Caddy</option><option value="nginx">Nginx</option></select></label>
+                <label class="field"><span>运行位置</span><select id="connectMode"><option value="docker">Docker 容器</option><option value="local">服务器本机</option></select></label>
+                <label class="field" id="connectContainerField"><span>代理容器名称</span><input id="connectContainer" placeholder="例如 aimore-caddy-1" maxlength="128"></label>
+                <label class="field"><span>代理内的配置路径</span><input id="connectConfig" value="/etc/caddy/Caddyfile" maxlength="512"></label>
+              </div>
+              <div class="request-actions"><button id="connectDiscover" class="ghost-button compact-action" type="button">重新检测入口</button><button id="connectInspect" class="danger-button compact-action" type="button">读取网站规则</button></div>
+              <div id="connectRouteFields" hidden>
+                <div class="request-gateway-fields">
+                  <label class="field gateway-image-field"><span>要监控的网站或转发规则</span><select id="connectRoute"><option value="">请选择</option></select></label>
+                  <label class="field gateway-image-field"><span>使用的网关</span><select id="connectExisting"><option value="">新建网关</option></select></label>
+                  <label class="field"><span>网关标识</span><input id="connectKey" maxlength="40" placeholder="例如 website-monitor"></label>
+                  <label class="field"><span>监听端口</span><input id="connectPort" type="number" min="1024" max="65535" value="18080"></label>
+                  <label class="field"><span>代理与业务共有的网络</span><select id="connectNetwork"><option value="">请选择</option></select></label>
+                  <label class="field" id="connectInternalField" hidden><span>静态文件内部端口</span><input id="connectInternal" type="number" min="1024" max="65535" value="18081"></label>
+                  <label class="field"><span>连通检测路径（不含域名）</span><input id="connectProbe" value="/" placeholder="例如 /cloud/health" maxlength="512"></label>
+                  <label class="field gateway-image-field"><span>网关镜像</span><input id="connectImage" value="nginx:stable-alpine" maxlength="255"></label>
+                </div>
+                <p id="connectRouteNotice" class="muted"></p>
+                <button id="connectPreview" class="ghost-button compact-action" type="button">预览接入改动</button>
+              </div>
+              <div id="connectReview" class="gateway-connect-review" hidden>
+                <h3>确认接入</h3><dl><dt>原入口</dt><dd id="connectBefore"></dd><dt>接入后</dt><dd id="connectAfter"></dd></dl>
+                <p id="connectReviewNotice" class="muted"></p>
+                <button id="connectApply" class="danger-button compact-action" type="button">确认并启用</button>
+              </div>
+            </fieldset>
+            <details id="connectHelp"><summary>不知道怎么填？查看查询指令</summary><div id="connectHelpItems"></div></details>
+          </section>
           <div id="gatewayEntries"></div>
           <form id="requestGatewayForm" hidden>
             <h3 id="gatewayFormTitle">新增入口</h3>
@@ -851,6 +885,7 @@
   <script src="ui/docker-images.js"></script>
   <script src="ui/onboarding.js"></script>
   <script src="ui/request-gateway.js"></script>
+  <script src="ui/gateway-connect.js"></script>
   <script src="ui/nginx-requests.js"></script>
 </body>
 </html>

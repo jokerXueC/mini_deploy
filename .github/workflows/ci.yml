@@ -27,7 +27,7 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Lint Python
-        run: ruff check agent.py certificates.py nginx_runtime.py nginx_install.py request_gateway.py project_guidance.py entrypoint_checks.py scripts/verify_backup.py tests
+        run: ruff check agent.py certificates.py nginx_runtime.py nginx_install.py request_gateway.py gateway_connections.py project_guidance.py entrypoint_checks.py scripts/verify_backup.py tests
       - name: Run tests
         run: pytest
 
@@ -59,7 +59,7 @@ jobs:
           python -m venv .gateway-test-venv
           .gateway-test-venv/bin/pip install -r requirements-dev.txt
       - name: Test actual hardened gateway, streaming and Docker DNS
-        run: sudo env MINI_DEPLOY_GATEWAY_DOCKER_TESTS=1 .gateway-test-venv/bin/python -m pytest tests/test_request_gateway_integration.py -q
+        run: sudo env MINI_DEPLOY_GATEWAY_DOCKER_TESTS=1 .gateway-test-venv/bin/python -m pytest tests/test_request_gateway_integration.py tests/test_gateway_connections_integration.py -q
 
   shell:
     name: ShellCheck

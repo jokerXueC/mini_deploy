@@ -257,7 +257,8 @@ def test_read_records_only_parses_owned_access_lines(store, monkeypatch):
     assert store.records("api")["records"][0]["duration_ms"] == 10
 
 
-def test_gateway_api_requires_auth_csrf_and_confirmation(monkeypatch, tmp_path):
+@pytest.mark.parametrize('endpoint', ['/request-gateways', '/gateway-connections'])
+def test_gateway_api_requires_auth_csrf_and_confirmation(monkeypatch, tmp_path, endpoint):
     monkeypatch.setattr(agent, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(agent, "UI_SESSION_SECRET", "gateway-test-session")
     monkeypatch.setattr(agent, "_audit_event", lambda *args, **kwargs: None)
@@ -265,10 +266,15 @@ def test_gateway_api_requires_auth_csrf_and_confirmation(monkeypatch, tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
+    import gateway_connections
+    monkeypatch.setattr(gateway_connections, 'discover', lambda: {'sources': []})
+    monkeypatch.setattr(gateway_connections.Connections, 'apply', lambda self, data: {'connection': {'state': 'connected'}})
+
     def request(method, headers=None, payload=None):
         connection = http.client.HTTPConnection(*server.server_address, timeout=5)
         try:
-            connection.request(method, "/request-gateways", body=json.dumps(payload) if payload else None,
+            path = endpoint + ('/discover' if endpoint == '/gateway-connections' and method == 'GET' else '')
+            connection.request(method, path, body=json.dumps(payload) if payload else None,
                                headers={"Content-Type": "application/json", **(headers or {})})
             response = connection.getresponse()
             return response.status, json.loads(response.read())
@@ -279,8 +285,8 @@ def test_gateway_api_requires_auth_csrf_and_confirmation(monkeypatch, tmp_path):
         assert request("GET")[0] == 401
         cookie = agent._make_session_cookie()
         headers = {"Cookie": f"{agent.COOKIE_NAME}={cookie}"}
-        assert request("GET", headers)[1] == {"entries": []}
-        payload = {"action": "save", "spec": spec()}
+        assert request("GET", headers)[1] == ({"entries": []} if endpoint == '/request-gateways' else {'sources': []})
+        payload = {"action": "save", "spec": spec()} if endpoint == '/request-gateways' else {'action': 'apply'}
         assert request("POST", headers, payload)[0] == 403
         headers["X-CSRF-Token"] = agent._csrf_token(cookie)
         assert request("POST", headers, payload)[0] == 400

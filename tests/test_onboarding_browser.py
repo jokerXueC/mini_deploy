@@ -110,6 +110,33 @@ def browser_page():
                 result = {'entries': state['gateway_entries']}
             elif path == '/gateway-requests':
                 result = state.get('gateway_requests', {'records': [], 'notice': '请求结束后显示记录'})
+            elif path == '/gateway-connections/discover':
+                result = {'sources': [] if state.get('no_proxy') else [
+                    {'label': 'Docker Caddy · edge', 'kind': 'caddy', 'mode': 'docker', 'container': 'edge', 'config_path': '/etc/caddy/Caddyfile'}],
+                    'help': [{'title': '查询配置挂载', 'command': 'docker inspect edge', 'fill': '配置路径填写箭头右边的容器内路径。'}]}
+            elif path == '/gateway-connections':
+                if state.get('connection_failure'):
+                    route.fulfill(status=400, json={'detail': '配置已变化，请重新检测网站'})
+                    return
+                action = payload['action']
+                if action == 'inspect':
+                    result = {'source': payload['source'], 'revision': 'config-revision', 'networks': ['app_default'], 'routes': [
+                        {'id': 'static', 'site': 'site.test', 'kind': 'static', 'label': '静态网站', 'supported': True},
+                        {'id': 'api', 'site': 'api.test', 'kind': 'proxy', 'label': 'handle /cloud/*', 'upstream': 'http://api:8766', 'supported': True},
+                        {'id': 'complex', 'site': 'other.test', 'kind': 'proxy', 'label': '多上游', 'supported': False, 'reason': '暂不自动改写'}],
+                        'help': [{'title': '查询网络', 'command': 'docker inspect edge', 'fill': '填写代理与业务共有的网络名称。'}]}
+                elif action == 'preview':
+                    result = {'token': 'reviewed-token', 'gateway': {'key': payload['key']}, 'site': 'site.test', 'kind': 'static',
+                              'before_rule': 'site.test → 静态文件', 'after_rule': 'site.test → mini-gateway → 原静态站点', 'notice': '确认后备份并重启 Caddy。'}
+                elif action == 'apply':
+                    connection = {'state': 'connected', 'site': 'site.test', 'token': 'reviewed-token'}
+                    state['gateway_entries'] = [{'key': payload['key'], 'name': 'site.test', 'state': 'running', 'connection': connection,
+                        'port': 18080, 'network': 'app_default', 'upstream': 'http://edge:18081', 'image': 'nginx:stable-alpine',
+                        'local_address': '127.0.0.1:18080', 'caddy_upstream': 'mini-gateway-web-site-test:10000', 'revision': 'entry-revision'}]
+                    result = {'connection': connection}
+                elif action == 'disconnect':
+                    state['gateway_entries'][0]['connection'] = {'state': 'not_connected'}
+                    result = {'connection': {'state': 'not_connected'}}
             route.fulfill(json=result)
 
         server_url = f'http://127.0.0.1:{server.server_port}'
@@ -544,6 +571,7 @@ def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
     page.wait_for_selector('[data-gateway-action="start"]')
     assert page.locator('#gatewayEntries script').count() == 0
     assert state['posts'][-1][1]['confirmed'] is True
+    assert page.locator('#gatewayConnectOpen').is_enabled()
     page.locator('[data-gateway-action="edit"]').click()
     page.locator('#gatewayNetwork').select_option('other_default', force=True)
     page.locator('#gatewayCancel').click()
@@ -589,3 +617,66 @@ def test_gateway_save_error_keeps_form_values(browser_page):
     assert page.locator('#requestGatewayForm').is_visible()
     assert page.locator('#gatewayUpstream').input_value() == 'http://127.0.0.1:8000'
     assert page.locator('#gatewaySave').is_enabled()
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp_path):
+    page, state = browser_page
+    page.locator('#closeProjectModalBtn').click()
+    page.set_viewport_size({'width': width, 'height': 950})
+    page.locator('#requestsViewTab').click()
+    page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayConnectOpen').click()
+    page.wait_for_function("document.querySelector('#connectContainer').value === 'edge'")
+    page.locator('#connectInspect').click()
+    page.wait_for_selector('#connectRouteFields', state='visible')
+    page.locator('#connectRoute').select_option('static', force=True)
+    assert page.locator('#connectNetwork').input_value() == 'app_default'
+    assert page.locator('#connectInternalField').is_visible()
+    page.locator('#connectPort').fill('18081')
+    assert page.locator('#connectInternal').input_value() != '18081'
+    assert page.locator('#connectRoute option[value="complex"]').evaluate('(option) => option.disabled')
+    page.locator('#connectHelp summary').click()
+    assert '共有的网络' in page.locator('#connectHelpItems').inner_text()
+    page.locator('#connectPreview').click()
+    page.wait_for_selector('#connectReview', state='visible')
+    assert not any(p.get('action') == 'apply' for _, p in state['posts'])
+    page.locator('#connectPort').fill('18083')
+    assert page.locator('#connectReview').is_hidden()
+    page.locator('#connectPreview').click()
+    page.wait_for_selector('#connectReview', state='visible')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'connection-review-{width}.png'), full_page=True)
+    page.locator('#connectApply').click()
+    page.locator('#confirmCancelBtn').click()
+    assert not any(p.get('action') == 'apply' for _, p in state['posts'])
+    page.locator('#connectApply').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('[data-gateway-action="disconnect"]')
+    assert '路由已接入' in page.locator('#gatewayEntries').inner_text()
+    assert page.locator('[data-gateway-action="edit"]').is_disabled()
+    assert page.locator('[data-gateway-action="stop"]').is_disabled()
+    apply = next(p for _, p in state['posts'] if p.get('action') == 'apply')
+    assert apply['confirmed'] is True and apply['token'] == 'reviewed-token'
+    page.locator('[data-gateway-action="disconnect"]').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('[data-gateway-action="disconnect"]', state='detached')
+    assert '尚未通过向导' in page.locator('#gatewayEntries').inner_text()
+
+
+def test_connection_errors_preserve_inputs_and_show_help(browser_page):
+    page, state = browser_page
+    state['no_proxy'] = True
+    page.locator('#closeProjectModalBtn').click()
+    page.locator('#requestsViewTab').click()
+    page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayConnectOpen').click()
+    page.wait_for_function("document.querySelector('#connectHelp').open")
+    assert '右边' in page.locator('#connectHelpItems').inner_text()
+    page.locator('#connectContainer').fill('custom-edge')
+    state['connection_failure'] = True
+    page.locator('#connectInspect').click()
+    page.wait_for_function("document.querySelector('#gatewayConnectFeedback').textContent.includes('配置已变化')")
+    assert page.locator('#connectContainer').input_value() == 'custom-edge'
+    assert page.locator('#connectHelp').get_attribute('open') is not None
+    assert page.locator('#connectInspect').is_enabled()

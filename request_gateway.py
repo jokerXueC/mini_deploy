@@ -181,6 +181,7 @@ class Store:
         return item
 
     def describe(self, entry: dict[str, Any], *, live: bool = True) -> dict[str, Any]:
+        from gateway_connections import Connections
         spec = entry["spec"]
         item, error = None, ""
         if live:
@@ -194,10 +195,14 @@ class Store:
         return {**spec, "revision": revision(spec), "state": "unknown" if error else state,
                 "container": f'mini-gateway-{spec["key"]}', "error": error,
                 "local_address": address, "docker_address": docker_address,
+                "connection": Connections(self.root.parent).status(spec['key']),
                 "caddy_upstream": docker_address or address}
 
     def save(self, raw: Any, expected: str = "") -> dict[str, Any]:
         spec = normalize(raw)
+        from gateway_connections import Connections
+        if Connections(self.root.parent).status(spec['key'])['state'] != 'not_connected':
+            raise CertificateError("此入口已接入网站，请先撤销接入后再修改网关配置")
         self.recover(spec["key"])
         directory = self.directory(spec["key"])
         old = self.read(spec["key"]) if (directory / "entry.json").exists() else None
@@ -378,6 +383,9 @@ class Store:
             if action == "start":
                 self.start(entry)
             elif action in {"stop", "delete"}:
+                from gateway_connections import Connections
+                if Connections(self.root.parent).status(entry['spec']['key'])['state'] != 'not_connected':
+                    raise CertificateError('此网关仍有网站接入或待恢复操作，请先撤销接入，再停止或删除')
                 item = self.inspect(entry)
                 if action == "stop" and item:
                     if item["State"]["Status"] == "paused":
