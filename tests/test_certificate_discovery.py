@@ -3,6 +3,7 @@ import copy
 import http.client
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -292,3 +293,65 @@ def test_replacement_rejects_new_uncovered_shared_domain(discovered, monkeypatch
     with pytest.raises(ValueError, match="全部域名"):
         manager.replace(row["id"], row["certificate"]["fingerprint"], pem_pair["certificate"], pem_pair["private_key"])
     assert before == (cert.read_bytes(), key.read_bytes())
+
+
+@pytest.fixture
+def managed_discovered(discovered, pem_pair):
+    manager, _, _, source, site = discovered
+    directory = manager.home / "certificates" / "api" / ("a" * 24)
+    directory.mkdir(parents=True)
+    cert, key = directory / "fullchain.pem", directory / "privkey.pem"
+    discovery.certificates.atomic_write(cert, pem_pair["certificate"])
+    discovery.certificates.atomic_write(key, pem_pair["private_key"])
+    record = {**discovery.certificates.inspect_pair(cert, key, "api.example.test"),
+              "revision": directory.name, "label": "Original user label", "issuer": "stale record"}
+    metadata = directory.parent / "current.json"
+    discovery.certificates.atomic_write(metadata, json.dumps(record))
+    source["mounts"][0].update(Source=str(manager.home / "certificates"), RW=False)
+    site.update(certificate_path=f"/certs/api/{directory.name}/fullchain.pem",
+                key_path=f"/certs/api/{directory.name}/privkey.pem")
+    manager.scan()
+    assert manager.rows[0]["can_replace"], manager.snapshot()
+    return manager, cert, key, metadata
+
+
+def test_managed_certificate_replaces_from_same_entry_with_metadata_and_backup(managed_discovered, monkeypatch, pem_pair):
+    manager, cert, key, metadata = managed_discovered
+    original = metadata.read_bytes()
+    modes = [path.stat().st_mode & 0o777 for path in (cert, key)]
+    monkeypatch.setattr(manager, "execute", lambda *args: "")
+    row = manager.rows[0]
+    result = manager.replace(row["id"], row["certificate"]["fingerprint"], pem_pair["certificate"] + "\n", pem_pair["private_key"])
+    record = json.loads(metadata.read_text())
+    assert record["label"] == "Original user label" and record["revision"] == "a" * 24
+    assert record["issuer"] != "stale record"
+    assert (Path(result["backup"]) / "previous.json").read_bytes() == original
+    assert cert.read_text() == pem_pair["certificate"] + "\n"
+    assert [path.stat().st_mode & 0o777 for path in (cert, key)] == modes
+
+
+def test_managed_replace_reload_failure_restores_metadata_and_files(managed_discovered, monkeypatch, pem_pair):
+    manager, cert, key, metadata = managed_discovered
+    original = [path.read_bytes() for path in (cert, key, metadata)]
+    calls = []
+
+    def execute(source, args):
+        calls.append(args)
+        if len(calls) == 3:
+            raise ValueError("reload failed")
+
+    monkeypatch.setattr(manager, "execute", execute)
+    row = manager.rows[0]
+    with pytest.raises(discovery.DiscoveryError, match="已恢复"):
+        manager.replace(row["id"], row["certificate"]["fingerprint"], pem_pair["certificate"] + "\n", pem_pair["private_key"])
+    assert [path.read_bytes() for path in (cert, key, metadata)] == original
+
+
+def test_managed_historical_revision_is_not_replaced(managed_discovered):
+    manager, cert, key, metadata = managed_discovered
+    record = json.loads(metadata.read_text())
+    record["revision"] = "b" * 24
+    metadata.write_text(json.dumps(record))
+    with pytest.raises(discovery.DiscoveryError, match="当前托管版本"):
+        manager.replacement_paths(manager.rows[0])
+    assert cert.exists() and key.exists()

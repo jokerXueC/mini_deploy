@@ -32,8 +32,10 @@ business configuration. Supported configuration readers are Nginx and Caddy. Oth
 certificate files are listed separately and are not assumed to be active websites.
 Automatic renewals stay with the original service. Eligible manually configured
 Nginx certificates can be replaced with validation, backups and rollback; symlinks,
-read-only mounts and single-file container mounts are not overwritten. Legacy site
-registration and managed certificate controls remain under manual settings.
+read-only external mounts and single-file container mounts are not overwritten.
+Previously managed certificates use the same replacement action, preserving their
+metadata and backups. Internal/default sites are collapsed; duplicate setup forms
+have been removed without deleting existing server configuration.
 
 ## Install And Sign In
 

@@ -73,6 +73,8 @@ def dashboard():
                         "domain": item["app_domain"]} for item in state["sites"]]}
                 elif path == "/certificate-discovery":
                     result = {**state.get("discovery", {"items": [], "running": False, "last_scan": 1}), "csrf_token": "test-token"}
+                    if payload.get("action") == "replace":
+                        result = {"message": "证书已替换", "backup": "/data/certificate-backups/example"}
                 elif path == "/docker/images":
                     result = {"images": []}
                 elif path == "/docker/logs":
@@ -113,41 +115,53 @@ def test_routes_and_monitoring_only_requests(dashboard, view):
         page.wait_for_timeout(100)
         page.clock.run_for(31000)
     assert not state["errors"]
+
+
+@pytest.mark.parametrize("width", [390, 1440])
+def test_default_sites_collapsed_and_certificate_upload_has_one_entry(dashboard, tmp_path, width):
+    page, state, origin = dashboard
+    base = {"referenced": True, "active": True, "source": "Docker · proxy", "kind": "nginx", "renewal": "原服务管理"}
+    state["discovery"] = {"running": False, "last_scan": 1791356400, "items": [
+        {**base, "id": "site", "domains": ["api.example.test"], "can_replace": True, "tls": True,
+         "certificate": {"days_remaining": 30, "expires_at": 1793962000, "fingerprint": "abc"}},
+        {**base, "id": "gateway", "domains": ["_"], "tls": False},
+        {**base, "id": "default", "domains": [], "kind": "caddy", "tls": True},
+        {**base, "id": "dash", "domains": ["-"], "tls": False},
+        {**base, "id": "wildcard", "domains": ["*.example.test"], "tls": True}]}
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(f"{origin}/ui?view=certificates")
+    playwright.expect(page.locator("#discoverySites")).to_contain_text("api.example.test")
+    playwright.expect(page.locator("#discoveryInternalCount")).to_have_text("(3)")
+    playwright.expect(page.locator('[data-discovery-id="gateway"]')).to_be_hidden()
+    assert page.locator('#certificateAdvanced, #siteAdd, #nginxSettingsForm, #certificateProject').count() == 0
+    assert page.locator('[data-discovery-id="wildcard"] [data-discovery-action="check"]').count() == 0
+    page.screenshot(path=str(tmp_path / f"certificates-folded-{width}.png"), full_page=True)
+    page.locator("#discoveryInternal > summary").click()
+    playwright.expect(page.locator('[data-discovery-id="gateway"]')).to_be_visible()
+    assert page.locator('#discoveryInternal [data-discovery-action="check"]').count() == 0
+    page.locator("#discoveryScan").click()
+    page.wait_for_timeout(100)
+    assert page.locator("#discoveryInternal").get_attribute("open") is not None
+    page.locator('[data-discovery-action="replace"]').click()
+    page.locator("#discoveryCertFile").set_input_files({"name": "cert.pem", "mimeType": "text/plain", "buffer": b"certificate"})
+    page.locator("#discoveryKeyFile").set_input_files({"name": "private.key", "mimeType": "text/plain", "buffer": b"private-key"})
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    for selector in ("#discoveryCertFile", "#discoveryKeyFile", "#discoveryReplaceSave"):
+        box = page.locator(selector).bounding_box()
+        assert box and box["x"] >= 0 and box["x"] + box["width"] <= width
+    page.screenshot(path=str(tmp_path / f"certificates-upload-{width}.png"), full_page=True)
+    page.locator("#discoveryReplaceSave").click()
+    page.locator("#confirmOkBtn").click()
+    playwright.expect(page.locator("#discoveryFeedback")).to_contain_text("证书已替换")
+    request = next(payload for path, _, payload in state["calls"] if path == "/certificate-discovery" and payload.get("action") == "replace")
+    assert request == {"action": "replace", "id": "site", "fingerprint": "abc", "certificate": "certificate", "private_key": "private-key"}
+    assert not any(path in ("/nginx-settings", "/certificates", "/sites", "/sites/save") for path, _, _ in state["calls"])
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    assert not state["errors"]
     assert not any(any(term in path for term in ("projects-config", "preflight", "redeploy", "rollback", "webhook", "/logs"))
                    for path, _, _ in state["calls"])
 
 
-def test_site_registration_updates_nginx_and_certificates(dashboard):
-    page, state, origin = dashboard
-    page.goto(f"{origin}/ui?view=certificates")
-    page.locator('#certificateAdvanced > summary').click()
-    page.locator("#siteAdd").click()
-    playwright.expect(page.locator("#siteKey")).to_be_hidden()
-    for field, value in {"siteName": "API", "siteDomain": "api.example.test", "sitePort": "8001"}.items():
-        page.locator(f"#{field}").fill(value)
-    page.locator("#siteSave").click()
-    playwright.expect(page.locator('[data-site-edit="site-test"]')).to_be_visible()
-    playwright.expect(page.locator("#nginxQuickProject")).to_have_value("site-test")
-    playwright.expect(page.locator("#certificateProject")).to_have_value("site-test")
-    saved = next(payload for path, _, payload in state["calls"] if path == "/sites/save")
-    assert set(saved["site"]) == {"key", "name", "app_domain", "service_port", "health_url"}
-    assert saved["site"]["key"] == ""
-    page.locator('[data-site-edit="site-test"]').click()
-    assert page.locator("#siteKey").evaluate("element => element.readOnly")
-    page.locator("#siteName").fill("API service")
-    page.locator("#siteSave").click()
-    playwright.expect(page.locator("#siteRegistryList")).to_contain_text("API service")
-    assert [payload for path, _, payload in state["calls"] if path == "/sites/save"][-1]["original_key"] == "site-test"
-    state["refuse_delete"] = True
-    page.locator('[data-site-delete="site-test"]').click()
-    page.locator("#confirmOkBtn").click()
-    playwright.expect(page.locator("#siteFeedback")).to_contain_text("Managed Nginx")
-    playwright.expect(page.locator('[data-site-edit="site-test"]')).to_be_visible()
-    state["refuse_delete"] = False
-    page.locator('[data-site-delete="site-test"]').click()
-    page.locator("#confirmOkBtn").click()
-    playwright.expect(page.locator("#siteRegistryList")).to_contain_text("暂无站点")
-    assert not state["errors"]
 
 
 def test_docker_actions_and_notification_save_do_not_fetch_deployment(dashboard):
@@ -163,22 +177,6 @@ def test_docker_actions_and_notification_save_do_not_fetch_deployment(dashboard)
     assert not state["errors"]
 
 
-@pytest.mark.parametrize("width", [390, 1440])
-def test_site_form_and_navigation_layout(dashboard, tmp_path, width):
-    page, state, origin = dashboard
-    page.set_viewport_size({"width": width, "height": 900})
-    page.goto(f"{origin}/ui?view=certificates")
-    page.locator('#certificateAdvanced > summary').click()
-    page.locator("#siteAdd").click()
-    page.locator("#siteName").fill("Long site name for layout verification")
-    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    for selector in ["#siteName", "#sitePort", "#siteSave", "#siteCancel"]:
-        box = page.locator(selector).bounding_box()
-        assert box and box["width"] > 0 and box["x"] >= 0 and box["x"] + box["width"] <= width
-    image = tmp_path / f"sites-{width}.png"
-    page.screenshot(path=str(image), full_page=True)
-    print(f"Screenshot: {image}")
-    assert not state["errors"]
 
 
 @pytest.mark.parametrize("width", [390, 1440])
@@ -196,7 +194,7 @@ def test_discovery_default_view_and_actions(dashboard, tmp_path, width):
     page.set_viewport_size({"width": width, "height": 900})
     page.goto(f"{origin}/ui?view=certificates")
     playwright.expect(page.locator("#discoverySites")).to_contain_text("meetpeak.tech")
-    playwright.expect(page.locator("#siteForm")).to_be_hidden()
+    assert page.locator("#siteForm, #certificateAdvanced").count() == 0
     assert not any(path in ("/nginx-settings", "/certificates", "/sites") for path, _, _ in state["calls"])
     playwright.expect(page.locator("#discoveryFiles")).to_be_hidden()
     page.locator('[data-discovery-action="check"][data-id="a"]').click()

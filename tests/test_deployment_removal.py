@@ -197,7 +197,9 @@ def test_site_key_cannot_take_over_retained_certificate(runtime):
     assert agent.PROJECTS == {}
 
 
-def test_site_ui_uses_actual_site_api_without_deployment(http_server, runtime):
+def test_certificate_page_preserves_existing_registration_without_showing_setup(http_server, runtime):
+    agent._save_site({"site": {"key": "api", "name": "API", "app_domain": "api.example.test", "service_port": 8766}})
+    original = agent.SITES_CONFIG_FILE.read_bytes()
     playwright = pytest.importorskip("playwright.sync_api")
     with playwright.sync_playwright() as browser_runtime:
         browser = browser_runtime.chromium.launch()
@@ -209,23 +211,10 @@ def test_site_ui_uses_actual_site_api_without_deployment(http_server, runtime):
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(http_server.origin + "/ui?view=certificates")
-            page.locator('#certificateAdvanced > summary').click()
-            page.locator("#siteAdd").click()
-            page.locator("#siteName").fill("API")
-            page.locator("#siteDomain").fill("api.example.test")
-            page.locator("#sitePort").fill("8766")
-            page.locator("#siteSave").click()
-            playwright.expect(page.locator("#siteRegistryList")).to_contain_text("api.example.test")
-            key = next(iter(agent.PROJECTS))
-            assert agent.PROJECTS[key].service_port == 8766
-            page.locator(f'[data-site-edit="{key}"]').click()
-            page.locator("#siteName").fill("API renamed")
-            page.locator("#siteSave").click()
-            playwright.expect(page.locator("#siteRegistryList")).to_contain_text("API renamed")
-            page.locator(f'[data-site-delete="{key}"]').click()
-            page.locator("#confirmOkBtn").click()
-            playwright.expect(page.locator("#siteRegistryList")).to_contain_text("暂无站点")
-            assert agent.PROJECTS == {}
+            playwright.expect(page.locator("#discoverySites")).to_be_visible()
+            assert page.locator('#certificateAdvanced, #siteAdd, #nginxSettingsForm').count() == 0
+            assert agent.SITES_CONFIG_FILE.read_bytes() == original
+            assert agent.PROJECTS["api"].service_port == 8766
             assert not errors
         finally:
             browser.close()

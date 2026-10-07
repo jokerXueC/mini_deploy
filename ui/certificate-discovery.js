@@ -4,6 +4,10 @@
   const date = value => value ? new Date(value * 1000).toLocaleString('zh-CN', {hour12: false}) : '尚未检查';
   let timer, loading = false, busy = false, selected = null, items = [];
   const feedback = message => { el('discoveryFeedback').textContent = message; };
+  const concreteDomains = item => (item.domains || []).filter(domain =>
+    /^(?=.{1,253}$)[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+$/i.test(domain));
+  const primarySite = item => (item.domains || []).some(domain =>
+    concreteDomains({domains: [domain.replace(/^\*\./, '')]}).length);
 
   function row(item) {
     const cert = item.certificate;
@@ -15,9 +19,9 @@
     const certificateSource = item.certificate_candidate ? '自动管理目录中的匹配证书，线上使用情况待检查' : item.referenced ? '配置引用的证书' : '未确认网站引用';
     const onlineStatus = online?.status === 'checking' ? '线上检查中…' : online?.checked_at ? `${online.status === 'healthy' ? '可访问' : '访问异常'} · ${online.detail || ''}` : '';
     return `<article class="discovery-row" data-discovery-id="${text(item.id)}">
-      <div class="discovery-identity"><strong>${text(item.domains?.join('、') || '默认站点 / 未指定域名')}</strong><small>${text(origin)}${!item.active && item.referenced ? ' · 未确认运行' : ''}</small></div>
+      <div class="discovery-identity"><strong>${text((item.domains || []).filter(domain => domain !== '_' && domain !== '-').join('、') || '默认站点 / 未指定域名')}</strong><small>${text(origin)}${!item.active && item.referenced ? ' · 未确认运行' : ''}</small></div>
       <div class="discovery-validity"><span class="badge ${tone}">${status}</span><small>${cert ? `${text(cert.days_remaining)} 天 · ${text(new Date(cert.expires_at * 1000).toLocaleDateString('zh-CN'))}` : text(item.renewal || '')}</small></div>
-      <div class="discovery-actions">${item.referenced ? `<button class="ghost-button compact-action" type="button" data-discovery-action="check" data-id="${text(item.id)}" ${item.stale || online?.status === 'checking' ? 'disabled' : ''}>检查线上</button>` : ''}${item.can_replace && !item.stale ? `<button class="ghost-button compact-action" type="button" data-discovery-action="replace" data-id="${text(item.id)}">替换证书</button>` : ''}</div>
+      <div class="discovery-actions">${item.referenced && concreteDomains(item).length ? `<button class="ghost-button compact-action" type="button" data-discovery-action="check" data-id="${text(item.id)}" ${item.stale || online?.status === 'checking' ? 'disabled' : ''}>检查线上</button>` : ''}${item.can_replace && !item.stale ? `<button class="ghost-button compact-action" type="button" data-discovery-action="replace" data-id="${text(item.id)}">替换证书</button>` : ''}</div>
       <details class="discovery-detail" data-detail-id="${text(item.id)}"><summary>详情${onlineStatus ? ` · ${text(onlineStatus)}` : ''}</summary>
         <dl><div><dt>证书来源</dt><dd>${text(certificateSource)}</dd></div>
         <div><dt>配置文件</dt><dd>${text(item.config_path || '未发现引用')}</dd></div>
@@ -36,14 +40,18 @@
     csrfToken = data.csrf_token || csrfToken;
     items = data.items || [];
     const open = new Set([...document.querySelectorAll('[data-detail-id][open]')].map(node => node.dataset.detailId));
-    const sites = items.filter(item => item.referenced), files = items.filter(item => !item.referenced);
-    const html = sites.length ? sites.map(row).join('') : `<div class="project-empty compact-empty">${data.running || !data.last_scan ? '正在发现服务器上的网站和证书…' : '常见位置未发现网站配置；可重新扫描或展开手动配置。'}</div>`;
-    for (const [id, content] of [['discoverySites', html], ['discoveryFiles', files.map(row).join('')]]) {
+    const sites = items.filter(item => item.referenced && primarySite(item));
+    const internal = items.filter(item => item.referenced && !primarySite(item));
+    const files = items.filter(item => !item.referenced);
+    const html = sites.length ? sites.map(row).join('') : `<div class="project-empty compact-empty">${data.running || !data.last_scan ? '正在发现服务器上的网站和证书…' : internal.length ? '暂未发现有明确域名的网站，其他入口已收起。' : '常见位置未发现网站配置，可重新扫描或查看扫描提示。'}</div>`;
+    for (const [id, content] of [['discoverySites', html], ['discoveryInternalSites', internal.map(row).join('')], ['discoveryFiles', files.map(row).join('')]]) {
       if (el(id)._content !== content) { el(id).innerHTML = content; el(id)._content = content; }
     }
     document.querySelectorAll('[data-detail-id]').forEach(node => { node.open = open.has(node.dataset.detailId); });
     el('discoveryOther').hidden = !files.length;
     el('discoveryOtherCount').textContent = `(${files.length})`;
+    el('discoveryInternal').hidden = !internal.length;
+    el('discoveryInternalCount').textContent = `(${internal.length})`;
     el('discoveryIssues').hidden = !(data.issues || []).length;
     el('discoveryIssueList').innerHTML = (data.issues || []).map(issue => `<li>${text(issue)}</li>`).join('');
     el('discoveryProgress').textContent = `${data.progress || '等待扫描'}${data.last_scan ? ` · ${date(data.last_scan)}` : ''}`;
@@ -72,7 +80,7 @@
   }
 
   el('discoveryScan').addEventListener('click', () => action({action: 'scan'}));
-  el('discoverySites').addEventListener('click', event => {
+  el('certificatesView').addEventListener('click', event => {
     const button = event.target.closest('[data-discovery-action]');
     if (!button || busy) return;
     if (button.dataset.discoveryAction === 'check') action({action: 'check', id: button.dataset.id});

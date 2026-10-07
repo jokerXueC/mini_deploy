@@ -159,6 +159,7 @@
         <div class="panel-head"><div><h2 id="discoveryTitle">网站与证书</h2><p id="discoveryProgress" role="status">等待首次扫描</p></div><button id="discoveryScan" class="ghost-button compact-action" type="button">重新扫描</button></div>
         <p id="discoveryFeedback" class="certificate-feedback" role="status" aria-live="polite"></p>
         <div id="discoverySites"></div>
+        <details id="discoveryInternal" class="discovery-secondary" hidden><summary>内部入口与默认站点 <span id="discoveryInternalCount"></span></summary><div id="discoveryInternalSites"></div></details>
         <details id="discoveryOther" class="discovery-secondary" hidden><summary>其他证书文件 <span id="discoveryOtherCount"></span></summary><div id="discoveryFiles"></div></details>
         <details id="discoveryIssues" class="discovery-secondary" hidden><summary>部分来源未完成扫描</summary><ul id="discoveryIssueList"></ul></details>
         <form id="discoveryReplace" class="discovery-replace" hidden autocomplete="off">
@@ -174,129 +175,6 @@
       <section class="panel website-monitor-panel">
         <div class="panel-head"><div><h2>线上证书</h2><p>网站当前提供的证书 · CDN 域名显示边缘证书</p></div><button id="monitorCertificateAdd" class="ghost-button compact-action" type="button">添加网址</button></div>
         <div id="monitorCertificates" class="monitor-rows"></div>
-      </section>
-      </details>
-      <details id="certificateAdvanced" class="discovery-secondary"><summary>手动配置与已有托管证书</summary>
-      <div class="gateway-toolbar">
-        <div class="gateway-tabs" role="tablist" aria-label="域名管理">
-          <button id="gatewaySitesTab" class="gateway-tab active" type="button" role="tab" aria-selected="true" aria-controls="gatewaySites">访问入口</button>
-          <button id="gatewayCertificatesTab" class="gateway-tab" type="button" role="tab" aria-selected="false" aria-controls="gatewayCertificates">Nginx 托管证书</button>
-        </div>
-        <span id="nginxCurrent" class="badge neutral">尚未接入</span>
-      </div>
-      <section id="gatewaySites" class="certificate-panel nginx-setup gateway-section" role="tabpanel" aria-labelledby="gatewaySitesTab">
-        <div class="panel-head"><div><h2>站点访问入口</h2><p class="gateway-caption">域名与业务服务</p></div><div class="certificate-actions"><button id="nginxDetect" class="ghost-button compact-action" type="button">立即检测</button><button id="nginxInstall" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="nginxInstallForm">安装 Nginx</button></div></div>
-        <section class="site-registry" aria-labelledby="siteRegistryTitle">
-          <div class="panel-head"><h3 id="siteRegistryTitle">站点登记</h3><button id="siteAdd" class="ghost-button compact-action" type="button">添加站点</button></div>
-          <p id="siteFeedback" role="status" aria-live="polite"></p>
-          <div id="siteRegistryList"></div>
-          <form id="siteForm" hidden>
-            <h3 id="siteFormTitle">添加站点</h3>
-            <div class="gateway-form-grid">
-              <label class="field"><span>显示名称</span><input id="siteName" required maxlength="120"></label>
-              <label class="field"><span>业务域名</span><input id="siteDomain" maxlength="253" placeholder="api.example.com"></label>
-              <label class="field"><span>业务端口</span><input id="sitePort" type="number" min="1" max="65535" required value="8000"></label>
-              <label class="field"><span>健康检查地址（可选）</span><input id="siteHealth" type="url" maxlength="2048" placeholder="http://127.0.0.1:8000/health"></label>
-            </div>
-            <details id="siteAdvanced"><summary>高级设置</summary><label class="field"><span>站点标识（可选）</span><input id="siteKey" maxlength="80" pattern="[a-z0-9][a-z0-9_\-]{0,79}" placeholder="自动生成" autocomplete="off"></label></details>
-            <div class="certificate-actions"><button id="siteSave" class="danger-button compact-action" type="submit">保存站点</button><button id="siteCancel" class="ghost-button compact-action" type="button">取消</button></div>
-          </form>
-        </section>
-        <div class="gateway-entry-choice">
-          <label class="field"><span>本次如何配置入口</span><select id="nginxEntryChoice"><option value="managed">使用面板统一入口</option><option value="project">保留站点自带入口（无需安装）</option><option value="chained">统一入口转发到站点 Nginx</option></select></label>
-          <p id="nginxEntryAdvice" class="gateway-caption" role="status"></p>
-        </div>
-        <div id="nginxSiteList" class="gateway-site-list"></div>
-        <div id="nginxFeedback" role="status" aria-live="polite"></div>
-        <form id="nginxInstallForm" class="gateway-install" hidden>
-          <div class="gateway-section-title"><h3>先启动 HTTP 服务</h3><span class="badge neutral">无需站点、域名或证书</span></div>
-          <div class="gateway-form-grid">
-            <label class="field"><span>安装方式</span><select id="nginxInstallMode"><option value="local">服务器本机</option><option value="docker">Docker 容器</option></select></label>
-            <label class="field"><span>HTTP 访问端口</span><input id="nginxInstallPort" type="number" min="1" max="65535" value="80" required readonly></label>
-            <label id="nginxInstallContainerField" class="field" hidden><span>新容器名称</span><input id="nginxInstallContainer" value="mini-deploy-nginx" maxlength="64" pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,63}"></label>
-          </div>
-          <div id="nginxInstallDockerOptions" hidden>
-            <label class="gateway-install-check"><input id="nginxInstallHttps" type="checkbox"> 预留 HTTPS 443 端口（可选，无需提供证书）</label>
-            <p class="gateway-caption">配置目录和证书目录自动挂载。未预留 443 时，今后启用 HTTPS 需调整容器端口映射。</p>
-          </div>
-          <p id="nginxInstallHint" class="gateway-caption">使用系统包管理器安装，保留已有站点；本机安装默认使用 80 端口。</p>
-          <div class="certificate-actions"><button id="nginxInstallStart" class="danger-button compact-action" type="submit">检查安装计划</button><button id="nginxInstallCancel" class="ghost-button compact-action" type="button">收起</button></div>
-          <div id="nginxInstallResult" role="status" aria-live="polite"></div>
-        </form>
-        <form id="nginxQuickForm" class="gateway-quick-form">
-          <div class="gateway-section-title"><span class="gateway-step">01</span><h3>配置访问入口</h3></div>
-          <div class="gateway-form-grid">
-            <label class="field"><span>业务站点</span><select id="nginxQuickProject" required><option value="">请先添加站点</option></select></label>
-            <label class="field"><span>业务域名</span><input id="nginxQuickDomain" placeholder="api.example.com" maxlength="253" required></label>
-            <label class="field"><span>业务端口</span><input id="nginxQuickPort" type="number" min="1" max="65535" required placeholder="8001"></label>
-          </div>
-          <label id="nginxQuickHostField" class="field" hidden><span>业务服务地址</span><input id="nginxQuickHost" maxlength="253" placeholder="业务容器服务名或可访问的主机地址"></label>
-          <p id="nginxQuickHint" class="gateway-caption">使用本机 Nginx，后端地址默认为 127.0.0.1。</p>
-          <div class="certificate-actions"><button id="nginxQuickCheck" class="danger-button compact-action" type="submit">检查并预览</button></div>
-          <div id="nginxQuickPlan" class="gateway-plan" hidden>
-            <div class="gateway-section-title"><span class="gateway-step">02</span><h3>确认配置</h3></div>
-            <ol id="nginxQuickSteps"></ol>
-            <p id="nginxQuickNotice" class="gateway-caption"></p>
-            <details><summary>查看 Nginx 配置</summary><pre id="nginxQuickConfig" class="command-output"></pre></details>
-            <button id="nginxQuickApply" class="danger-button compact-action" type="button">确认并配置</button>
-          </div>
-          <div id="nginxQuickResult" role="status" aria-live="polite"></div>
-        </form>
-        <details id="nginxAdvanced" class="gateway-advanced">
-          <summary>高级接入 <span>已有 Nginx / Docker / 自定义后端</span></summary>
-        <form id="nginxSettingsForm" class="certificate-layout nginx-runtime-form">
-          <div class="nginx-runtime-fields">
-            <label class="field"><span>运行方式</span><select id="nginxMode"><option value="none">暂不配置</option><option value="local">服务器本机</option><option value="docker">Docker 容器</option></select></label>
-            <label id="nginxContainerField" class="field" hidden><span>Nginx 容器</span><input id="nginxContainer" list="nginxContainerOptions" maxlength="128" placeholder="选择检测结果或填写容器名称"><datalist id="nginxContainerOptions"></datalist></label>
-            <dl id="nginxDetectedDetails" class="detail-list certificate-details"></dl>
-          </div>
-          <div id="nginxMountHelp" class="nginx-runtime-guide" hidden>
-            <p class="nginx-mount-intro">容器需挂载配置和证书目录。缺少挂载时，请修改原 Compose 后重建；面板不会自动重建已有容器。</p>
-            <details class="nginx-mount-details">
-              <summary><span class="nginx-mount-chevron" aria-hidden="true"></span><span>查看挂载要求</span><span class="nginx-mount-format">Compose</span></summary>
-              <pre id="nginxMountExample" class="command-output" tabindex="0" aria-label="Nginx 目录挂载示例"></pre>
-            </details>
-          </div>
-          <div class="nginx-runtime-actions">
-            <button id="nginxSave" class="ghost-button compact-action" type="submit">检查并保存</button>
-          </div>
-        </form>
-        <form id="nginxUpstreamForm" class="nginx-upstream">
-          <label class="field"><span>业务站点</span><select id="nginxProject"><option value="">请先添加站点</option></select></label>
-          <label class="field"><span>Nginx 访问的后端地址</span><input id="nginxUpstream" maxlength="253" placeholder="例如 api 或 172.17.0.1" required></label>
-          <span id="nginxPort" class="muted"></span>
-          <div class="certificate-actions"><button id="nginxProbe" class="ghost-button" type="button">检查连通</button><button id="nginxSaveUpstream" class="ghost-button" type="submit">检查并保存后端</button><button id="nginxRemoveSite" class="ghost-button danger-text" type="button">移除域名入口</button></div>
-          <p id="nginxNetworkHint" class="muted"></p>
-        </form>
-        </details>
-      </section>
-      <section id="gatewayCertificates" class="certificate-panel gateway-section" role="tabpanel" aria-labelledby="gatewayCertificatesTab" hidden>
-        <div class="panel-head"><h2>域名证书</h2><span id="certificateEnvironment" class="muted"></span></div>
-        <div id="certificateFeedback" role="status" aria-live="polite"></div>
-        <div class="certificate-layout">
-          <div>
-            <label class="field"><span>业务站点</span><select id="certificateProject"><option value="">加载中</option></select></label>
-            <dl id="certificateDetails" class="detail-list certificate-details"></dl>
-            <div class="certificate-actions">
-              <button id="certificateEnable" class="ghost-button" type="button" disabled>启用 HTTPS</button>
-              <button id="certificateDisable" class="ghost-button" type="button" disabled>停用 HTTPS</button>
-              <button id="certificateDelete" class="ghost-button danger-text" type="button" disabled>删除证书</button>
-            </div>
-          </div>
-          <form id="certificateForm" autocomplete="off">
-            <label class="field"><span>证书名称</span><input id="certificateLabel" maxlength="80" required placeholder="例如：API 正式证书"></label>
-            <label class="field"><span>完整证书链（PEM）</span><input id="certificateFile" type="file" accept=".pem,.crt,.cer"></label>
-            <label class="field"><span>未加密私钥（PEM）</span><input id="certificateKeyFile" type="file" accept=".pem,.key"></label>
-            <details class="gateway-pem"><summary>直接粘贴 PEM 内容</summary>
-              <label class="field"><span>证书链</span><textarea id="certificatePem" rows="5" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
-              <label class="field"><span>私钥</span><textarea id="certificatePrivateKey" rows="5" spellcheck="false" autocomplete="off" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
-            </details>
-            <div class="certificate-actions">
-              <button id="certificateUpload" class="danger-button" type="submit" disabled>保存证书</button>
-              <button id="certificateRename" class="ghost-button" type="button" disabled>修改名称</button>
-            </div>
-          </form>
-        </div>
       </section>
       </details>
     </div>
@@ -595,8 +473,6 @@
   <script src="ui/app.js"></script>
   <script src="ui/certificates.js"></script>
   <script src="ui/certificate-discovery.js"></script>
-  <script src="ui/nginx.js"></script>
-  <script src="ui/sites.js"></script>
   <script src="ui/monitoring.js"></script>
   <script src="ui/docker-images.js"></script>
   <script src="ui/docker-mirrors.js"></script>

@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import gateway_connections
 import certificates
@@ -387,8 +388,21 @@ class Discovery:
         with self.operation_lock:
             self._scan()
 
-    @staticmethod
-    def replacement_paths(row):
+    def managed_record(self, paths):
+        root = self.home / "certificates"
+        if not any(path.is_relative_to(root) for path in paths):
+            return None
+        relative = paths[0].relative_to(root)
+        if len(relative.parts) != 3 or relative.parts[2] != "fullchain.pem":
+            raise DiscoveryError("托管证书路径无法确认，请重新扫描")
+        project = SimpleNamespace(key=relative.parts[0])
+        store = certificates.CertificateStore(root)
+        record = store.read(project)
+        if not record or list(store.paths(project, record)) != paths:
+            raise DiscoveryError("此证书不是当前托管版本，原文件已保留")
+        return store.directory(project) / "current.json", record
+
+    def replacement_paths(self, row):
         if row.get("kind") != "nginx" or not row.get("active") or row.get("automatic") or not row.get("certificate"):
             raise ValueError("保留原服务的证书管理方式")
         source = row["target"]
@@ -400,11 +414,13 @@ class Discovery:
             if source.get("container_id"):
                 mounts = sorted(source.get("mounts", []), key=lambda m: len(m.get("Destination", "")), reverse=True)
                 mount = next((m for m in mounts if path == m.get("Destination") or path.startswith(m.get("Destination", "").rstrip("/") + "/")), None)
-                if not mount or not mount.get("RW") or mount.get("Type") not in {"bind", "volume"}:
+                if not mount or mount.get("Type") not in {"bind", "volume"}:
                     raise ValueError("证书未挂载到可写目录，保留原容器管理方式")
                 if path == mount["Destination"] or not Path(mount["Source"]).is_dir():
                     raise ValueError("单文件挂载不能可靠热替换，保留原容器管理方式")
                 path = str(Path(mount["Source"]) / PurePosixPath(path).relative_to(mount["Destination"]))
+                if not mount.get("RW") and not Path(path).is_relative_to(self.home / "certificates"):
+                    raise ValueError("证书未挂载到可写目录，保留原容器管理方式")
             file = Path(path)
             certificates.trusted_path(file)
             if not file.is_file() or file.stat().st_size > 128 * 1024:
@@ -412,6 +428,7 @@ class Discovery:
             paths.append(file)
         if paths[0] == paths[1]:
             raise ValueError("合并证书与私钥文件由原服务管理")
+        self.managed_record(paths)
         if not row.get("domains") or any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.-]*", d) for d in row["domains"]):
             raise ValueError("含通配、正则或默认站点，无法完整确认替换范围")
         if not shutil.which("openssl"):
@@ -519,9 +536,6 @@ class Discovery:
             for row in rows:
                 try:
                     row["replacement_paths"] = [str(p) for p in self.replacement_paths(row)]
-                    managed_root = self.home / "certificates"
-                    if any(p.is_relative_to(managed_root) for p in map(Path, row["replacement_paths"])):
-                        raise DiscoveryError("面板已有托管证书，请在下方手动配置中管理")
                     if issues or row.get("notes"):
                         raise DiscoveryError("部分配置尚未确认，重新扫描完整后可替换")
                     row["can_replace"] = True
@@ -551,6 +565,7 @@ class Discovery:
             if not row or row.get("stale") or not row.get("can_replace"):
                 raise DiscoveryError("此记录暂不支持直接替换，请重新扫描")
             paths = self.replacement_paths(row)
+            managed = self.managed_record(paths)
             if row["certificate"]["fingerprint"] != fingerprint or certificate_metadata(public_pem(paths[0]))["fingerprint"] != fingerprint:
                 raise DiscoveryError("证书已变化，请重新扫描后操作")
             source = row["target"]
@@ -584,10 +599,19 @@ class Discovery:
             cert_file, key_file = directory / "new.crt", directory / "new.key"
             certificates.atomic_write(cert_file, pem)
             certificates.atomic_write(key_file, key)
-            certificates.inspect_pair(cert_file, key_file, domains[0])
+            details = certificates.inspect_pair(cert_file, key_file, domains[0])
             new_cert = certificate_metadata(pem)
             if any(not any(matches_host(domain, name) for name in new_cert["domains"]) for domain in domains):
                 raise DiscoveryError("新证书未覆盖共用文件的全部域名，未修改原证书")
+            metadata_text = None
+            if managed:
+                metadata, record = managed
+                if not any(matches_host(record["domain"], name) for name in new_cert["domains"]):
+                    raise DiscoveryError("新证书未覆盖原托管域名，未修改原证书")
+                metadata_text = metadata.read_text(encoding="utf-8")
+                if json.loads(metadata_text) != record:
+                    raise DiscoveryError("托管证书记录已变化，请重新扫描后操作")
+                certificates.atomic_write(directory / "previous.json", metadata_text)
 
             def write(index, content):
                 path, info = paths[index], infos[index]
@@ -616,11 +640,15 @@ class Discovery:
             try:
                 for index, content in enumerate((pem.encode(), key.encode())):
                     write(index, content)
+                if managed:
+                    certificates.atomic_write(metadata, json.dumps({**record, **details, "domain": record["domain"]}, ensure_ascii=False))
                 reload_service()
             except (OSError, ValueError) as exc:
                 try:
                     for index, content in enumerate(originals):
                         write(index, content)
+                    if metadata_text is not None:
+                        certificates.atomic_write(metadata, metadata_text)
                     reload_service()
                 except (OSError, ValueError) as rollback:
                     raise DiscoveryError(f"恢复加载失败，请检查服务；原文件备份保留在 {directory}") from rollback
