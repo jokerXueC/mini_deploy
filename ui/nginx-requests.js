@@ -2,6 +2,11 @@ window.NginxRequests = (() => {
   let records = [], pending = false, generation = 0, sourceChosen = false, pendingRefresh = false;
   const source = $('requestSource'), notice = $('requestNotice'), rows = $('requestRows');
 
+  function formatDuration(value, empty = '未记录') {
+    if (!Number.isFinite(value) || value < 0) return empty;
+    return value > 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(2)} ms`;
+  }
+
   function render() {
     const term = $('requestSearch').value.trim().toLowerCase();
     const status = $('requestStatus').value;
@@ -15,7 +20,7 @@ window.NginxRequests = (() => {
       return;
     }
     rows.innerHTML = `<div class="request-row request-columns" aria-hidden="true"><span>时间</span><span>状态</span><span>方法</span><span>请求路径</span><span>域名</span><span>总耗时</span><span>上游</span></div>` + visible.map(item =>
-      `<div class="request-row"><time>${escapeHtml(item.at || '-')}</time><strong class="request-status ${item.status >= 400 ? 'failed' : ''}">${escapeHtml(item.status)}</strong><span>${escapeHtml(item.method)}</span><code title="${escapeHtml(item.path)}">${escapeHtml(item.path)}</code><span class="request-host">${escapeHtml(item.host)}</span><span>${item.duration_ms == null ? '未记录' : `${escapeHtml(item.duration_ms)} ms`}</span><span>${item.upstream_ms == null ? '-' : `${escapeHtml(item.upstream_ms)} ms`}</span></div>`).join('');
+      `<div class="request-row"><time>${escapeHtml(item.at || '-')}</time><strong class="request-status ${item.status >= 400 ? 'failed' : ''}">${escapeHtml(item.status)}</strong><span>${escapeHtml(item.method)}</span><code title="${escapeHtml(item.path)}">${escapeHtml(item.path)}</code><span class="request-host">${escapeHtml(item.host)}</span><span>${formatDuration(item.duration_ms)}</span><span>${formatDuration(item.upstream_ms, '-')}</span></div>`).join('');
   }
 
   async function refresh() {
@@ -25,7 +30,18 @@ window.NginxRequests = (() => {
     const version = ++generation;
     try {
       let backend = $('requestBackend').value;
-      let result = await fetchJson(`${backend}-requests?limit=${$('requestLimit').value}${backend === 'caddy' && $('requestContainer').value.trim() ? `&container=${encodeURIComponent($('requestContainer').value.trim())}` : ''}`);
+      let result;
+      $('requestGatewayField').hidden = backend !== 'gateway';
+      $('requestContainerField').hidden = backend !== 'caddy';
+      if (backend === 'gateway') {
+        await window.RequestGateway.ensure();
+        if (version !== generation) return;
+        const key = $('requestGatewayKey').value;
+        result = key ? await fetchJson(`gateway-requests?key=${encodeURIComponent(key)}&limit=${$('requestLimit').value}`)
+          : {mode: 'gateway', records: [], notice: '尚未创建入口，请打开管理网关。'};
+      } else {
+        result = await fetchJson(`${backend}-requests?limit=${$('requestLimit').value}${backend === 'caddy' && $('requestContainer').value.trim() ? `&container=${encodeURIComponent($('requestContainer').value.trim())}` : ''}`);
+      }
       if (backend === 'nginx' && result.mode === 'none' && !sourceChosen) {
         try {
           const caddy = await fetchJson(`caddy-requests?limit=${$('requestLimit').value}`);
@@ -40,6 +56,7 @@ window.NginxRequests = (() => {
       }
       if (version !== generation || !$('requestsView').classList.contains('active')) return;
       records = result.records || [];
+      window.AppSelects?.syncAll();
       $('requestContainerField').hidden = backend !== 'caddy';
       if (backend === 'caddy') {
         const names = result.candidates || [];
@@ -50,7 +67,7 @@ window.NginxRequests = (() => {
         }));
         if (result.container && !$('requestContainer').value.trim()) $('requestContainer').value = result.container;
       }
-      source.textContent = backend === 'caddy' ? `Docker Caddy${result.container ? ` · ${result.container}` : ''}` : result.mode === 'docker' ? `Docker Nginx · ${result.container}` : result.mode === 'local' ? '本机 Nginx' : '尚未接入 Nginx';
+      source.textContent = backend === 'gateway' ? `统一网关${result.container ? ` · ${result.container}` : ''}` : backend === 'caddy' ? `Docker Caddy${result.container ? ` · ${result.container}` : ''}` : result.mode === 'docker' ? `Docker Nginx · ${result.container}` : result.mode === 'local' ? '本机 Nginx' : '尚未接入 Nginx';
       notice.textContent = result.notice || '';
       $('requestEnable').hidden = backend !== 'nginx' || result.enabled || result.mode === 'none';
       $('requestDisable').hidden = backend !== 'nginx' || !result.enabled;
@@ -70,6 +87,10 @@ window.NginxRequests = (() => {
   function changeSource() {
     sourceChosen = true;
     generation++;
+    records = []; render();
+    source.textContent = '检查中';
+    $('requestEnable').hidden = true;
+    $('requestDisable').hidden = true;
     if (pending) pendingRefresh = true;
     else refresh();
   }
@@ -77,7 +98,8 @@ window.NginxRequests = (() => {
   $('requestRefresh').addEventListener('click', refresh);
   $('requestBackend').addEventListener('change', changeSource);
   $('requestContainer').addEventListener('change', changeSource);
-  $('requestLimit').addEventListener('change', refresh);
+  $('requestGatewayKey').addEventListener('change', changeSource);
+  $('requestLimit').addEventListener('change', changeSource);
   $('requestSearch').addEventListener('input', render);
   $('requestStatus').addEventListener('change', render);
   $('requestEnable').addEventListener('click', async () => {

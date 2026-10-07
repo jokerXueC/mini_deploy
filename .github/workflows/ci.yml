@@ -27,7 +27,7 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Lint Python
-        run: ruff check agent.py certificates.py nginx_runtime.py nginx_install.py project_guidance.py entrypoint_checks.py scripts/verify_backup.py tests
+        run: ruff check agent.py certificates.py nginx_runtime.py nginx_install.py request_gateway.py project_guidance.py entrypoint_checks.py scripts/verify_backup.py tests
       - name: Run tests
         run: pytest
 
@@ -44,6 +44,22 @@ jobs:
         run: find ui -type f -name '*.js' -print0 | xargs -0 -n1 node --check
       - name: Test dashboard navigation
         run: node --test tests/ui_navigation.test.cjs tests/ui_motion.test.cjs tests/ui_onboarding.test.cjs tests/ui_nginx.test.cjs tests/ui_docker.test.cjs
+
+  request-gateway:
+    name: Request gateway Docker integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test dependencies
+        run: |
+          python -m venv .gateway-test-venv
+          .gateway-test-venv/bin/pip install -r requirements-dev.txt
+      - name: Test actual hardened gateway, streaming and Docker DNS
+        run: sudo env MINI_DEPLOY_GATEWAY_DOCKER_TESTS=1 .gateway-test-venv/bin/python -m pytest tests/test_request_gateway_integration.py -q
 
   shell:
     name: ShellCheck

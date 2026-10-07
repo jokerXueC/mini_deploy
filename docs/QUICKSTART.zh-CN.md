@@ -287,6 +287,8 @@ Agent、安装器和独立备份通过 `/run/mini-deploy-agent/maintenance.lock`
 
 ### 项目已经有 Nginx？
 
+如果只是想查看业务请求，不需要接管现有入口：使用「请求记录 → 管理网关」，让原有 Caddy、Nginx 或其他代理转发到网关即可。后端支持本机或 Docker，操作见[统一请求网关](REQUEST_GATEWAY.zh-CN.md)。
+
 Nginx 不是接入项目的必装项。在「域名与证书 → 项目访问入口」选择本次配置方式：
 
 - **保留项目自带入口**：继续使用业务 Compose，无需安装第二个 Nginx。

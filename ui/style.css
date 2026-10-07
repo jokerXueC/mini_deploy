@@ -389,6 +389,24 @@ html[data-theme="light"] .theme-toggle-icon {
 .dashboard-view.active { display: block; }
 .request-section { padding: 24px 0 40px; }
 .request-section [hidden] { display: none !important; }
+.request-gateway-manager { border-block: 1px solid var(--line); margin-bottom: 20px; padding: 18px 0; }
+.request-gateway-manager h3 { font-size: 16px; margin: 0 0 12px; }
+.request-gateway-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+.request-gateway-fields input, .request-gateway-fields select { min-width: 0; max-width: 100%; }
+.request-gateway-fields .field { display: grid; gap: 7px; min-width: 0; color: var(--muted); font-size: 12px; font-weight: 700; }
+.request-gateway-fields .field input { box-sizing: border-box; width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--field-bg); color: var(--fg); font: inherit; font-size: 13px; }
+.request-gateway-fields .field input:focus { outline: 2px solid var(--green); outline-offset: 2px; }
+.request-gateway-fields .field input:disabled { opacity: .6; }
+#requestGatewayForm { padding: 18px 0 0; }
+.gateway-image-field, .gateway-trust { grid-column: 1 / -1; }
+.gateway-trust { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.request-gateway-entry { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.request-gateway-title { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.request-gateway-route { margin: 10px 0; overflow-wrap: anywhere; }
+.request-gateway-entry code { font: inherit; overflow-wrap: anywhere; }
+.gateway-caddy-command { display: block; margin: 10px 0; user-select: all; }
+#gatewayFeedback, #gatewayNetworkNotice { overflow-wrap: anywhere; line-height: 1.7; font-size: 13px; }
+@media (max-width: 640px) { .request-gateway-fields { grid-template-columns: minmax(0, 1fr); } }
 .request-head { align-items: center; }
 .request-head .muted { display: block; margin-top: 5px; }
 .request-actions, .request-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }

@@ -8,6 +8,7 @@ import pytest
 
 import agent
 import project_guidance
+import request_gateway
 
 playwright = pytest.importorskip('playwright.sync_api')
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +88,28 @@ def browser_page():
             elif path == '/caddy-requests':
                 result = state.get('caddy_requests', {'mode': 'caddy', 'container': '', 'candidates': [],
                                                       'records': [], 'notice': 'No Caddy logs'})
+            elif path == '/request-gateways/networks':
+                result = {'networks': ['aimore_default', 'other_default']}
+            elif path == '/request-gateways':
+                entries = state.setdefault('gateway_entries', [])
+                if route.request.method == 'POST':
+                    if state.get('gateway_failure'):
+                        route.fulfill(status=400, json={'detail': '测试：镜像不可用'})
+                        return
+                    if payload['action'] == 'save':
+                        spec = request_gateway.normalize(payload['spec'])
+                        entry = {**spec, 'revision': request_gateway.revision(spec), 'state': 'not_created',
+                                 'local_address': f'127.0.0.1:{spec["port"]}',
+                                 'caddy_upstream': f'mini-gateway-{spec["key"]}:10000'}
+                        state['gateway_entries'] = [e for e in entries if e['key'] != spec['key']] + [entry]
+                    elif payload['action'] == 'delete':
+                        state['gateway_entries'] = [e for e in entries if e['key'] != payload['key']]
+                    else:
+                        entry = next(e for e in entries if e['key'] == payload['key'])
+                        entry['state'] = 'running' if payload['action'] == 'start' else 'exited'
+                result = {'entries': state['gateway_entries']}
+            elif path == '/gateway-requests':
+                result = state.get('gateway_requests', {'records': [], 'notice': '请求结束后显示记录'})
             route.fulfill(json=result)
 
         server_url = f'http://127.0.0.1:{server.server_port}'
@@ -465,10 +488,11 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
         ],
     }
     page.locator('#requestsViewTab').click()
+    page.locator('#requestBackend').select_option('nginx', force=True)
     page.wait_for_selector('.request-row:not(.request-columns)')
     assert page.locator('.request-row:not(.request-columns)').count() == 2
     assert page.locator('#requestRows script').count() == 0
-    page.locator('#requestStatus').select_option('error')
+    page.locator('#requestStatus').select_option('error', force=True)
     assert page.locator('.request-row:not(.request-columns)').count() == 1
     assert '/failed' in page.locator('#requestRows').inner_text()
     page.locator('#requestSearch').fill('missing')
@@ -477,7 +501,7 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
 
 
 @pytest.mark.parametrize('width', [1440, 390])
-def test_caddy_request_view_auto_selects_and_filters(browser_page, width):
+def test_caddy_request_view_selects_and_filters(browser_page, width):
     page, state = browser_page
     page.locator('#closeProjectModalBtn').click()
     page.set_viewport_size({'width': width, 'height': 844})
@@ -487,9 +511,81 @@ def test_caddy_request_view_auto_selects_and_filters(browser_page, width):
                                     'path': '/ok<script>alert(1)</script>', 'status': 200,
                                     'duration_ms': 12, 'upstream_ms': None}]}
     page.locator('#requestsViewTab').click()
+    page.locator('#requestBackend').select_option('caddy', force=True)
     page.wait_for_selector('.request-row:not(.request-columns)')
     assert page.locator('#requestBackend').input_value() == 'caddy'
     assert page.locator('#requestContainer').input_value() == 'aimore-caddy-1'
     assert page.locator('#requestEnable').is_hidden()
     assert page.locator('#requestRows script').count() == 0
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
+    page, state = browser_page
+    page.locator('#closeProjectModalBtn').click()
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.locator('#requestsViewTab').click()
+    assert page.locator('#requestBackend').input_value() == 'gateway'
+    page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayAdd').click()
+    page.locator('#gatewayKey').fill('aimore-api')
+    page.locator('#gatewayName').fill('AimOre API <script>')
+    page.locator('#gatewayUpstream').fill('http://aimore-cloud:8766')
+    page.locator('#gatewayNetwork').select_option('aimore_default', force=True)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'gateway-form-{width}.png'), full_page=True)
+    page.locator('#gatewaySave').click()
+    page.locator('#confirmCancelBtn').click()
+    assert not state['posts']
+    page.locator('#gatewaySave').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('#requestGatewayForm', state='hidden')
+    page.wait_for_selector('[data-gateway-action="start"]')
+    assert page.locator('#gatewayEntries script').count() == 0
+    assert state['posts'][-1][1]['confirmed'] is True
+    page.locator('[data-gateway-action="edit"]').click()
+    page.locator('#gatewayNetwork').select_option('other_default', force=True)
+    page.locator('#gatewayCancel').click()
+    page.locator('[data-gateway-action="start"]').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('[data-gateway-action="stop"]')
+    assert page.locator('[data-gateway-action="delete"]').is_disabled()
+    state['gateway_requests'] = {'container': 'mini-gateway-aimore-api', 'records': [
+        {'at': '2026-10-07T10:00:00+08:00', 'host': 'aimore.meetpeak.tech', 'method': 'GET',
+         'path': '/cloud/health', 'status': 200, 'duration_ms': 12.4, 'upstream_ms': 11.1},
+        {'at': '2026-10-07T10:00:01+08:00', 'host': 'aimore.meetpeak.tech', 'method': 'POST',
+         'path': '/cloud/session', 'status': 502, 'duration_ms': 25, 'upstream_ms': None}]}
+    page.locator('[data-gateway-action="records"]').click()
+    page.wait_for_selector('.request-row:not(.request-columns)')
+    assert page.locator('.request-row:not(.request-columns)').count() == 2
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'gateway-running-{width}.png'), full_page=True)
+    page.locator('[data-gateway-action="edit"]').click()
+    assert page.locator('#gatewayNetwork').is_disabled()
+    page.locator('#gatewayCancel').click()
+    page.locator('[data-gateway-action="stop"]').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('[data-gateway-action="start"]')
+    page.locator('[data-gateway-action="delete"]').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_function("document.querySelectorAll('[data-gateway-action]').length === 0")
+    assert [p['action'] for path, p in state['posts'] if path == '/request-gateways'] == ['save', 'start', 'stop', 'delete']
+
+
+def test_gateway_save_error_keeps_form_values(browser_page):
+    page, state = browser_page
+    page.locator('#closeProjectModalBtn').click()
+    page.locator('#requestsViewTab').click()
+    page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayAdd').click()
+    page.locator('#gatewayKey').fill('api')
+    page.locator('#gatewayName').fill('API')
+    page.locator('#gatewayUpstream').fill('http://127.0.0.1:8000')
+    state['gateway_failure'] = True
+    page.locator('#gatewaySave').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_function("document.querySelector('#gatewayFeedback').textContent.includes('操作失败')")
+    assert page.locator('#requestGatewayForm').is_visible()
+    assert page.locator('#gatewayUpstream').input_value() == 'http://127.0.0.1:8000'
+    assert page.locator('#gatewaySave').is_enabled()

@@ -6,6 +6,7 @@ mini_deploy receives Git webhooks, runs your project deploy script, and shows de
 
 - 中文快速上手：[docs/QUICKSTART.zh-CN.md](docs/QUICKSTART.zh-CN.md)
 - Linux 实测清单：[docs/LINUX_TEST.zh-CN.md](docs/LINUX_TEST.zh-CN.md)
+- 统一请求网关：[docs/REQUEST_GATEWAY.zh-CN.md](docs/REQUEST_GATEWAY.zh-CN.md)
 - 开源开发路线图：[docs/ROADMAP.zh-CN.md](docs/ROADMAP.zh-CN.md)
 - 安全策略：[SECURITY.md](SECURITY.md)
 - 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
@@ -25,6 +26,7 @@ mini_deploy receives Git webhooks, runs your project deploy script, and shows de
 - Manages uploaded PEM certificates for project domains from the UI: expiry, replacement, HTTPS activation and removal
 - Detects local and Docker Nginx, saves a shared runtime selection and checks each project's upstream connectivity
 - Reads request records from the selected Nginx or a local Docker Caddy container when JSON access logging is enabled
+- Optionally runs independent Docker request gateways: forward HTTP traffic, SSE and WebSocket, and record status and duration without configuring the existing proxy's access logs
 - Deduplicates retried webhook deliveries and persists queued jobs across Agent restarts
 - Continuously probes configured health URLs and shows the latest result without automatically restarting business services
 - Uses a password-protected web UI

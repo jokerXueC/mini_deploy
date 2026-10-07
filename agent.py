@@ -50,6 +50,7 @@ import caddy_requests
 import nginx_runtime
 import nginx_install
 import nginx_requests
+import request_gateway
 import project_guidance
 import entrypoint_checks
 import docker_onboarding
@@ -2581,6 +2582,11 @@ def _bootstrap_project(project: DeployProject, *, write_service: bool = True, en
 _nginx_lock = threading.RLock()
 
 
+@_maintenance_shared_operation
+def _request_gateway_operation(data: dict[str, Any]) -> dict[str, Any]:
+    return request_gateway.Store(STATE_FILE.parent).operate(data)
+
+
 def _nginx_serialized(function: Any) -> Any:
     @wraps(function)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -4704,6 +4710,7 @@ def _short_sha(value: Any) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "request-gateway.js": "application/javascript; charset=utf-8",
     "selects.js": "application/javascript; charset=utf-8",
     "motion.js": "application/javascript; charset=utf-8",
     "nginx.js": "application/javascript; charset=utf-8",
@@ -5020,6 +5027,22 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "caddy_requests_failed", "detail": str(exc)})
             return
+        if path in {"/request-gateways", "/request-gateways/networks", "/gateway-requests"}:
+            if self._require_auth_json():
+                try:
+                    store = request_gateway.Store(STATE_FILE.parent)
+                    query = parse_qs(parsed.query)
+                    if path == "/gateway-requests":
+                        result = store.records(query.get("key", [""])[0], int(query.get("limit", ["100"])[0]))
+                    elif path.endswith("/networks"):
+                        result = {"networks": request_gateway.networks()}
+                    else:
+                        with request_gateway.LOCK:
+                            result = {"entries": [store.describe(entry) for entry in store.entries()]}
+                    self._write_json(200, result)
+                except (ValueError, OSError) as exc:
+                    self._write_json(400, {"error": "gateway_read_failed", "detail": str(exc)})
+            return
         if path == "/projects-config/doctor":
             if self._require_auth_json():
                 self._handle_projects_config_doctor(parse_qs(parsed.query))
@@ -5038,6 +5061,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == "/request-gateways":
+            if self._require_auth_json():
+                self._handle_request_gateway()
+            return
         if path == "/nginx-settings":
             if self._require_auth_json():
                 self._handle_nginx_settings()
@@ -5116,6 +5143,20 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(404, {"error": "not_found"})
             return
         self._handle_webhook(parsed)
+
+    def _handle_request_gateway(self) -> None:
+        action = "invalid"
+        try:
+            data = _read_json_body(self, max_bytes=8192)
+            action = str(data.get("action", "invalid"))[:32]
+            result = _request_gateway_operation(data)
+        except (ValueError, OSError, _MaintenanceLockError) as exc:
+            _audit_event("request_gateway", actor=self.client_address[0], success=False, detail={"action": action})
+            self._write_json(503 if isinstance(exc, _MaintenanceLockError) else 400,
+                             {"error": "gateway_operation_failed", "detail": str(exc)})
+            return
+        _audit_event("request_gateway", actor=self.client_address[0], success=True, detail={"action": action})
+        self._write_json(200, result)
 
     def _handle_nginx_settings(self) -> None:
         try:
