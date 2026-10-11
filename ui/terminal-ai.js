@@ -5,7 +5,7 @@
   let dialogTest = false, saving = false;
   let pendingEntry;
   let savedSession = '';
-  let permission = 'readonly', accessLoading = false, accessDraft = '', accessSession = '', submitting = 0;
+  let permission = 'approve', accessLoading = false, accessDraft = '', accessSession = '', submitting = 0;
   const context = () => window.SSHTerminal?.context() || {session_id: '', selection: '', cursor: 0, target: ''};
   const message = (text, error = false, id = 'aiFeedback') => {
     el(id).textContent = text; el(id).classList.toggle('tai-error', error);
@@ -57,7 +57,7 @@
   }
   async function refreshAccess() {
     const sessionId = context().session_id;
-    if (!sessionId || !allowed) { permission = 'readonly'; controls(); return; }
+    if (!sessionId || !allowed) { permission = 'approve'; controls(); return; }
     accessLoading = true; controls();
     try {
       const result = await api(`/terminal-ai/access?session_id=${encodeURIComponent(sessionId)}`);
@@ -331,12 +331,11 @@
   }
   el('aiPermission').addEventListener('change', async () => {
     const mode = el('aiPermission').value;
-    if (mode === 'approve' || mode === 'auto') {
+    if (mode === 'auto') {
       accessDraft = mode; accessSession = context().session_id;
-      el('aiAccessTitle').textContent = mode === 'auto' ? '授权自动操作' : '启用修改审批';
+      el('aiAccessTitle').textContent = '授权自动操作';
       el('aiAccessTarget').textContent = `当前服务器：${context().target}`;
-      el('aiAccessDescription').textContent = mode === 'auto' ? 'AI 可以直接重启容器或重启、重载服务，不再逐次询问，可能短暂中断业务。'
-        : 'AI 可以自动检查；重启容器或重启、重载服务前会展示具体操作，由你逐次确认。';
+      el('aiAccessDescription').textContent = 'AI 可以直接重启容器或重启、重载服务，不再逐次询问，可能短暂中断业务。';
       el('aiAccessConsent').checked = false; el('aiAccessConfirm').disabled = true;
       message('', false, 'aiAccessFeedback'); el('aiAccessDialog').showModal(); controls();
     } else {
@@ -362,7 +361,7 @@
     if (current !== savedSession) {
       if (working && !dialogTest) stopWaiting();
       savedSession = current;
-      el('aiAccessDialog').close(); permission = 'readonly'; refreshAccess();
+      el('aiAccessDialog').close(); permission = 'approve'; refreshAccess();
       newChat();
     }
     if (autoSession && context().session_id !== autoSession) stopAuto();

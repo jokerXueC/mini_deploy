@@ -12,8 +12,11 @@ class ToolError(ValueError):
 CONTAINER = {"type": "string", "description": "容器名称或完整 ID，来自容器列表"}
 UNIT = {"type": "string", "description": "systemd 服务名，例如 nginx.service"}
 LINES = {"type": "integer", "minimum": 1, "maximum": 200, "description": "日志行数，默认 100"}
+DIRECTORY = {"type": "string", "description": "目录的 Linux 绝对路径；省略或填写 . 表示 SSH 登录默认目录，不是交互终端 cd 后的目录"}
 TOOLS = {
     "get_server_resources": ("检查 CPU、内存、磁盘及系统负载", {}, [], False),
+    "list_directory": ("确认目录实际路径，列出文件、隐藏文件、权限、大小和修改时间；不读取文件内容，不递归",
+                       {"path": DIRECTORY}, [], False),
     "list_containers": ("列出所有 Docker 容器及完整 ID、状态、端口", {}, [], False),
     "get_container_status": ("检查容器运行、重启次数及健康状态，不读取环境变量", {"container": CONTAINER}, ["container"], False),
     "get_container_logs": ("读取容器最近 30 分钟的日志", {"container": CONTAINER, "lines": LINES}, ["container"], False),
@@ -41,6 +44,12 @@ def plan(name, arguments):
     if not isinstance(arguments, dict) or set(arguments) - set(properties) or set(required) - set(arguments):
         raise ToolError("工具参数不完整或包含未支持的参数。")
     args = dict(arguments)
+    if "path" in properties:
+        path = args.setdefault("path", ".")
+        if (not isinstance(path, str) or not path or len(path) > 4096
+                or (path != "." and not path.startswith("/"))
+                or any(ord(c) < 32 or ord(c) == 127 for c in path)):
+            raise ToolError("目录须填写 Linux 绝对路径，或使用 . 查看 SSH 登录默认目录。")
     if "container" in properties:
         container = args["container"]
         pattern = r"[a-f0-9]{64}" if write else r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}"
@@ -74,7 +83,11 @@ def plan(name, arguments):
         "restart_service": ["systemctl", "--no-ask-password", "restart", "--", service],
         "reload_service": ["systemctl", "--no-ask-password", "reload", "--", service],
     }
-    command = "uname -srm; nproc; uptime; free -b; df -hP" if name == "get_server_resources" else shlex.join(commands[name])
+    if name == "list_directory":
+        command = "cd -- " + shlex.quote(args["path"]) + " && pwd -P && LC_ALL=C ls -lah -- ."
+    else:
+        command = "uname -srm; nproc; uptime; free -b; df -hP" if name == "get_server_resources" else shlex.join(commands[name])
     return {"name": name, "arguments": args, "title": description.split('，')[0].split('；')[0],
             "command": command, "write": write,
-            "impact": "可能短暂中断业务；使用当前 SSH 账号权限，不自动提权。" if write else "只读取状态和近期日志。"}
+            "impact": ("可能短暂中断业务；使用当前 SSH 账号权限，不自动提权。" if write else
+                       "只列出目录及文件信息，不读取文件内容。" if name == "list_directory" else "只读取状态和近期日志。")}

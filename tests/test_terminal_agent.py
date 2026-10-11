@@ -1,6 +1,7 @@
 """Real model protocol loops, scoped grants, single-use approval and SSH channels."""
 import base64
 import json
+import shlex
 import threading
 import time
 
@@ -45,9 +46,10 @@ def wait_status(manager, owner, key, expected):
     raise AssertionError(f'Task did not reach {expected}: {result}')
 
 
-def submit(manager, *, mode='readonly', execute=None, validate=None, **data):
-    if mode != 'readonly':
+def submit(manager, *, mode=None, execute=None, validate=None, **data):
+    if mode is not None:
         manager.set_access('owner', 'ssh', {'mode': mode, 'consent': True})
+    mode = manager.access('owner', 'ssh')['mode']
     return manager.submit('owner', action='chat', session_id='ssh', target='demo@test:22',
                           executor=execute or (lambda plan, cancel: {'exit_code': 0, 'output': 'healthy'}),
                           validate=validate, data=ai_tests.chat_data(manager, permission=mode, **data))
@@ -68,10 +70,41 @@ def test_tools_reject_arbitrary_commands_options_paths_and_unbounded_logs(name, 
 
 def test_tool_schemas_and_plans_keep_modifications_explicit():
     assert all(not tools.TOOLS[t['function']['name']][-1] for t in tools.schemas())
-    assert len(tools.schemas(True)) == 11
+    assert len(tools.schemas(True)) == 12
     assert tools.plan('restart_service', {'service': 'nginx'})['arguments'] == {'service': 'nginx.service'}
     assert tools.plan('get_container_logs', {'container': 'web'})['arguments']['lines'] == 100
     assert 'Environment' not in tools.plan('get_container_status', {'container': 'web'})['command']
+
+
+@pytest.mark.parametrize('path', ['', 'relative/path', '~', '-lah', '/root\nreboot', '/root\x00', True, '/' + 'a' * 4096])
+def test_directory_tool_rejects_invalid_paths(path):
+    with pytest.raises(tools.ToolError):
+        tools.plan('list_directory', {'path': path})
+
+
+def test_directory_tool_defaults_to_login_directory_and_quotes_shell_metacharacters():
+    plan = tools.plan('list_directory', {})
+    assert plan['arguments'] == {'path': '.'} and not plan['write']
+    assert plan['command'] == 'cd -- . && pwd -P && LC_ALL=C ls -lah -- .'
+    path = "/opt/a b'$(touch injected);`reboot`"
+    tokens = shlex.split(tools.plan('list_directory', {'path': path})['command'])
+    assert tokens == ['cd', '--', path, '&&', 'pwd', '-P', '&&', 'LC_ALL=C', 'ls', '-lah', '--', '.']
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_agent_directory_request_checks_before_answering(ai_manager, model_server, protocol):
+    ai_manager.save(ai_tests.config(model_server, protocol))
+    model_server.content = lambda body, n: tool_response(protocol, 'list_directory', {}) if n == 1 else answer(protocol)
+    executed = []
+    def execute(plan, cancel):
+        executed.append(plan)
+        return {'exit_code': 0, 'output': '/root\ntotal 12\ndrwx------ root root .ssh\ndrwxr-xr-x root root mini_deploy'}
+    job = submit(ai_manager, execute=execute, question='帮我分析下默认路径下的文件都有哪些')
+    assert wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})['status'] == 'done'
+    assert len(executed) == 1 and executed[0]['name'] == 'list_directory'
+    assert not executed[0]['write']
+    assert '/root' in json.dumps(model_server.calls[1][2])
+    assert 'mini_deploy' in json.dumps(model_server.calls[1][2])
 
 
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
@@ -102,6 +135,25 @@ def test_agent_real_protocol_tool_results_followup_and_redaction(ai_manager, mod
     followup = submit(ai_manager, conversation_id=job['conversation_id'])
     assert wait_status(ai_manager, 'owner', followup['id'], {'done', 'failed'})['status'] == 'done'
     assert 'container healthy' in json.dumps(model_server.calls[-1][2])
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+@pytest.mark.parametrize('decision', [True, False])
+def test_default_opens_all_tools_but_never_modifies_without_operation_approval(ai_manager, model_server, protocol, decision):
+    ai_manager.save(ai_tests.config(model_server, protocol))
+    assert ai_manager.access('owner', 'ssh') == {'mode': 'approve', 'expires_in': 0}
+    model_server.content = lambda body, n: (
+        tool_response(protocol, 'restart_service', {'service': 'nginx'}) if n == 1 else answer(protocol))
+    executed = []
+    job = submit(ai_manager, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
+    pending = wait_status(ai_manager, 'owner', job['id'], {'awaiting_approval'})
+    assert not executed and not ai_manager.permissions
+    provided = model_server.calls[0][2]['tools']
+    names = {t['name'] if protocol == 'anthropic' else t['function']['name'] for t in provided}
+    assert names == set(tools.TOOLS)
+    ai_manager.approve('owner', job['id'], pending['approval']['id'], decision)
+    result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
+    assert result['status'] == 'done' and len(executed) == int(decision)
 
 
 @pytest.mark.parametrize('decision', [True, False])
@@ -142,8 +194,8 @@ def test_auto_requires_grant_and_background_followup_cannot_modify(ai_manager, m
     for kwargs in [{'mode': 'auto'}, {'mode': 'approve', 'consent': 'true'}]:
         with pytest.raises(ai.AIError):
             ai_manager.set_access('owner', 'different-ssh', kwargs)
-    assert ai_manager.access('other', 'ssh')['mode'] == 'readonly'
-    assert ai_manager.access('owner', 'different-ssh')['mode'] == 'readonly'
+    assert ai_manager.access('other', 'ssh')['mode'] == 'approve'
+    assert ai_manager.access('owner', 'different-ssh')['mode'] == 'approve'
 
 
 @pytest.mark.parametrize('operation', ['cancel', 'revoke', 'disconnect', 'model', 'expire'])
@@ -316,7 +368,7 @@ def test_agent_routes_use_owned_session_csrf_transport_and_single_use_approval(h
     for kwargs in [{'authenticated': False}, {'csrf': False}, {'origin': False}]:
         assert request(http_server, 'POST', '/terminal-ai/access', data, **kwargs)[0] in {401, 403}
     assert request(http_server, 'POST', '/terminal-ai/access', {**data, 'session_id': 'foreign'})[0] == 404
-    assert request(http_server, 'POST', '/terminal-ai/access', {**data, 'consent': False})[0] == 400
+    assert request(http_server, 'POST', '/terminal-ai/access', {**data, 'mode': 'auto', 'consent': False})[0] == 400
     assert request(http_server, 'POST', '/terminal-ai/access', data)[0] == 200
     assert request(http_server, 'GET', '/terminal-ai/access?session_id=' + session.id)[1]['mode'] == 'approve'
     model_server.content = lambda body, n: tool_response('openai', 'restart_service', {'service': 'nginx'}) if n == 1 else answer('openai')
@@ -333,4 +385,4 @@ def test_agent_routes_use_owned_session_csrf_transport_and_single_use_approval(h
     assert request(http_server, 'POST', '/terminal-ai/approve', approval)[0] == 409
     assert request(http_server, 'POST', '/terminal-ai/cancel', {'id': 'foreign'})[0] == 404
     assert request(http_server, 'POST', '/ssh/disconnect', {'id': session.id})[0] == 200
-    assert ai_manager.access(owner, session.id)['mode'] == 'readonly'
+    assert ai_manager.access(owner, session.id)['mode'] == 'approve'
