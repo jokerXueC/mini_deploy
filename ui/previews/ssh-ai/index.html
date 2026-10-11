@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mini_deploy · 远程终端与 AI 诊断</title>
+  <link rel="stylesheet" href="../../vendor/xterm.css">
+  <link rel="stylesheet" href="preview.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="brand" href="#" aria-label="mini_deploy"><span class="brand-symbol">m<span>_</span></span><strong>mini_deploy</strong></a>
+      <div class="top-actions"><span class="preview-label">交互预览 · 示例数据</span><button id="themeToggle" class="icon-button" type="button" title="切换深浅主题" aria-label="切换深浅主题"><i data-icon="moon"></i></button></div>
+    </div>
+    <header class="page-heading"><div><h1>远程终端</h1><p>连接服务器，查看输出与诊断。</p></div><button id="settingsOpen" class="text-button" type="button"><i data-icon="settings-2"></i>模型设置</button></header>
+    <nav class="navigation" aria-label="面板视图">
+      <button type="button" data-nav="服务器状态">服务器状态</button><button type="button" data-nav="异常中心">异常中心</button><button type="button" data-nav="通知配置">通知配置</button><button type="button" data-nav="域名与证书">域名与证书</button><button type="button" data-nav="请求记录">请求记录</button><button class="active" type="button" aria-current="page">远程终端</button>
+    </nav>
+
+    <section id="workspace" class="workspace">
+      <aside class="servers" aria-label="服务器连接">
+        <div class="section-heading"><h2>连接</h2><button id="newConnection" class="icon-button" type="button" title="新建连接" aria-label="新建连接"><i data-icon="plus"></i></button></div>
+        <button class="server-item selected" type="button" data-server="production"><span class="server-icon"><i data-icon="server"></i></span><span><strong>生产服务器</strong><small>root@192.0.2.10</small></span><span class="dot green"></span></button>
+        <button class="server-item" type="button" data-server="staging"><span class="server-icon"><i data-icon="server"></i></span><span><strong>测试服务器</strong><small>debian@192.0.2.20</small></span><span class="dot neutral"></span></button>
+        <dl class="server-meta"><div><dt>系统</dt><dd>Debian 13</dd></div><div><dt>SSH 端口</dt><dd>22</dd></div><div><dt>连接时间</dt><dd id="connectedTime">04:26</dd></div></dl>
+        <div class="server-resource"><div><span>CPU</span><strong>12.4<span>%</span></strong></div><div class="resource-track"><span style="width:12.4%"></span></div><div><span>内存</span><strong>1.68 <span>/ 4 GB</span></strong></div><div class="resource-track cyan-track"><span style="width:42%"></span></div></div>
+        <button id="connectionOptions" class="plain-button connection-options" type="button"><i data-icon="sliders-horizontal"></i>连接设置</button>
+      </aside>
+
+      <section class="terminal-column" aria-label="终端工作区">
+        <div class="terminal-toolbar"><div class="target"><span id="connectionState" class="connection-state"><span class="dot green"></span>已连接</span><span id="targetUser">root</span><span class="target-divider">@</span><strong id="targetHost">production-01</strong><span class="target-port">:22</span></div><div class="terminal-actions"><button id="copyTerminal" class="icon-button" type="button" title="复制选中内容" aria-label="复制选中内容"><i data-icon="copy"></i></button><button id="clearTerminal" class="icon-button" type="button" title="清空显示" aria-label="清空显示"><i data-icon="eraser"></i></button><button id="disconnect" class="icon-button disconnect" type="button" title="断开连接" aria-label="断开连接"><i data-icon="unplug"></i></button></div></div>
+        <div class="terminal-tabs"><div class="console-tab"><i data-icon="terminal"></i><span id="consoleName">production-01</span></div><button id="analyzeOutput" class="analysis-trigger" type="button"><i data-icon="scan-text"></i><span>分析输出</span></button><button id="assistantToggle" class="icon-button assistant-toggle" type="button" title="收起诊断助手" aria-label="收起诊断助手" aria-expanded="true"><i data-icon="panel-right-close"></i></button></div>
+        <div id="terminal" class="terminal-surface"></div>
+        <div class="terminal-footer"><span><i data-icon="lock-keyhole"></i>SSH 加密连接</span><span id="terminalFeedback">UTF-8 · 96 × 28</span></div>
+        <div class="incident-strip"><i data-icon="circle-alert"></i><div><strong id="incidentTitle">api 数据库连接异常</strong><span id="incidentDetail">最近 5 分钟出现 6 次解析失败</span></div><button id="analyzeIncident" class="plain-button" type="button">查看诊断<i data-icon="arrow-right"></i></button></div>
+      </section>
+
+      <aside id="assistant" class="assistant" aria-label="AI 诊断助手">
+        <div class="assistant-header"><div class="assistant-title"><span class="assistant-mark"><i data-icon="sparkles"></i></span><div><h2>诊断助手</h2><button id="assistantModel" class="model-button" type="button">示例模型<i data-icon="chevron-down"></i></button></div></div><button id="assistantClose" class="icon-button" type="button" title="收起诊断助手" aria-label="收起诊断助手"><i data-icon="panel-right-close"></i></button></div>
+        <div class="watch-row"><span><span id="watchDot" class="dot neutral"></span><span id="watchText">按需分析</span></span><label class="watch-control"><span>持续分析</span><input id="autoAnalyze" type="checkbox" role="switch" aria-label="持续分析"><span class="switch-track" aria-hidden="true"></span></label></div>
+        <div id="assistantBody" class="assistant-body" aria-live="polite">
+          <div class="question"><i data-icon="message-square"></i><p id="questionText">为什么 api 一直连接不上数据库？</p></div>
+          <div class="answer-meta"><span class="tiny-mark"><i data-icon="sparkles"></i></span><strong>诊断结果</strong><span id="answerTime">刚刚</span></div>
+          <article id="answer" class="answer">
+            <div class="finding-heading"><i data-icon="circle-alert"></i><h3 id="findingTitle">容器网络不一致</h3></div>
+            <p id="findingDescription"><code>api</code> 与 <code>postgres</code> 不在同一个 Docker 网络，应用无法解析数据库主机名。</p>
+            <button id="scopeOpen" class="source-link" type="button"><i data-icon="layers-2"></i><span id="scopeLabel">依据 22 行终端输出与 2 个容器状态</span><i data-icon="chevron-right"></i></button>
+            <div class="evidence"><div class="evidence-label"><span>关键依据</span><button id="locateEvidence" class="plain-button" type="button">定位输出<i data-icon="corner-up-left"></i></button></div><blockquote id="evidenceText">could not translate host name "postgres"</blockquote><div class="network-comparison"><div><span class="dot amber"></span><code>api</code><span>app_public</span></div><div><span class="dot cyan"></span><code>postgres</code><span>app_internal</span></div></div></div>
+            <div class="next-heading"><h4>建议下一步</h4><span>先核实，再处理</span></div>
+            <div class="command-step"><div class="command-heading"><span class="step-index">1</span><strong>检查两个容器的网络</strong><span class="operation-type">只读</span></div><pre id="inspectCommand">docker inspect api postgres \
+  --format '{{.Name}} {{json .NetworkSettings.Networks}}'</pre><div class="command-actions"><span>查看网络名称与连接状态</span><button class="icon-button command-copy" type="button" data-command="inspect" title="复制检查命令" aria-label="复制检查命令"><i data-icon="copy"></i></button><button class="small-button run-command" type="button" data-command="inspect"><i data-icon="play"></i>运行检查</button></div></div>
+            <div id="repairStep" class="repair-step"><div class="command-heading"><span class="step-index">2</span><strong>接入数据库所在网络</strong></div><button id="repairOpen" class="plain-button" type="button">查看处理命令<i data-icon="arrow-right"></i></button></div>
+          </article>
+        </div>
+        <div class="assistant-compose"><div class="scope-strip"><i data-icon="text-select"></i><span id="contextLabel">最近输出 + 容器状态</span><button id="contextChange" class="icon-button" type="button" title="调整分析范围" aria-label="调整分析范围"><i data-icon="sliders-horizontal"></i></button></div><form id="askForm"><textarea id="askInput" rows="2" maxlength="2000" aria-label="向诊断助手提问" placeholder="继续提问，或选中终端内容分析…"></textarea><div class="compose-bottom"><span id="composeStatus">建议命令需确认执行</span><button id="askSubmit" class="icon-button send-button" type="submit" title="发送问题" aria-label="发送问题"><i data-icon="arrow-up"></i></button></div></form></div>
+      </aside>
+    </section>
+  </main>
+  <div id="assistantBackdrop" class="assistant-backdrop" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <dialog id="settingsDialog" class="dialog"><div class="dialog-header"><h2>模型设置</h2><button class="icon-button dialog-close" type="button" title="关闭模型设置" aria-label="关闭模型设置"><i data-icon="x"></i></button></div><form id="settingsForm"><label>接口地址<input id="modelUrl" type="url" placeholder="https://api.example.com/v1" value="https://api.example.com/v1" required></label><label>模型名称<input id="modelName" placeholder="填写服务商提供的模型名称" value="ops-assistant" required></label><label>API Key<input id="modelKey" type="password" autocomplete="new-password" placeholder="输入 API Key" maxlength="4096"></label><p class="dialog-note">OpenAI 兼容接口 · 本预览不发送请求，密钥不保存。</p><div class="dialog-footer"><button class="text-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">保存设置</button></div></form></dialog>
+
+  <dialog id="scopeDialog" class="dialog"><div class="dialog-header"><h2>分析范围</h2><button class="icon-button dialog-close" type="button" title="关闭分析范围" aria-label="关闭分析范围"><i data-icon="x"></i></button></div><p class="dialog-description">本次发送的内容</p><label class="scope-choice"><input id="includeOutput" type="checkbox" checked><span><strong>终端片段</strong><small>最近 22 行，包含数据库错误日志</small></span></label><label class="scope-choice"><input id="includeContainers" type="checkbox" checked><span><strong>容器状态与网络</strong><small>api、postgres 的状态和网络名称</small></span></label><label class="scope-choice"><input id="includeResources" type="checkbox"><span><strong>服务器资源</strong><small>CPU、内存、磁盘的当前读数</small></span></label><details class="scope-preview"><summary>查看示例内容</summary><pre>[api] ERROR could not translate host name "postgres"
+api       running (unhealthy)  network=app_public
+postgres  running (healthy)    network=app_internal</pre></details><div class="dialog-footer"><button id="saveScope" class="primary-button" type="button">应用范围</button></div></dialog>
+
+  <dialog id="commandDialog" class="dialog command-dialog"><div class="dialog-header"><h2 id="commandTitle">运行检查</h2><button class="icon-button dialog-close" type="button" title="关闭命令确认" aria-label="关闭命令确认"><i data-icon="x"></i></button></div><div class="command-target"><i data-icon="server"></i><strong id="commandTargetName">生产服务器</strong><span id="commandTargetAddress">root@192.0.2.10:22</span></div><p id="commandExplanation" class="dialog-description"></p><pre id="commandPreview"></pre><label id="commandConsent" class="consent" hidden><input id="commandCheck" type="checkbox">已确认目标服务器与网络名称</label><p class="dialog-note">示例环境 · 仅模拟执行，不连接服务器。</p><div class="dialog-footer"><button id="commandCopy" class="text-button" type="button"><i data-icon="copy"></i>复制命令</button><button id="commandExecute" class="primary-button" type="button"><i data-icon="play"></i>确认运行</button></div></dialog>
+
+  <dialog id="connectionDialog" class="dialog"><div class="dialog-header"><h2 id="connectionDialogTitle">新建连接</h2><button class="icon-button dialog-close" type="button" title="关闭连接设置" aria-label="关闭连接设置"><i data-icon="x"></i></button></div><form id="connectionForm"><label>名称<input id="serverName" value="生产服务器" maxlength="80" required></label><label>服务器地址<input id="serverAddress" value="192.0.2.10" maxlength="253" required></label><div class="connection-pair"><label>SSH 端口<input id="serverPort" type="number" min="1" max="65535" value="22" required></label><label>用户名<input id="serverUser" value="root" required></label></div><p class="dialog-note">本预览使用示例连接，不提交登录凭据。</p><div class="dialog-footer"><button class="text-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">保存示例连接</button></div></form></dialog>
+  <script src="../../vendor/xterm.js"></script>
+  <script src="../../vendor/addon-fit.js"></script>
+  <script src="preview.js"></script>
+</body>
+</html>

@@ -62,7 +62,11 @@ def test_root_http_login_and_assets_without_nginx(monkeypatch):
         response = connection.getresponse()
         assert response.status == 200
         assert b'realtime_history' in response.read()
-        for asset in ("app.js", "certificates.js", "selects.js", "style.css"):
+        for asset in (
+            "app.js", "certificates.js", "selects.js", "style.css",
+            "previews/ssh-ai/index.html", "previews/ssh-ai/preview.js", "previews/ssh-ai/preview.css",
+            "previews/ssh-ai/icons/sparkles.svg", "vendor/xterm.js", "vendor/addon-fit.js", "vendor/xterm.css",
+        ):
             connection.request("GET", f"/ui/{asset}")
             response = connection.getresponse()
             assert response.status == 200

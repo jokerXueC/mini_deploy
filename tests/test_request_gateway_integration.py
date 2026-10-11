@@ -56,6 +56,7 @@ def backend():
                 return
             body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
             data = json.dumps({'path': self.path, 'body': body.decode(), 'host': self.headers.get('Host'),
+                               'request_id': self.headers.get('X-Request-ID'),
                                'proto': self.headers.get('X-Forwarded-Proto'),
                                'forwarded': self.headers.get('X-Forwarded-For')}).encode()
             self.send_response(200)
@@ -148,6 +149,7 @@ def test_real_proxy_post_stream_websocket_privacy_and_reload(proxy, backend):
     try:
         connection.request('POST', '/echo/a%2Fb?token=query-secret', body='body-secret', headers={
             'Host': 'api.example.test', 'Cookie': 'cookie-secret', 'Authorization': 'Bearer auth-secret',
+            'X-Request-ID': 'test-request-123',
             'X-Forwarded-For': 'forged', 'X-Forwarded-Proto': 'https'})
         response = connection.getresponse()
         assert response.status == 200
@@ -157,6 +159,11 @@ def test_real_proxy_post_stream_websocket_privacy_and_reload(proxy, backend):
         assert result['host'] == 'api.example.test'
         assert result['proto'] == 'http'
         assert result['forwarded'] != 'forged'
+        assert result['request_id'] == response.getheader('X-Request-ID') == 'test-request-123'
+        connection.request('GET', '/generated-id', headers={'X-Request-ID': 'invalid id'})
+        response = connection.getresponse()
+        generated = json.loads(response.read())['request_id']
+        assert generated == response.getheader('X-Request-ID') and len(generated) == 32
         connection.request('GET', '/events')
         response = connection.getresponse()
         assert response.status == 200
@@ -177,12 +184,17 @@ def test_real_proxy_post_stream_websocket_privacy_and_reload(proxy, backend):
             assert stream.read(4) == b'\x81\x02ok'
     for _ in range(50):
         captured = records()
-        if len(captured) >= 3:
+        if len(captured) >= 4:
             break
         time.sleep(0.05)
     assert {record['status'] for record in captured} >= {200, 101}
     assert not any(secret in json.dumps(captured) for secret in ['query-secret', 'body-secret', 'cookie-secret', 'auth-secret'])
     assert all(record['duration_ms'] >= 0 for record in captured)
+    posted = next(record for record in captured if record['method'] == 'POST')
+    assert posted['request_id'] == 'test-request-123'
+    assert posted['upstream_attempts'][0]['status'] == 200
+    assert posted['upstream_attempts'][0]['connect_ms'] is not None
+    assert next(record for record in captured if record['path'] == '/generated-id')['request_id'] == generated
     update({**spec, 'upstream': f'http://127.0.0.1:{free_port()}'})
     for _ in range(50):
         connection = http.client.HTTPConnection('127.0.0.1', spec['port'], timeout=3)

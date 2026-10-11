@@ -21,6 +21,7 @@ the product.
 - Local or Docker Nginx, business sites and uploaded PEM certificate management.
 - Request collection from supported Nginx/Caddy logs.
 - Independent Docker request gateways for HTTP, SSE and WebSocket traffic.
+- Remote SSH terminals with password/private-key authentication, host fingerprint verification and saved addresses; HTTPS or a local SSH tunnel is required.
 
 Business services must already be running. There is no repository onboarding,
 deployment script form, push-to-deploy WebHook, build pipeline, application rollback
@@ -42,6 +43,10 @@ have been removed without deleting existing server configuration.
 Requirements: Linux with root/sudo, systemd, Python 3.10+ and Git to download
 mini_deploy itself. Docker and Nginx are optional, depending on the features used.
 No business repository or deployment credentials are needed.
+
+The installer attempts to install the distribution's `python3-paramiko` package
+for SSH terminals. If unavailable, other panel features continue working.
+Terminal browser assets are bundled locally. See [SSH usage](docs/SSH.zh-CN.md).
 
 Optional Docker installation supports container management, Docker Nginx and request
 gateways. `SETUP_DOCKER=ask` prompts interactively with a default of No and skips

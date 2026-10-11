@@ -21,6 +21,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 DEFAULTS = {"sustain_seconds": 60, "repeat_seconds": 3600, "recovery": True,
             "slow_ms": 3000, "certificate_days": 14}
 MAX_TARGETS = 50
+MAX_EVENTS = 1000
+EVENT_RETENTION_SECONDS = 30 * 86400
 
 
 def normalize_url(value):
@@ -112,6 +114,8 @@ class Monitor:
         self.delivery = {}
         self.pending = {}
         self.evaluated = {}
+        self.container_state = {}
+        self.coverage = {}
         self.due = {}
         self.last_flush = 0
         if path.exists():
@@ -123,19 +127,28 @@ class Monitor:
             self.targets = data.get("targets", {})
             self.results = data.get("results", {})
             self.incidents = data.get("incidents", {})
-            self.events = data.get("events", [])[-200:]
+            self.events = data.get("events", [])[-MAX_EVENTS:]
             self.settings.update(data.get("settings", {}))
             self.muted_until = data.get("muted_until", 0)
             self.delivery = data.get("delivery", {})
             self.pending = data.get("pending", {})
+            self.container_state = data.get("container_state", {})
             self.evaluated = {k: v.get("checked_at") for k, v in self.results.items()}
             # Persisted active incidents survive restart; pending conditions need fresh samples.
             self.incidents = {k: v for k, v in self.incidents.items() if v.get("active")}
+            for item in self.incidents.values():
+                item.setdefault("incident_id", secrets.token_hex(12))
+            self._prune_events()
+
+    def _prune_events(self):
+        cutoff = self.clock() - EVENT_RETENTION_SECONDS
+        self.events = [item for item in self.events if item.get("at_ts", self.clock()) >= cutoff][-MAX_EVENTS:]
 
     def flush(self):
         with self.lock:
+            self._prune_events()
             data = {key: getattr(self, key) for key in (
-                "targets", "results", "incidents", "events", "settings", "muted_until", "delivery", "pending")}
+                "targets", "results", "incidents", "events", "settings", "muted_until", "delivery", "pending", "container_state")}
             self.path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, name = tempfile.mkstemp(prefix=".monitor-", dir=self.path.parent)
             try:
@@ -161,16 +174,21 @@ class Monitor:
                 if cert.get("expires_at"):
                     cert["days_remaining"] = math.floor((cert["expires_at"] - now) / 86400)
                 targets.append({**target, "result": result})
-            alerts = [{**v, "id": k, "muted": self.muted_until > now}
+            self._prune_events()
+            alerts = [{**v, "id": k, "muted": self.muted_until > now,
+                       "stale": bool(v.get("sample_unknown")) or now - v.get("last_sample", 0) > 120,
+                       "duration_seconds": max(0, int(now - v.get("first_seen", now)))}
                       for k, v in self.incidents.items() if v.get("active")]
+            alerts.sort(key=lambda item: (bool(item.get("acknowledged_at")), item.get("level") != "critical", item.get("first_seen", now)))
             return copy.deepcopy({"targets": targets, "alerts": alerts, "events": list(reversed(self.events)),
                                   "settings": self.settings, "muted_until": self.muted_until,
-                                  "delivery": self.delivery, "generated_at": now})
+                                  "delivery": self.delivery, "generated_at": now, "coverage": self.coverage,
+                                  "history_retention_days": 30, "history_limit": MAX_EVENTS})
 
     def operation(self, data):
         with self.lock:
             fields = ("targets", "results", "incidents", "events", "settings", "muted_until",
-                      "pending", "due", "evaluated")
+                      "pending", "due", "evaluated", "container_state")
             before = {key: copy.deepcopy(getattr(self, key)) for key in fields}
             try:
                 return self._operation(data)
@@ -183,7 +201,32 @@ class Monitor:
         with self.lock:
             action = data.get("action")
             key = str(data.get("key") or "")
-            if action == "save":
+            if action in {"acknowledge", "acknowledge_all"}:
+                if action == "acknowledge":
+                    item = self.incidents.get(key)
+                    if not item or not item.get("active") or data.get("incident_id") != item.get("incident_id"):
+                        raise ValueError("故障已变化或恢复，请刷新后重试")
+                    keys = [key]
+                else:
+                    keys = [k for k, item in self.incidents.items() if item.get("active")]
+                for incident_key in keys:
+                    item = self.incidents[incident_key]
+                    if item.get("acknowledged_at"):
+                        continue
+                    item["acknowledged_at"] = self.clock()
+                    self.pending.pop(incident_key, None)
+                    self.record_event("acknowledged", "已知晓：" + item["title"],
+                                      "故障仍在持续；暂停该次故障的重复通知", item["source"],
+                                      level="info", incident_id=item["incident_id"], metadata=item.get("metadata"))
+            elif action == "container_watch":
+                if not key.startswith("docker:") or key not in self.container_state:
+                    raise ValueError("容器监测对象不存在，请刷新页面")
+                expected = data.get("expected_running")
+                if not isinstance(expected, bool):
+                    raise ValueError("持续运行必须是开关值")
+                self.container_state[key]["expected_running"] = expected
+                self.container_state[key]["watch_explicit"] = True
+            elif action == "save":
                 url = normalize_url(data.get("url"))
                 if key and key not in self.targets:
                     raise ValueError("监测项不存在，请刷新页面")
@@ -242,20 +285,37 @@ class Monitor:
                 self.incidents.pop(incident, None)
                 self.pending.pop(incident, None)
 
-    def _event(self, item, recovered=False):
-        self.events.append({"kind": "recovery" if recovered else "alert",
-                            "level": "success" if recovered else item["level"],
-                            "title": ("已恢复：" if recovered else "") + item["title"],
-                            "detail": item["detail"], "source": item["source"],
-                            "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.clock()))})
-        self.events = self.events[-200:]
+    def record_event(self, kind, title, detail, source, *, level="info", incident_id=None, metadata=None,
+                     duration_seconds=None):
+        with self.lock:
+            now = self.clock()
+            event = {"id": secrets.token_hex(12), "kind": kind, "level": level, "title": title,
+                     "detail": detail, "source": source, "at_ts": now,
+                     "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))}
+            if incident_id:
+                event["incident_id"] = incident_id
+            if metadata:
+                event["metadata"] = copy.deepcopy(metadata)
+            if duration_seconds is not None:
+                event["duration_seconds"] = duration_seconds
+            self.events.append(event)
+            self._prune_events()
 
-    def observe(self, key, bad, title, detail, source, level="critical"):
+    def _event(self, item, recovered=False):
+        self.record_event("recovery" if recovered else "alert",
+                          ("已恢复：" if recovered else "") + item["title"], item["detail"], item["source"],
+                          level="success" if recovered else item["level"], incident_id=item.get("incident_id"),
+                          metadata=item.get("metadata"),
+                          duration_seconds=max(0, int(self.clock() - item["first_seen"])) if recovered else None)
+
+    def observe(self, key, bad, title, detail, source, level="critical", *, metadata=None, immediate=False):
         """None means no usable sample; it must never resolve an incident."""
         with self.lock:
             now = self.clock()
             item = self.incidents.get(key)
             if bad is None:
+                if item:
+                    item["sample_unknown"] = True
                 if item and not item.get("active"):
                     self.incidents.pop(key, None)
                 return
@@ -271,16 +331,19 @@ class Monitor:
                 return
             if not item:
                 self.pending.pop(key, None)
-                item = {"first_seen": now, "active": False, "notified": False, "last_notice": 0}
+                item = {"first_seen": now, "active": False, "notified": False, "last_notice": 0,
+                        "incident_id": secrets.token_hex(12)}
                 self.incidents[key] = item
             elif not item["active"] and now - item.get("last_sample", now) > 120:
                 item["first_seen"] = now
-            item.update(title=title, detail=detail, source=source, level=level, last_sample=now)
-            if not item["active"] and now - item["first_seen"] >= self.settings["sustain_seconds"]:
+            item.update(title=title, detail=detail, source=source, level=level, last_sample=now, sample_unknown=False)
+            if metadata is not None:
+                item["metadata"] = copy.deepcopy(metadata)
+            if not item["active"] and (immediate or now - item["first_seen"] >= self.settings["sustain_seconds"]):
                 item["active"] = True
                 item["at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
                 self._event(item)
-            if item["active"] and (not item["notified"] or now - item["last_notice"] >= self.settings["repeat_seconds"]):
+            if item["active"] and not item.get("acknowledged_at") and (not item["notified"] or now - item["last_notice"] >= self.settings["repeat_seconds"]):
                 self.pending.setdefault(key, {"title": title, "body": detail, "recovery": False,
                                               "retry_at": now, "token": secrets.token_hex(8)})
 
@@ -330,7 +393,8 @@ class Monitor:
                 if message["retry_at"] > now:
                     continue
                 item = self.incidents.get(key)
-                if not message["recovery"] and (not item or now - item.get("last_sample", 0) > 120):
+                if not message["recovery"] and (not item or item.get("acknowledged_at") or item.get("sample_unknown")
+                                                or now - item.get("last_sample", 0) > 120):
                     continue
                 message["retry_at"] = now + 300
                 message["inflight"] = True

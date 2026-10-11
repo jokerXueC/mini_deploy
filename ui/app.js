@@ -13,8 +13,6 @@ let systemTrendRange = 'realtime';
 let notificationDirty = false;
 const THEME_STORAGE_KEY = 'mini_deploy-theme';
 const DISMISSED_NOTICE_STORAGE_KEY = 'mini_deploy-dismissed-notices';
-let lastAlerts = [];
-let lastEvents = [];
 let lastContainerNoticeKeys = [];
 let lastSystemPayload = null;
 let dismissedNoticeKeys = loadDismissedNoticeKeys();
@@ -341,42 +339,8 @@ function isAbnormalEvent(event = {}) {
   return Boolean(level) && !['success', 'ok', 'completed'].includes(level);
 }
 
-function currentNoticeKeys() {
-  const alertKeys = lastAlerts.map(alert => noticeSignature('alert', alert));
-  const eventKeys = lastEvents
-    .filter(isAbnormalEvent)
-    .map(event => noticeSignature('event', event));
-  return Array.from(new Set([...alertKeys, ...eventKeys, ...lastContainerNoticeKeys])).filter(Boolean);
-}
-
-function updateClearAlertsButton() {
-  const button = $('clearAlertsBtn');
-  if (!button) return;
-  const keys = currentNoticeKeys();
-  const visibleCount = keys.filter(key => !dismissedNoticeKeys.has(key)).length;
-  const dismissedCount = keys.length - visibleCount;
-  button.disabled = keys.length === 0;
-  button.textContent = visibleCount > 0 ? '清除当前' : dismissedCount > 0 ? '恢复显示' : '清除当前';
-  button.title = visibleCount > 0
-    ? '清除当前已经看到的警告和异常，新的异常仍会显示'
-    : dismissedCount > 0
-      ? '恢复显示当前这批已清除的告警'
-      : '暂无可清除的告警';
-}
-
 function toggleCurrentNoticeDismissal() {
-  const keys = currentNoticeKeys();
-  if (!keys.length) return;
-  const visibleKeys = keys.filter(key => !dismissedNoticeKeys.has(key));
-  if (visibleKeys.length) {
-    visibleKeys.forEach(key => dismissedNoticeKeys.add(key));
-  } else {
-    keys.forEach(key => dismissedNoticeKeys.delete(key));
-  }
-  saveDismissedNoticeKeys();
-  renderAlerts(lastAlerts);
-  renderEvents(lastEvents);
-  if (lastSystemPayload) renderSystemStatus(lastSystemPayload);
+  return window.WebsiteMonitoring?.acknowledgeAll();
 }
 
 let confirmDialogResolve = null;
@@ -520,17 +484,22 @@ function animateNumberText(id, value, formatter) {
 }
 
 function setView(view) {
-  activeView = ['server', 'events', 'notify', 'certificates', 'requests'].includes(view) ? view : 'server';
-  ['server', 'events', 'notify', 'certificates', 'requests'].forEach(name => {
+  activeView = ['server', 'events', 'notify', 'certificates', 'requests', 'terminal'].includes(view) ? view : 'server';
+  ['server', 'events', 'notify', 'certificates', 'requests', 'terminal'].forEach(name => {
     $(`${name}View`)?.classList.toggle('active', activeView === name);
     $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
   });
+  const selectedTab = $(`${activeView}ViewTab`), tabs = selectedTab?.parentElement;
+  if (tabs && tabs.scrollWidth > tabs.clientWidth) {
+    tabs.scrollLeft = Math.max(0, selectedTab.offsetLeft - tabs.offsetLeft - tabs.clientWidth + selectedTab.offsetWidth + 12);
+  }
   const titles = {
     server: ['服务器健康面板', '查看服务器资源、网络吞吐和 Docker 容器运行状态。'],
-    events: ['监测与告警', '网站可用性、线上证书与服务器异常。'],
+    events: ['异常中心', '当前异常与恢复记录'],
     notify: ['通知配置', '异常提醒与恢复通知。'],
     certificates: ['域名与证书', '已发现的网站、证书有效期与线上状态。'],
     requests: ['请求记录', '后端 HTTP 请求、响应状态与耗时'],
+    terminal: ['远程终端', 'SSH 连接与服务器操作'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
@@ -545,7 +514,8 @@ function setView(view) {
   else if (activeView === 'notify') refreshNotificationConfig();
   else if (activeView === 'certificates') refreshCertificates();
   else if (activeView === 'requests') window.NginxRequests?.refresh();
-  window.WebsiteMonitoring?.refresh();
+  if (activeView !== 'events') window.WebsiteMonitoring?.refresh();
+  window.SSHTerminal?.viewChanged(activeView);
 }
 
 
@@ -981,7 +951,7 @@ function trendDots(points, key, className, label, width, height, pad, scale, opt
     const tooltip = typeof options.tooltipFormatter === 'function'
       ? options.tooltipFormatter(point, value)
       : `${formatTrendTime(point)} · ${label} ${formatter(value)}`;
-    return `<g class="trend-point" tabindex="0" aria-label="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">
+    return `<g class="trend-point${index === points.length - 1 ? ' is-latest' : ''}" tabindex="0" aria-label="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">
       <circle class="trend-dot-hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9"></circle>
       <circle class="trend-dot ${className}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2"></circle>
     </g>`;
@@ -1072,12 +1042,23 @@ function renderTrendCard(points, config, availability = trendAvailability(points
       </article>
     `;
   }
-  const height = 210;
-  const pad = { top: 12, right: 12, bottom: 20, left: 42 };
+  const height = 236;
+  const pad = { top: 14, right: 14, bottom: 16, left: 38 };
   const width = config.realtime ? 480 : trendChartWidth(points, pad);
   const yTop = pad.top;
-  const yMid = pad.top + (height - pad.top - pad.bottom) / 2;
   const yBottom = height - pad.bottom;
+  const grid = Array.from({length: 5}, (_, i) => {
+    const y = yTop + (yBottom - yTop) * i / 4;
+    const value = scale.max - (scale.max - scale.min) * i / 4;
+    return `<line class="trend-grid-line${i % 2 ? ' minor' : ''}" x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}"></line>
+      <text class="trend-axis-label" x="${pad.left - 8}" y="${y + 3}">${escapeHtml(trendAxisLabel(value, config))}</text>`;
+  }).join('') + Array.from({length: 6}, (_, i) => {
+    const x = pad.left + (width - pad.left - pad.right) * i / 5;
+    return `<line class="trend-grid-line vertical" x1="${x}" y1="${yTop}" x2="${x}" y2="${yBottom}"></line>`;
+  }).join('');
+  const values = points.map(point => trendPointValue(point, key, config)).filter(value => value != null);
+  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const statistics = `<span>最低 <b>${escapeHtml(formatter(Math.min(...values)))}</b></span><span>平均 <b>${escapeHtml(formatter(average))}</b></span><span>峰值 <b>${escapeHtml(formatter(Math.max(...values)))}</b></span>`;
   const paths = trendPath(points, key, width, height, pad, scale, {...config, withSamples: true})
     .map(segment => `<path class="trend-line ${className}" data-samples="${escapeHtml(JSON.stringify(segment.map(([x, y, , point]) => [x, y, point.ts])))}" d="${trendLinePath(segment)}"></path>`)
     .join('');
@@ -1095,12 +1076,7 @@ function renderTrendCard(points, config, availability = trendAvailability(points
       </div>
       <div class="trend-chart-scroll" tabindex="0">
         <svg class="trend-mini-svg" ${config.realtime ? 'data-realtime="true" preserveAspectRatio="none"' : ''} viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
-          <line class="trend-grid-line" x1="${pad.left}" y1="${yTop.toFixed(1)}" x2="${width - pad.right}" y2="${yTop.toFixed(1)}"></line>
-          <line class="trend-grid-line" x1="${pad.left}" y1="${yMid.toFixed(1)}" x2="${width - pad.right}" y2="${yMid.toFixed(1)}"></line>
-          <line class="trend-grid-line" x1="${pad.left}" y1="${yBottom.toFixed(1)}" x2="${width - pad.right}" y2="${yBottom.toFixed(1)}"></line>
-          <text class="trend-axis-label" x="${pad.left - 6}" y="${(yMid + 4).toFixed(1)}">${escapeHtml(trendAxisLabel((scale.max + scale.min) / 2, config))}</text>
-          <text class="trend-axis-label" x="${pad.left - 5}" y="${(yTop + 3).toFixed(1)}">${escapeHtml(trendAxisLabel(scale.max, config))}</text>
-          <text class="trend-axis-label" x="${pad.left - 5}" y="${(yBottom + 3).toFixed(1)}">${escapeHtml(trendAxisLabel(scale.min, config))}</text>
+          ${grid}
           ${paths}
           ${dots}
         </svg>
@@ -1109,6 +1085,7 @@ function renderTrendCard(points, config, availability = trendAvailability(points
         <span>${escapeHtml(formatTrendTime(points[0]))}</span>
         <span>${escapeHtml(formatTrendTime(latestPoint))}</span>
       </div>
+      <div class="trend-window-stats">${statistics}</div>
     </article>
   `;
 }
@@ -1153,11 +1130,11 @@ function renderSystemTrend(system = {}) {
         key: 'network_total_kbps',
         className: 'network',
         label: '网络',
-        subLabel: `RX ${formatNumber(latest.network_rx_kbps, 'KB/s')} / TX ${formatNumber(latest.network_tx_kbps, 'KB/s')}`,
+        subLabel: `RX ${formatNumber(latest.network_rx_kbps, 'KiB/s')} / TX ${formatNumber(latest.network_tx_kbps, 'KiB/s')}`,
         percent: false,
         minSpan: 8,
-        formatter: value => formatNumber(value, 'KB/s'),
-        tooltipFormatter: (point, value) => `${formatTrendTime(point)} · 网络 ${formatNumber(value, 'KB/s')} · RX ${formatNumber(point.network_rx_kbps, 'KB/s')} · TX ${formatNumber(point.network_tx_kbps, 'KB/s')}`,
+        formatter: value => formatNumber(value, 'KiB/s'),
+        tooltipFormatter: (point, value) => `${formatTrendTime(point)} · 网络 ${formatNumber(value, 'KiB/s')} · RX ${formatNumber(point.network_rx_kbps, 'KiB/s')} · TX ${formatNumber(point.network_tx_kbps, 'KiB/s')}`,
       }, availability[2])}
     </div>
   `;
@@ -1193,7 +1170,7 @@ function renderSystemTrend(system = {}) {
     const scroll = card.querySelector('.trend-chart-scroll');
     const atEnd = scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft < 8;
     card.style.cssText = next.style.cssText;
-    ['.trend-card-head', '.trend-card-meta', '.trend-card-foot'].forEach(selector => {
+    ['.trend-card-head', '.trend-card-meta', '.trend-card-foot', '.trend-window-stats'].forEach(selector => {
       if (i === 0 && selector === '.trend-card-head') {
         DashboardMotion.reading(card.querySelector('strong'), latest.cpu_percent, formatPercent);
         return;
@@ -1205,76 +1182,64 @@ function renderSystemTrend(system = {}) {
   });
 }
 
-function renderAlerts(alerts = []) {
-  const list = $('alertList');
-  const badge = $('alertBadge');
-  if (!list || !badge) return;
-  lastAlerts = Array.isArray(alerts) ? alerts : [];
-  list.classList.remove('skeleton-block');
-  const visibleAlertsAll = lastAlerts.filter(alert => !dismissedNoticeKeys.has(noticeSignature('alert', alert)));
-  const dismissedCount = lastAlerts.length - visibleAlertsAll.length;
-  const critical = visibleAlertsAll.filter(item => item.level === 'critical').length;
-  const warning = visibleAlertsAll.filter(item => item.level === 'warning').length;
-  badge.className = `badge ${critical ? 'failed' : warning ? 'running' : dismissedCount ? 'neutral' : 'success'}`;
-  badge.textContent = critical ? `${critical} 个严重` : warning ? `${warning} 个提醒` : dismissedCount ? '已清除' : '正常';
-  list.classList.toggle('scrollable-list', visibleAlertsAll.length > 20);
-  if (!visibleAlertsAll.length) {
-    list.innerHTML = dismissedCount
-      ? '<div class="project-empty compact-empty">已清除当前告警，新异常会继续显示</div>'
-      : '<div class="project-empty compact-empty">暂无告警</div>';
-    updateClearAlertsButton();
+function renderCpuCores(cpu = {}) {
+  const grid = $('cpuCoreGrid');
+  if (!grid) return;
+  $('cpuModel').textContent = cpu.model || '处理器型号未提供';
+  const cores = (Array.isArray(cpu.cores) ? cpu.cores : []).filter(core => Number.isInteger(core.id) && core.id >= 0);
+  if (!cores.length) {
+    grid.replaceChildren();
+    const empty = document.createElement('p');
+    empty.className = 'cpu-core-empty';
+    empty.textContent = '暂未读取到逐核数据';
+    grid.append(empty);
+    $('cpuCoreSummary').textContent = '逐核数据不可用';
+    $('cpuTopologyNote').textContent = '';
     return;
   }
-  const visibleAlerts = activeView === 'events' ? visibleAlertsAll.slice(0, 40) : visibleAlertsAll.slice(0, 8);
-  list.innerHTML = visibleAlerts.map(alert => `
-    <div class="alert-item ${severityClass(alert.level)}">
-      <div>
-        <strong>${escapeHtml(alert.title || '告警')}</strong>
-        <span>${escapeHtml(alert.detail || '-')}</span>
-        ${alert.muted ? '<small>通知已静音</small>' : ''}
-      </div>
-      ${alert.command ? `<code>${escapeHtml(alert.command)}</code>` : ''}
-    </div>
-  `).join('');
-  updateClearAlertsButton();
+  const signature = cores.map(core => core.id).join(',');
+  if (grid.dataset.ids !== signature || !grid.querySelector('.cpu-core-cell')) {
+    grid.dataset.ids = signature;
+    grid.replaceChildren(...cores.map(core => {
+      const cell = document.createElement('div');
+      cell.className = 'cpu-core-cell'; cell.tabIndex = 0;
+      cell.innerHTML = `<span class="cpu-core-dot" aria-hidden="true"></span><span class="cpu-core-id">L${core.id}</span><span class="cpu-core-percent">-</span><span class="cpu-core-fill" aria-hidden="true"></span>`;
+      return cell;
+    }));
+  }
+  const valid = [];
+  cores.forEach((core, i) => {
+    const cell = grid.children[i];
+    const value = trendPointValue(core, 'percent');
+    const label = `逻辑处理器 ${core.id} · ${value == null ? '等待有效采样' : formatPercent(value)}`;
+    cell.title = label; cell.setAttribute('aria-label', label);
+    cell.dataset.level = value == null ? 'unknown' : value > 80 ? 'hot' : value >= 50 ? 'busy' : 'idle';
+    DashboardMotion.reading(cell.querySelector('.cpu-core-percent'), value, formatPercent);
+    cell.style.setProperty('--core-load', value == null ? 0 : value / 100);
+    if (value != null) valid.push(value);
+  });
+  const busiest = cores.reduce((best, core) => (trendPointValue(core, 'percent') ?? -1) > (trendPointValue(best, 'percent') ?? -1) ? core : best, {});
+  $('cpuCoreSummary').textContent = valid.length ? `${cores.length} 个逻辑处理器 · 最忙 L${busiest.id}` : `${cores.length} 个逻辑处理器 · 等待有效采样`;
+  $('cpuTopologyNote').textContent = cpu.physical_cores ? `${cpu.physical_cores} 核 / ${cpu.logical_count || cores.length} 线程` : '系统未提供物理核拓扑';
 }
 
-function renderEvents(events = []) {
-  const target = $('eventTimeline');
-  if (!target) return;
-  lastEvents = Array.isArray(events) ? events : [];
-  target.classList.remove('skeleton-block');
-  const hint = $('eventTimelineHint');
-  const abnormalEvents = lastEvents;
-  const visibleEventsAll = abnormalEvents.filter(event => !dismissedNoticeKeys.has(noticeSignature('event', event)));
-  const dismissedCount = abnormalEvents.length - visibleEventsAll.length;
-  if (hint) {
-    hint.textContent = visibleEventsAll.length
-      ? `最近 ${visibleEventsAll.length} 条异常与恢复事件${dismissedCount ? ` · 已清除 ${dismissedCount} 条` : ''}`
-      : dismissedCount
-        ? `已清除 ${dismissedCount} 条当前异常，新异常会继续显示`
-        : '异常与恢复记录';
-  }
-  target.classList.toggle('scrollable-list', visibleEventsAll.length > 20);
-  if (!visibleEventsAll.length) {
-    target.innerHTML = dismissedCount
-      ? '<div class="project-empty compact-empty">已清除当前事件，新异常会继续显示</div>'
-      : '<div class="project-empty compact-empty">暂无事件</div>';
-    updateClearAlertsButton();
-    return;
-  }
-  const visibleEvents = activeView === 'events' ? visibleEventsAll.slice(0, 60) : visibleEventsAll.slice(0, 16);
-  target.innerHTML = visibleEvents.map(event => `
-    <div class="event-item ${severityClass(event.level)}">
-      <span class="event-dot"></span>
-      <div>
-        <strong>${escapeHtml(event.title || '-')}</strong>
-        <small>${escapeHtml(event.at || '-')} · ${escapeHtml(event.source || event.kind || '-')}</small>
-        <p>${escapeHtml(event.detail || '-')}</p>
-      </div>
-    </div>
-  `).join('');
-  updateClearAlertsButton();
+$('cpuCoreToggle').addEventListener('click', () => {
+  const panel = $('cpuCorePanel');
+  panel.hidden = !panel.hidden;
+  $('cpuCoreToggle').setAttribute('aria-expanded', String(!panel.hidden));
+});
+
+document.querySelectorAll('[data-cpu-view]').forEach(button => button.addEventListener('click', () => {
+  $('cpuCoreGrid').dataset.view = button.dataset.cpuView;
+  document.querySelectorAll('[data-cpu-view]').forEach(item => {
+    const active = item === button;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-pressed', String(active));
+  });
+}));
+
+function formatMemorySize(value) {
+  return value == null || !Number.isFinite(Number(value)) ? '-' : `${(Number(value) / 1024).toFixed(1)} GiB`;
 }
 
 function renderSystemStatus(system = {}) {
@@ -1291,20 +1256,26 @@ function renderSystemStatus(system = {}) {
   const containers = docker.containers || [];
 
   animateNumberText('cpuValue', server.cpu_percent, formatPercent);
+  const cpu = server.cpu || {};
+  $('cpuCapacity').textContent = cpu.physical_cores ? `${cpu.physical_cores} 核 / ${cpu.logical_count} 线程`
+    : cpu.logical_count ? `${cpu.logical_count} 个逻辑处理器` : '核数未知';
   $('cpuSub').textContent = `Load ${formatNumber(load.one)} / ${formatNumber(load.five)} / ${formatNumber(load.fifteen)}`;
   setResourceBar('cpuBar', server.cpu_percent);
 
   animateNumberText('memoryValue', memory.percent, formatPercent);
-  $('memorySub').textContent = `${formatNumber(memory.used_mb, 'MB')} / ${formatNumber(memory.total_mb, 'MB')}`;
+  $('memoryCapacity').textContent = formatMemorySize(memory.total_mb);
+  $('memorySub').textContent = `已用 ${formatMemorySize(memory.used_mb)} / 可用 ${formatMemorySize(memory.available_mb ?? (memory.total_mb == null || memory.used_mb == null ? null : memory.total_mb - memory.used_mb))}`;
   setResourceBar('memoryBar', memory.percent);
 
   animateNumberText('diskValue', disk.percent, formatPercent);
+  $('diskCapacity').textContent = `${formatNumber(disk.total_gb, 'GiB')} · ${disk.path || '/'}`;
   $('diskSub').textContent = `${formatNumber(disk.used_gb, 'GB')} / ${formatNumber(disk.total_gb, 'GB')} · ${disk.path || '/'}`;
   setResourceBar('diskBar', disk.percent);
 
-  animateNumberText('networkValue', network.percent, formatPercent);
-  $('networkSub').textContent = `RX ${formatNumber(network.rx_kbps, 'KB/s')} / TX ${formatNumber(network.tx_kbps, 'KB/s')}`;
+  animateNumberText('networkValue', network.total_kbps ?? (network.rx_kbps == null || network.tx_kbps == null ? null : network.rx_kbps + network.tx_kbps), value => value >= 1024 ? `${(value / 1024).toFixed(1)} MiB/s` : `${value.toFixed(1)} KiB/s`);
+  $('networkSub').textContent = `RX ${formatNumber(network.rx_kbps, 'KiB/s')} / TX ${formatNumber(network.tx_kbps, 'KiB/s')}`;
   setResourceBar('networkBar', network.percent);
+  renderCpuCores(cpu);
   renderSystemTrend(system);
 
   const dockerBadge = $('dockerBadge');
@@ -1479,8 +1450,6 @@ function handleContainerAction(event) {
     keys.forEach(key => dismissedNoticeKeys.add(key));
     saveDismissedNoticeKeys();
     if (lastSystemPayload) renderSystemStatus(lastSystemPayload);
-    renderAlerts(lastAlerts);
-    renderEvents(lastEvents);
     return;
   }
   if (action === 'logs') {
@@ -1554,12 +1523,11 @@ function clearEventsRefresh() {
 async function refreshEventsStatus() {
   if (activeView !== 'events') return;
   clearEventsRefresh();
+  if (window.WebsiteMonitoring) return window.WebsiteMonitoring.refresh();
   try {
     const status = await fetchJson('status');
     csrfToken = status.csrf_token || csrfToken;
     if (activeView !== 'events') return;
-    renderAlerts(status.alerts || []);
-    renderEvents(status.events || []);
     $('updatedAt').textContent = `事件刷新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
   } catch (err) {
     if (activeView === 'events') $('eventTimelineHint').textContent = `事件加载失败: ${err.message}`;
@@ -1612,8 +1580,6 @@ async function refreshServerStatus() {
     csrfToken = status.csrf_token || csrfToken;
     updateLiveIndicator(true);
     renderSystemStatus(status.system || {});
-    renderAlerts(status.alerts || []);
-    renderEvents(status.events || []);
 
     $('updatedAt').textContent = `服务器刷新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
   } catch (err) {
@@ -1691,13 +1657,13 @@ $('refreshBtn').addEventListener('click', () => {
   else if (activeView === 'notify') refreshNotificationConfig();
   else if (activeView === 'certificates') refreshCertificates();
   else if (activeView === 'requests') window.NginxRequests?.refresh();
+  else if (activeView === 'terminal') window.SSHTerminal?.viewChanged('terminal');
 });
 $('serverViewTab').addEventListener('click', () => setView('server'));
 $('eventsViewTab')?.addEventListener('click', () => setView('events'));
 $('notifyViewTab')?.addEventListener('click', () => setView('notify'));
 $('certificatesViewTab')?.addEventListener('click', () => setView('certificates'));
 $('requestsViewTab')?.addEventListener('click', () => setView('requests'));
-$('clearAlertsBtn')?.addEventListener('click', toggleCurrentNoticeDismissal);
 document.querySelectorAll('[data-server-refresh]').forEach(button => {
   button.addEventListener('click', () => setServerRefreshInterval(button.dataset.serverRefresh));
 });

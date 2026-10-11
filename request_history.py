@@ -148,28 +148,38 @@ class History:
                 cursor=excluded.cursor,checked=excluded.checked,error='',
                 limited=MAX(sources.limited,excluded.limited)""", (key, name, stream, until, now, now if limited else 0))
 
-    def query(self, key, *, period="24h", layout="tree", search="", status="all", page=0, now=None):
+    def query(self, key, *, period="24h", layout="tree", search="", status="all", slow_ms=1000, page=0, now=None):
         if not request_gateway.KEY.fullmatch(key) or period not in PERIODS or layout not in {"tree", "flat"}:
             raise ValueError("请求历史查询参数无效")
-        if status not in {"all", "success", "error"} or not 0 <= page <= 1000 or len(search) > 2048:
+        if (status not in {"all", "success", "error", "slow"} or not 0 <= page <= 1000 or len(search) > 2048
+                or isinstance(slow_ms, bool) or not isinstance(slow_ms, int) or not 1 <= slow_ms <= 3_600_000):
             raise ValueError("请求历史筛选参数无效")
         now = time.time() if now is None else now
         since = now - min(PERIODS[period], self.retention)
         column = "route" if layout == "tree" else "path"
         # Search selects whole groups, retaining their true counts and error rates.
-        having = ["MAX(INSTR(LOWER(host || ' ' || path || ' ' || route), ?) > 0)"]
+        having = ["1"]
+        search_params = ()
+        search_expression = """INSTR(LOWER(host || ' ' || path || ' ' || route || ' ' ||
+            COALESCE(json_extract(data,'$.request_id'),'') || ' ' ||
+            COALESCE(json_extract(data,'$.client_ip'),'')), ?) > 0"""
+        if search:
+            having = [f"MAX({search_expression})"]
+            search_params = (search.lower(),)
         if status == "error":
             having.append("SUM(status >= 400) > 0")
         if status == "success":
             having.append("SUM(status >= 200 AND status < 400) = COUNT(*)")
+        if status == "slow":
+            having.append("SUM(duration >= ?) > 0")
         grouped = f"""SELECT host,method,{column} AS path,COUNT(*) AS count,
             SUM(status>=200 AND status<400) AS successes,SUM(status>=400) AS errors,
             COALESCE(SUM(duration),0) AS durationSum,COUNT(duration) AS durationCount,
             COALESCE(SUM(upstream),0) AS upstreamSum,COUNT(upstream) AS upstreamCount,
-            COUNT(DISTINCT path) AS pathCount
+            COUNT(DISTINCT path) AS pathCount,SUM(duration >= ?) AS slowCount
             FROM requests WHERE source=? AND ts>=? AND ts<=? GROUP BY host,method,{column}
             HAVING {' AND '.join(having)}"""
-        params = (key, since, now, search.lower())
+        params = (slow_ms, key, since, now, *search_params, *((slow_ms,) if status == "slow" else ()))
         with self.connect() as db:
             groups = [dict(row) for row in db.execute(f"""WITH grouped AS ({grouped})
                 SELECT *,COUNT(*) OVER() AS total_groups,SUM(count) OVER() AS total_requests FROM grouped
@@ -178,11 +188,14 @@ class History:
                 f"SELECT COUNT(*),COALESCE(SUM(count),0) FROM ({grouped})", params).fetchone()
             # At most 100 groups per page and 30 individual examples per group.
             for group in groups:
-                samples = db.execute(f"""SELECT data FROM requests INDEXED BY request_{column}
+                samples = db.execute(f"""SELECT id,data FROM requests INDEXED BY request_{column}
                     WHERE source=? AND ts>=? AND ts<=?
-                    AND host=? AND method=? AND {column}=? ORDER BY ts DESC,id DESC LIMIT 30""",
-                    (key, since, now, group["host"], group["method"], group["path"]))
-                group["items"] = [json.loads(row[0]) for row in samples]
+                    AND host=? AND method=? AND {column}=?
+                    {'AND duration>=?' if status == 'slow' else ''}
+                    {f'AND {search_expression}' if search else ''} ORDER BY ts DESC,id DESC LIMIT 30""",
+                    (key, since, now, group["host"], group["method"], group["path"],
+                     *((slow_ms,) if status == "slow" else ()), *search_params))
+                group["items"] = [{**json.loads(row["data"]), "record_id": row["id"]} for row in samples]
                 group["key"] = json.dumps([group["host"], group["method"], group["path"]], ensure_ascii=False)
                 group["average"] = group["durationSum"] / group["durationCount"] if group["durationCount"] else None
                 group["upstreamAverage"] = group["upstreamSum"] / group["upstreamCount"] if group["upstreamCount"] else None
@@ -194,7 +207,7 @@ class History:
                 "total_requests": total[1], "page": page, "has_more": (page + 1) * 100 < total[0],
                 "checked_at": state.get("checked", 0), "earliest_at": earliest,
                 "limited_at": state.get("limited", 0), "error": state.get("error", ""),
-                "retention_days": self.retention // 86400,
+                "retention_days": self.retention // 86400, "slow_ms": slow_ms, "detail_filter": status,
                 "notice": "历史仅包含已采集且仍保留的请求；每类展开显示最近最多 30 条明细。"}
 
 
@@ -206,7 +219,12 @@ class Collector:
     def collect(self, store, entry, now=None):
         now = time.time() if now is None else now
         key, name = entry["spec"]["key"], entry["spec"]["name"]
-        item = store.inspect(entry)
+        with self.history.maintenance(), request_gateway.LOCK:
+            entry = store.read(key)
+            name = entry["spec"]["name"]
+            item = store.inspect(entry)
+            if item:
+                store.upgrade_logging(entry, item)
         if not item:
             self.history.failure(key, name, "采集容器不存在，已保存的历史仍可查询")
             return

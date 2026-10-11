@@ -45,6 +45,17 @@ test('missing and invalid timings are not zeroes, real zero is included', () => 
   assert.equal(context.groupRequests([]).length, 0);
 });
 
+test('slow counts include the threshold boundary and use whole-group statistics', () => {
+  const [group] = context.groupRequests([record({duration_ms: 20}), record({duration_ms: 1000}),
+    record({duration_ms: null}), record({duration_ms: 2000})], false, 1000);
+  assert.equal(group.slowCount, 2);
+  assert.equal(group.count, 4);
+  assert.equal(group.average, 3020 / 3);
+  const [root] = context.requestTree(context.groupRequests([record({path: '/api/a', duration_ms: 2000}),
+    record({path: '/api/b', duration_ms: 10})]));
+  assert.equal(root.slowCount, 1);
+});
+
 test('requests are newest first across time zones without modifying the input', () => {
   const older = record({at: '2026-10-07T12:00:00+08:00'});
   const newer = record({at: '2026-10-07T05:00:00Z'});

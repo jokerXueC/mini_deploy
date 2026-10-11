@@ -28,6 +28,17 @@ def test_parses_caddy_access_log_without_query_or_credentials():
     assert "secret" not in json.dumps(record)
 
 
+def test_caddy_ip_and_headers_use_same_metadata_contract():
+    record = caddy_requests.parse(access_line(size=42, request={"method": "GET", "host": "api.test",
+        "uri": "/api?token=secret", "client_ip": "203.0.113.4", "remote_ip": "172.18.0.2",
+        "proto": "HTTP/2.0", "headers": {"Accept": ["application/json"],
+        "User-Agent": ["browser"], "Authorization": ["secret"], "Cookie": ["secret"]}}))
+    assert record["client_ip"] == "203.0.113.4" and record["peer_ip"] == "172.18.0.2"
+    assert record["response_bytes"] == 42 and record["protocol"] == "HTTP/2.0"
+    assert record["request_headers"] == {"Accept": "application/json", "User-Agent": "browser"}
+    assert "secret" not in json.dumps(record)
+
+
 @pytest.mark.parametrize("line", [
     '{"level":"info","msg":"started"}',
     access_line(logger="http.handlers.reverse_proxy"),

@@ -2,7 +2,7 @@
 window.AppSelects = (() => {
   const controls = new Map();
   let opened = null;
-  const selector = '#certificatesView select, #projectForm select, #requestsView select';
+  const selector = '#certificatesView select, #projectForm select, #requestsView select, #eventsView select, #terminalView select';
 
   function close(focus = false) {
     if (!opened) return;

@@ -353,6 +353,7 @@ def test_actual_monitor_ui_add_edit_pause_remove_and_certificates(http_server, r
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(http_server.origin + "/ui?view=events")
+            page.locator("#monitorWebsiteSection > summary").click()
             page.locator("#monitorUrl").fill("example.com/health")
             page.locator("#monitorSave").click()
             playwright.expect(page.locator("#monitorTargets")).to_contain_text("https://example.com/health")
@@ -366,6 +367,7 @@ def test_actual_monitor_ui_add_edit_pause_remove_and_certificates(http_server, r
             playwright.expect(page.locator("#monitorTargets")).to_contain_text("1.23 s")
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
             page.screenshot(path=str(runtime / f"website-monitor-{width}.png"), full_page=True)
+            page.locator(".monitor-settings > summary").click()
             page.locator("#monitorMute").click()
             playwright.expect(page.locator("#monitorMute")).to_have_text("恢复通知")
             assert monitor.muted_until > time.time()

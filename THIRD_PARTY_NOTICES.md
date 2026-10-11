@@ -1,9 +1,27 @@
 # Third-Party Notices
 
+## xterm.js and Fit Addon
+
+The terminal bundles @xterm/xterm 5.5.0 and @xterm/addon-fit 0.10.0 from npm.
+Both use the MIT license. Complete notices are preserved in
+ui/vendor/xterm.LICENSE and ui/vendor/addon-fit.LICENSE.
+
+Registry SHA-512 integrity values:
+
+- @xterm/xterm: hqJHYaQb5OptNunnyAnkHyM8aCjZ1MEIDTQu1iIbbTD/xops91NB5yq1ZK/dC2JDbVWtF23zUtl9JE2NqwT87A==
+- @xterm/addon-fit: UFYkDm4HUahf2lnEyHvio51TNGiLK66mqP2JoATy7hRZeXaGMRDr00JiSF7m63vR5WKATF605yEggJKsw0JpMQ==
+
+## Paramiko
+
+SSH transport uses Paramiko (LGPL-2.1-or-later), installed separately by the
+Linux package manager, or using requirements-ssh.txt for development.
+https://www.paramiko.org/
+
 ## Lucide Icons
 
 The refresh-cw and ellipsis SVG icons in ui/index.html are from lucide-static
-v0.468.0 (https://lucide.dev).
+v0.468.0 (https://lucide.dev). The SSH AI design preview also bundles SVGs from
+this version in ui/previews/ssh-ai/icons/, with the full license in that directory.
 
 ISC License
 

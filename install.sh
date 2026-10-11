@@ -44,8 +44,8 @@ UPGRADE_SERVICE_FAILSAFE_ARMED="false"
 # Only these program entries are updated. Never prune an installed tree:
 # retired deployment scripts and user-owned business resources must survive.
 RELEASE_ENTRIES=(
-  agent.py certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
-  caddy_requests.py request_gateway.py request_history.py gateway_connections.py monitoring.py docker_mirrors.py
+  agent.py cpu_metrics.py certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
+  caddy_requests.py request_gateway.py request_history.py gateway_connections.py monitoring.py container_monitoring.py docker_events.py docker_mirrors.py ssh_terminal.py requirements-ssh.txt
   install.sh env.example server.env.example LICENSE THIRD_PARTY_NOTICES.md ui
   examples/nginx.compose.yml
   systemd/mini-deploy-agent.service
@@ -1984,6 +1984,33 @@ install -m 644 /dev/null "$marker"
 chown root:root "$marker"
 chmod 644 "$marker"
 
+install_ssh_dependency() {
+  if "$PYTHON_BIN" -c 'import paramiko' >/dev/null 2>&1; then
+    return 0
+  fi
+  if is_en; then
+    echo "Installing SSH terminal dependency (python3-paramiko)..."
+  else
+    echo "正在安装远程终端依赖（python3-paramiko）…"
+  fi
+  local installed="false"
+  if command -v apt-get >/dev/null 2>&1; then
+    if apt-get update && apt-get install -y python3-paramiko; then installed="true"; fi
+  elif command -v dnf >/dev/null 2>&1; then
+    if dnf install -y python3-paramiko; then installed="true"; fi
+  elif command -v yum >/dev/null 2>&1; then
+    if yum install -y python3-paramiko; then installed="true"; fi
+  fi
+  if [[ "$installed" != "true" ]] || ! "$PYTHON_BIN" -c 'import paramiko' >/dev/null 2>&1; then
+    if is_en; then
+      echo "SSH dependency unavailable for $PYTHON_BIN; other panel features remain available. Install Paramiko for this Python runtime, then restart $SERVICE_NAME."
+    else
+      echo "远程终端依赖暂不可用（$PYTHON_BIN）；其他面板功能可正常使用。请为此 Python 安装 Paramiko 后重启 $SERVICE_NAME。"
+    fi
+  fi
+}
+
+install_ssh_dependency
 initialize_admin_credentials
 
 check_dashboard_port

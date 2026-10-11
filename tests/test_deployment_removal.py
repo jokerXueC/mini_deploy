@@ -168,7 +168,7 @@ def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
             started.append(self.target.__name__)
 
         def join(self, timeout):
-            assert timeout == 10
+            assert timeout == (5 if self.target is agent.docker_events.run else 10)
 
     class Server:
         def __init__(self, address, handler):
@@ -186,7 +186,7 @@ def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
     monkeypatch.setattr(agent.sys, "argv", ["agent.py"])
     agent.main()
     assert started == ["_realtime_metric_sampler", "_system_metric_sampler",
-                       "_docker_log_metric_sampler", "_health_check_sampler", "_certificate_discovery_sampler", "run"]
+                       "_docker_log_metric_sampler", "_health_check_sampler", "run", "_certificate_discovery_sampler", "run"]
     assert agent.STATE_FILE.read_bytes() == original
 
 

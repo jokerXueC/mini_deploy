@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import nginx_runtime
+import nginx_requests
 from certificates import CertificateError, run
 
 
@@ -78,7 +79,13 @@ def parse(line: str) -> dict[str, Any] | None:
             return None
         at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
         return {"at": at, "host": host, "method": method, "path": path, "status": status,
-                "duration_ms": round(duration * 1000, 1), "upstream_ms": None}
+                "duration_ms": round(duration * 1000, 1), "upstream_ms": None,
+                **nginx_requests.request_metadata({
+                    "client_ip": request.get("client_ip", request.get("remote_ip")),
+                    "peer_ip": request.get("remote_ip"), "protocol": request.get("proto"),
+                    "response_bytes": item.get("size"),
+                    **({"request_headers": request["headers"]} if "headers" in request else {}),
+                })}
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
 

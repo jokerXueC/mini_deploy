@@ -1,0 +1,2 @@
+# Optional for source development. Linux installer uses the distribution package.
+paramiko>=3.5,<5

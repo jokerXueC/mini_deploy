@@ -187,6 +187,59 @@ def connection_calls(state, action):
             if path == "/gateway-connections" and payload.get("action") == action]
 
 
+@pytest.mark.parametrize('width,count', [(1440, 2), (1440, 64), (390, 16), (390, 64)])
+def test_server_hardware_logical_views_and_statistics(dashboard, width, count):
+    page, state, origin = dashboard
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.goto(f'{origin}/ui?view=server')
+    playwright.expect(page.locator('#updatedAt')).to_contain_text('服务器刷新于')
+    page.evaluate("activeView = 'requests'; clearServerRefresh()")
+
+    def sample(offset):
+        page.evaluate("""([count, offset]) => {
+            const ts = Math.floor(Date.now() / 1000) + offset;
+            renderSystemStatus({server: {cpu_percent: 20, sampled_ts: ts,
+                cpu: {model: 'Test CPU', physical_cores: count / 2, logical_count: count,
+                    cores: Array.from({length: count}, (_, id) => ({id, percent: id === 0 ? null : id === count - 1 ? 90 : 25}))},
+                memory: {total_mb: 8192, used_mb: 2048, available_mb: 6144, percent: 25},
+                network: {total_kbps: 2048, rx_kbps: 1024, tx_kbps: 1024}},
+                realtime_history: [{ts, cpu_percent: 20, memory_percent: 25, network_total_kbps: 2048},
+                    {ts: ts - 1, cpu_percent: 40, memory_percent: 25, network_total_kbps: 2048}],
+                docker: {available: true, containers: []}});
+        }""", [count, offset])
+
+    sample(1)
+    playwright.expect(page.locator('#cpuCapacity')).to_have_text(f'{count // 2} 核 / {count} 线程')
+    playwright.expect(page.locator('#memoryCapacity')).to_have_text('8.0 GiB')
+    playwright.expect(page.locator('#memorySub')).to_have_text('已用 2.0 GiB / 可用 6.0 GiB')
+    playwright.expect(page.locator('#networkValue')).to_contain_text('MiB/s')
+    playwright.expect(page.locator('.cpu-core-cell')).to_have_count(count)
+    playwright.expect(page.locator('#cpuCorePanel')).to_be_hidden()
+    playwright.expect(page.locator('#cpuCoreToggle')).to_have_attribute('aria-expanded', 'false')
+    page.locator('#cpuCoreToggle').click()
+    playwright.expect(page.locator('#cpuCorePanel')).to_be_visible()
+    playwright.expect(page.locator('.cpu-core-cell').first).to_have_attribute('data-level', 'unknown')
+    playwright.expect(page.locator('.cpu-core-cell').last).to_have_attribute('data-level', 'hot')
+    playwright.expect(page.locator('.trend-card.cpu .trend-window-stats')).to_contain_text('30%')
+    svg = page.locator('.trend-card.cpu svg').element_handle()
+    core = page.locator('.cpu-core-cell').first.element_handle()
+    page.locator('[data-cpu-view="detail"]').click()
+    playwright.expect(page.locator('.cpu-core-percent').last).to_be_visible()
+    sample(2)
+    assert svg.evaluate('(node) => node === document.querySelector(".trend-card.cpu svg")')
+    assert core.evaluate('(node) => node === document.querySelector(".cpu-core-cell")')
+    assert page.locator('#cpuCoreGrid').get_attribute('data-view') == 'detail'
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('[data-cpu-view="dots"]').click()
+    playwright.expect(page.locator('.cpu-core-percent').last).to_be_hidden()
+    page.evaluate('renderCpuCores({logical_count: 4, cores: []})')
+    playwright.expect(page.locator('#cpuCoreGrid')).to_contain_text('暂未读取到逐核数据')
+    page.locator('#cpuCoreToggle').click()
+    sample(3)
+    playwright.expect(page.locator('#cpuCorePanel')).to_be_hidden()
+    assert not state['errors']
+
+
 def test_persistent_history_counts_are_not_limited_to_details_and_can_page(dashboard):
     page, state, origin = dashboard
     state["history_sources"] = [{"key": "api", "name": "API"}]
@@ -272,6 +325,78 @@ def test_request_tree_ids_refresh_search_and_original_paths(dashboard, tmp_path,
     page.locator("#requestLayout-menu").get_by_role("option", name="原始地址").click()
     playwright.expect(page.locator('#requestRows .request-group > summary [data-label="次数"]')).to_have_text("1")
     playwright.expect(page.locator("#requestRows > .request-group > summary code")).to_contain_text(second_id)
+    assert not state["errors"]
+
+
+@pytest.mark.parametrize("width", [390, 1440])
+def test_request_metadata_expands_and_survives_refresh(dashboard, tmp_path, width):
+    page, state, origin = dashboard
+    state["gateways"] = [{"key": "api", "name": "API", "state": "running"}]
+    state["records"] = [{"record_id": 1, "path": "/api/items", "method": "GET", "host": "api.test",
+        "at": "2026-10-11T12:00:00Z", "status": 200, "duration_ms": 120, "upstream_ms": 100,
+        "client_ip": "203.0.113.4", "upstream_address": "172.18.0.3:8000", "protocol": "HTTP/1.1",
+        "request_id": "trace-test-1", "request_id_source": "incoming",
+        "upstream_attempts": [{"status": 200, "connect_ms": 5, "wait_ms": 95, "transfer_ms": 0}],
+        "response_bytes": 1024, "request_headers": {"User-Agent": '<img src=x onerror="window.injected=true">',
+        "Accept": "application/json", "X-Forwarded-For": "203.0.113.8"}}]
+    page.set_viewport_size({"width": width, "height": 1000})
+    page.goto(f"{origin}/ui?view=requests")
+    group = page.locator("#requestRows > .request-group")
+    group.locator(":scope > summary").click()
+    sample = group.locator(".request-inspect").first
+    playwright.expect(sample.locator(".request-inspect-body")).to_be_hidden()
+    assert sample.locator(".request-header-table").count() == 0
+    sample.locator(":scope > summary").click()
+    playwright.expect(sample.locator(".request-inspect-body")).to_contain_text("203.0.113.4")
+    playwright.expect(sample.locator(".request-header-table")).to_contain_text("application/json")
+    playwright.expect(sample.locator(".request-inspect-meta")).to_contain_text("trace-test-1")
+    playwright.expect(sample.locator(".request-phase-row")).to_contain_text("95.00 ms")
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    sample.get_by_role("button", name="复制请求 ID", exact=True).click()
+    playwright.expect(sample.get_by_role("button", name="请求 ID 已复制", exact=True)).to_be_visible()
+    assert page.evaluate("navigator.clipboard.readText()") == "trace-test-1"
+    assert sample.locator("img").count() == 0
+    retained = sample.element_handle()
+    state["records"].insert(0, {**state["records"][0], "record_id": 2, "at": "2026-10-11T12:00:01Z"})
+    page.locator("#requestRefresh").click()
+    playwright.expect(group.locator('.request-inspect')).to_have_count(2)
+    assert retained.evaluate("node => node.isConnected && node.open")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path=str(tmp_path / f"request-inspect-{width}.png"), full_page=True)
+    assert not state["errors"]
+
+
+@pytest.mark.parametrize("width", [390, 1440])
+def test_slow_filter_threshold_and_identity_search(dashboard, width):
+    page, state, origin = dashboard
+    state["gateways"] = [{"key": "api", "name": "API", "state": "running"}]
+    base = {"path": "/api/items", "method": "GET", "host": "api.test", "status": 200,
+            "upstream_ms": 5, "at": "2026-10-11T12:00:00Z", "client_ip": "203.0.113.4"}
+    state["records"] = [{**base, "record_id": index + 1, "duration_ms": value,
+                          "request_id": f"trace-{index}"} for index, value in enumerate((20, 500, 2000))]
+    state["records"].append({**base, "path": "/health", "duration_ms": None})
+    page.set_viewport_size({"width": width, "height": 1000})
+    page.goto(f"{origin}/ui?view=requests")
+    page.locator("#requestLayout-button").click()
+    page.locator("#requestLayout-menu").get_by_role("option", name="原始地址").click()
+    page.locator("#requestStatus-button").click()
+    with page.expect_request("**/request-history?*") as requested:
+        page.locator("#requestStatus-menu").get_by_role("option", name="含慢请求").click()
+    assert "status=slow" in requested.value.url and "slow_ms=1000" in requested.value.url
+    playwright.expect(page.locator("#requestSlowField")).to_be_visible()
+    group = page.locator("#requestRows > .request-group")
+    playwright.expect(group).to_have_count(1)
+    playwright.expect(group.locator(':scope > summary [data-label="次数"]')).to_have_text("3")
+    group.locator(":scope > summary").click()
+    playwright.expect(group.locator(".request-inspect")).to_have_count(1)
+    playwright.expect(group.locator(".request-slow-label")).to_have_text("慢")
+    page.locator("#requestSlowMs").fill("200")
+    page.locator("#requestSlowMs").press("Tab")
+    playwright.expect(group.locator(".request-inspect")).to_have_count(2)
+    page.locator("#requestSearch").fill("trace-2")
+    playwright.expect(page.locator("#requestSampleSummary")).to_contain_text("显示 1 个地址")
+    playwright.expect(group.locator(':scope > summary [data-label="次数"]')).to_have_text("3")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     assert not state["errors"]
 
 

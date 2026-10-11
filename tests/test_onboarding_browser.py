@@ -147,18 +147,18 @@ def test_request_groups_average_history_and_expansion(browser_page, width, tmp_p
     page.wait_for_selector('.request-group')
     assert page.locator('.request-group').count() == 4
     group = page.locator('.request-group').first
-    assert '300.00 ms' in group.locator('summary').inner_text()
-    assert '30.00 ms' in group.locator('summary').inner_text()
-    assert '66.7%' in group.locator('summary').inner_text()
+    assert '300.00 ms' in group.locator(':scope > summary').inner_text()
+    assert '30.00 ms' in group.locator(':scope > summary').inner_text()
+    assert '66.7%' in group.locator(':scope > summary').inner_text()
     assert group.locator('.request-tick').count() == 3
     health = page.locator('.request-group').nth(1)
     assert health.locator('.request-tick').count() == 30
     assert health.locator('.request-tick.is-error').count() == 1
     assert health.locator('.request-tick.is-error').bounding_box()['height'] <= 10
-    assert '6.29 s' in health.locator('summary').inner_text()
-    assert '98.5%' in health.locator('summary').inner_text()
+    assert '6.29 s' in health.locator(':scope > summary').inner_text()
+    assert '98.5%' in health.locator(':scope > summary').inner_text()
     assert '70 条' in page.locator('#requestSampleSummary').inner_text()
-    group.locator('summary').click()
+    group.locator(':scope > summary').click()
     assert group.locator('.request-detail-row').count() == 3
     page.evaluate('window.keptRequestGroup = document.querySelector(".request-group")')
     page.locator('#requestRefresh').click()
@@ -168,10 +168,10 @@ def test_request_groups_average_history_and_expansion(browser_page, width, tmp_p
     page.locator('#requestStatus').select_option('error', force=True)
     playwright.expect(page.locator('.request-group')).to_have_count(2)
     assert page.locator('.request-group').count() == 2
-    assert '66.7%' in page.locator('.request-group').first.locator('summary').inner_text()
+    assert '66.7%' in page.locator('.request-group').first.locator(':scope > summary').inner_text()
     page.locator('#requestStatus').select_option('success', force=True)
     page.wait_for_function("!document.querySelector('#requestRefresh').disabled")
-    playwright.expect(page.locator('.request-group').first.locator('summary')).to_contain_text('100.0%')
+    playwright.expect(page.locator('.request-group').first.locator(':scope > summary')).to_contain_text('100.0%')
     assert page.locator('.request-group').count() == 2
     page.locator('#requestStatus').select_option('all', force=True)
     playwright.expect(page.locator('.request-group')).to_have_count(4)

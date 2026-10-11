@@ -36,6 +36,19 @@ def test_restart_overlap_and_identical_requests_are_preserved_once(tmp_path):
     assert store.query("api", now=NOW)["total_requests"] == 4
 
 
+def test_metadata_survives_restart_and_keeps_stable_record_identity(tmp_path):
+    store = history.History(tmp_path)
+    stamp, payload = line().split(' mini_deploy_req ', 1)
+    data = {**json.loads(payload), "client_ip": "203.0.113.8", "response_bytes": "1024",
+        "request_headers": {"User-Agent": "browser", "Authorization": "secret"}}
+    ingest(store, [line("/old"), stamp + ' mini_deploy_req ' + json.dumps(data)])
+    record = store.query("api", layout="flat", now=NOW)["groups"][0]["items"][0]
+    assert record["client_ip"] == "203.0.113.8" and record["request_headers"] == {"User-Agent": "browser"}
+    restored = history.History(tmp_path).query("api", layout="flat", now=NOW)["groups"][0]["items"][0]
+    assert restored == record and isinstance(record["record_id"], int)
+    assert "secret" not in store.path.read_bytes().decode("utf-8", errors="ignore")
+
+
 def test_low_frequency_routes_survive_many_heartbeats_and_statistics_are_full(tmp_path):
     store = history.History(tmp_path)
     lines = [line("/api/rare", ts=NOW - 1000, duration="0.300")]
@@ -47,6 +60,31 @@ def test_low_frequency_routes_survive_many_heartbeats_and_statistics_are_full(tm
     assert busy["count"] == 1001 and len(busy["items"]) == 30 and busy["average"] == 10
     assert rare["count"] == 1 and rare["average"] == 300
     assert result["earliest_at"] == NOW - 1000
+
+
+def test_slow_filter_keeps_full_statistics_but_finds_older_matching_details(tmp_path):
+    store = history.History(tmp_path)
+    ingest(store, [line("/busy", ts=NOW - 1000, duration="1.500")] +
+           [line("/busy", ts=NOW - 50 + index, duration="0.010") for index in range(40)] + [line("/normal")])
+    result = store.query("api", status="slow", slow_ms=1000, now=NOW)
+    group = result["groups"][0]
+    assert result["total_groups"] == 1 and group["count"] == 41 and group["slowCount"] == 1
+    assert group["average"] == pytest.approx((1500 + 40 * 10) / 41)
+    assert len(group["items"]) == 1 and group["items"][0]["duration_ms"] == 1500
+    assert store.query("api", status="slow", slow_ms=2000, now=NOW)["total_groups"] == 0
+    assert store.query("api", status="slow", slow_ms=10, now=NOW)["total_groups"] == 2
+
+
+def test_request_id_and_ip_search_select_whole_group(tmp_path):
+    store = history.History(tmp_path)
+    stamp, payload = line("/api/items").split(' mini_deploy_req ', 1)
+    data = {**json.loads(payload), "request_id": "trace-123", "client_ip": "203.0.113.9"}
+    ingest(store, [line("/api/items"), stamp + ' mini_deploy_req ' + json.dumps(data)])
+    for term in ("trace-123", "203.0.113.9"):
+        result = store.query("api", search=term, now=NOW)
+        assert result["total_requests"] == 2
+        assert len(result["groups"][0]["items"]) == 1
+        assert result["groups"][0]["items"][0]["request_id"] == "trace-123"
 
 
 def test_search_selects_whole_normalized_group_and_raw_view_keeps_ids(tmp_path):
@@ -100,7 +138,7 @@ def test_collector_checkpoints_without_browser_and_timeout_keeps_previous_histor
     store = history.History(tmp_path)
     collector = history.Collector(store)
     entry = {"spec": {"key": "api", "name": "API"}}
-    gateway = SimpleNamespace(inspect=lambda _: {"Id": "container-a"})
+    gateway = SimpleNamespace(read=lambda _: entry, inspect=lambda _: {"Id": "container-a"}, upgrade_logging=lambda *_: None)
     commands = []
     def logs(command, **kwargs):
         commands.append(command)
@@ -125,7 +163,8 @@ def test_collector_checkpoints_without_browser_and_timeout_keeps_previous_histor
 def test_limits_errors_and_removed_container_history_are_visible(tmp_path):
     store = history.History(tmp_path)
     ingest(store, [line()], limited=True)
-    history.Collector(store).collect(SimpleNamespace(inspect=lambda _: None), {"spec": {"key": "api", "name": "API"}}, now=NOW)
+    entry = {"spec": {"key": "api", "name": "API"}}
+    history.Collector(store).collect(SimpleNamespace(read=lambda _: entry, inspect=lambda _: None), entry, now=NOW)
     result = store.query("api", now=NOW)
     assert result["limited_at"] == NOW and "容器不存在" in result["error"]
     assert result["total_requests"] == 1 and store.sources()[0]["key"] == "api"
@@ -139,7 +178,8 @@ def test_stopped_collector_does_not_touch_docker_or_database(tmp_path):
     assert not store.path.exists()
 
 
-@pytest.mark.parametrize("params", [{"period": "forever"}, {"layout": "sql"}, {"page": -1}, {"search": "x" * 2049}])
+@pytest.mark.parametrize("params", [{"period": "forever"}, {"layout": "sql"}, {"page": -1}, {"search": "x" * 2049},
+    {"slow_ms": 0}, {"slow_ms": True}, {"slow_ms": "1000"}, {"slow_ms": 3_600_001}])
 def test_invalid_queries(tmp_path, params):
     with pytest.raises(ValueError):
         history.History(tmp_path).query("api", **params)

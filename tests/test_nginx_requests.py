@@ -49,6 +49,62 @@ def test_parse_accepts_valid_record_and_ignores_untrusted_lines():
         assert requests.parse(invalid) is None
 
 
+def test_metadata_is_bounded_and_credentials_never_reach_records():
+    record = requests.parse(line(client_ip="2001:db8::1", protocol="HTTP/2.0",
+        response_bytes="1234", upstream_address="10.0.0.2:8000", request_headers={
+            "User-Agent": "client " + "a" * 300, "accept": "application/json",
+            "Authorization": "Bearer secret", "Cookie": "session=secret",
+            "X-Api-Key": "secret", "X-Request-ID": "bad\nvalue"}))
+    assert record["client_ip"] == "2001:db8::1" and record["response_bytes"] == 1234
+    assert record["upstream_address"] == "10.0.0.2:8000" and record["protocol"] == "HTTP/2.0"
+    assert record["request_headers"]["Accept"] == "application/json"
+    assert len(record["request_headers"]["User-Agent"]) == 256
+    assert "secret" not in json.dumps(record) and "X-Request-ID" not in record["request_headers"]
+    malformed = requests.parse(line(client_ip="forged", protocol=[], response_bytes=True,
+                                   request_headers={"Host": 123, "Accept": ["text/html", 2]}))
+    assert "client_ip" not in malformed and "response_bytes" not in malformed
+    assert malformed["request_headers"] == {"Accept": "text/html"}
+
+
+def test_request_identity_and_phase_times_preserve_attempts_and_missing_values():
+    record = requests.parse(line(request_id="trace-123", request_headers={"X-Request-ID": "trace-123"},
+        upstream_status="502, 200", upstream_connect="0.010, 0.020", upstream_header="-, 0.120", upstream="0.010, 0.220"))
+    assert record["request_id"] == "trace-123" and record["request_id_source"] == "incoming"
+    first, second = record["upstream_attempts"]
+    assert first["status"] == 502 and first["wait_ms"] is None and first["transfer_ms"] is None
+    assert second == {"status": 200, "connect_ms": 20, "header_ms": 120, "response_ms": 220,
+                      "wait_ms": 100, "transfer_ms": 100}
+    generated = requests.parse(line(request_id="a" * 32, upstream_status="200", upstream_connect="0.100", upstream_header="0.050"))
+    assert generated["request_id_source"] == "generated"
+    assert generated["upstream_attempts"][0]["wait_ms"] is None
+    assert "request_id" not in requests.parse(line(request_id="bad id\n"))
+    for raw in ("NaN", "-1", "0.1 nope", "0.1, " * 20, [], True):
+        assert requests.upstream_values(raw) == []
+
+
+def test_diagnostic_config_accepts_bounded_ids_and_captures_cumulative_timings():
+    text = requests.config_text("docker")
+    for variable in ("$request_id", "$upstream_status", "$upstream_connect_time", "$upstream_header_time"):
+        assert variable in text
+    assert "{0,127}" in text
+    assert "$mini_deploy_request_id" not in requests.config_text("docker", diagnostics=False)
+
+
+@pytest.mark.parametrize("legacy", [{"details": False}, {"diagnostics": False}])
+def test_legacy_nginx_configuration_is_recognized_and_upgraded_on_enable(tmp_path, monkeypatch, legacy):
+    selected = runtime(tmp_path)
+    path = requests.config_path(selected)
+    original = requests.config_text("local", **legacy)
+    path.write_text(original, encoding="utf-8")
+    assert requests.enabled(selected)
+    calls = []
+    monkeypatch.setattr(CertificateStore, "commit_config", lambda self, target, content, previous:
+        (calls.append(previous), target.write_text(content, encoding="utf-8")))
+    requests.enable(selected)
+    assert calls == [original]
+    assert "$remote_addr" in path.read_text(encoding="utf-8")
+
+
 def test_enable_preserves_existing_config_and_is_idempotent(tmp_path, monkeypatch):
     selected = runtime(tmp_path, "docker")
     calls = []

@@ -17,6 +17,7 @@ import secrets
 import shlex
 import shutil
 import smtplib
+import socket
 import ssl
 import stat
 import subprocess
@@ -47,9 +48,13 @@ import nginx_requests
 import request_gateway
 import gateway_connections
 import monitoring
+import container_monitoring
+import docker_events
 import request_history
+import cpu_metrics
 import sqlite3
 import docker_mirrors
+import ssh_terminal
 
 try:
     import fcntl
@@ -335,7 +340,7 @@ _realtime_metrics: deque[dict[str, Any]] = deque(maxlen=60)
 _realtime_server: dict[str, Any] = {}
 _system_status_lock = threading.Lock()
 _notifications_lock = threading.Lock()
-_last_cpu_sample: tuple[int, int] | None = None
+_cpu_metrics = cpu_metrics.CpuMetrics()
 _last_network_sample: tuple[float, int, int] | None = None
 _health_status_lock = threading.Lock()
 _health_status: dict[str, dict[str, Any]] = {}
@@ -1639,32 +1644,8 @@ def _percent(value: float | int | str | None) -> float | None:
     return round(max(0.0, min(100.0, parsed)), 1)
 
 
-def _read_cpu_total_idle() -> tuple[int, int] | None:
-    try:
-        first = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0]
-        parts = [int(part) for part in first.split()[1:]]
-        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
-        return sum(parts), idle
-    except Exception:
-        return None
-
-
 def _cpu_percent() -> float | None:
-    global _last_cpu_sample
-    sample = _read_cpu_total_idle()
-    if sample is None:
-        return None
-    if _last_cpu_sample is None:
-        _last_cpu_sample = sample
-        return None
-    prev_total, prev_idle = _last_cpu_sample
-    total, idle = sample
-    _last_cpu_sample = sample
-    total_delta = total - prev_total
-    idle_delta = idle - prev_idle
-    if total_delta <= 0:
-        return None
-    return _percent((1 - idle_delta / total_delta) * 100)
+    return _cpu_metrics.sample()
 
 
 def _load_average() -> dict[str, float | None]:
@@ -1689,6 +1670,7 @@ def _memory_status() -> dict[str, Any]:
     return {
         "used_mb": round(used / 1024 / 1024, 1) if total else None,
         "total_mb": round(total / 1024 / 1024, 1) if total else None,
+        "available_mb": round(available / 1024 / 1024, 1) if total else None,
         "percent": _percent(used / total * 100) if total else None,
     }
 
@@ -1852,7 +1834,38 @@ def _docker_status() -> dict[str, Any]:
         container["recent_error_count"] = int(counts.get("error", 0) or 0)
         container["recent_warn_count"] = int(counts.get("warn", 0) or 0)
 
-    return {"available": True, "error": "" if stats_code == 0 else stats_output, "containers": containers}
+    snapshot = {"available": True, "error": "" if stats_code == 0 else stats_output, "containers": containers}
+    return snapshot
+
+
+def _inspect_docker_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Gather bounded evidence in the monitoring worker, never a status HTTP request."""
+    if not snapshot.get("available"):
+        return snapshot
+    containers = snapshot.get("containers") or []
+    # Inspect only state and selected identity labels, never environment variables.
+    inspect_format = ('{"Id":{{json .Id}},"Name":{{json .Name}},"State":{{json .State}},'
+        '"RestartCount":{{json .RestartCount}},"HostConfig":{"RestartPolicy":{{json .HostConfig.RestartPolicy}}},'
+        '"Config":{"Labels":{'
+        '"com.docker.compose.project":{{json (index .Config.Labels "com.docker.compose.project")}},'
+        '"com.docker.compose.service":{{json (index .Config.Labels "com.docker.compose.service")}},'
+        '"com.docker.compose.container-number":{{json (index .Config.Labels "com.docker.compose.container-number")}},'
+        '"com.docker.compose.oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}}}}}')
+    identifiers = [item["id"] for item in containers if re.fullmatch(r"[a-f0-9]{64}", item["id"])]
+    inspections = []
+    deadline = time.monotonic() + 4
+    for offset in range(0, len(identifiers), 50):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        _, output = _run_command(["docker", "inspect", "--type", "container", "--format", inspect_format,
+                                 *identifiers[offset:offset + 50]], timeout=min(3, remaining))
+        for line in output.splitlines():
+            try:
+                inspections.append(json.loads(line))
+            except (ValueError, TypeError):
+                continue
+    return container_monitoring.attach_inspection(snapshot, inspections)
 
 
 def _sample_docker_log_counts() -> None:
@@ -2059,6 +2072,7 @@ def _sample_realtime_metrics() -> None:
     now = time.time()
     server = {
         "cpu_percent": _cpu_percent(), "load": _load_average(), "memory": _memory_status(),
+        "cpu": _cpu_metrics.snapshot,
         "disk": _disk_status(Path("/")), "network": _network_status(),
         "sampled_at": _now_text(), "sampled_ts": now, "cache_seconds": 1,
     }
@@ -2206,7 +2220,9 @@ def _health_check_sampler() -> None:
                     monitor.due[key] = now + (HEALTH_CHECK_INTERVAL_SECONDS if target.get("legacy") else 30)
             monitor.evaluate_websites()
             if now >= next_system:
-                _evaluate_resource_alerts(monitor, _system_status_payload())
+                system = _system_status_payload()
+                system["docker"] = _inspect_docker_snapshot(system.get("docker") or {})
+                _evaluate_resource_alerts(monitor, system)
                 _certificate_discovery().observe(monitor)
                 next_system = now + 15
             if sending and sending[0].done():
@@ -2299,31 +2315,33 @@ def _evaluate_resource_alerts(monitor: monitoring.Monitor, system: dict[str, Any
     values = [("cpu", "CPU 使用率", server.get("cpu_percent"), 90),
               ("memory", "内存使用率", (server.get("memory") or {}).get("percent"), 90),
               ("disk", "磁盘使用率", (server.get("disk") or {}).get("percent"), 90)]
+    usable_resources = 0
+    sample_time = server.get("sampled_ts")
+    resource_fresh = not isinstance(sample_time, (int, float)) or monitor.clock() - sample_time <= 120
     for key, title, value, threshold in values:
-        value = _percent(value)
+        value = _percent(value) if resource_fresh else None
+        usable_resources += value is not None
         monitor.observe(f"server:{key}", None if value is None else value >= threshold,
-                        title + "过高", f"当前 {value}% · 阈值 {threshold}%", "server")
+                        title + "过高", f"当前 {value}% · 阈值 {threshold}%", "server",
+                        metadata={"reason": key, "value": value, "threshold": threshold})
+    with monitor.lock:
+        sampled_at = server.get("sampled_ts")
+        monitor.coverage["server"] = {"status": "healthy" if usable_resources == 3 else "unknown",
+                                     "detail": f"已读取 {usable_resources}/3 项资源",
+                                     "checked_at": sampled_at or monitor.clock()}
     docker = system.get("docker") or {}
     installed = docker.get("error") != "docker command not found"
     monitor.observe("docker:daemon", not docker["available"] if "available" in docker and installed else None,
                     "Docker 无法连接", "请检查 Docker 服务是否正常运行", "docker")
-    if not docker.get("available"):
-        return
-    observed = set()
-    for container in docker.get("containers") or []:
-        key = "docker:container:" + str(container.get("id") or container.get("name"))
-        observed.add(key)
-        state = str(container.get("state") or "").lower()
-        abnormal_exit = state == "exited" and bool(re.search(r"Exited \([1-9][0-9]*\)", str(container.get("status")), re.I))
-        bad = container.get("health") == "unhealthy" or state in {"restarting", "dead"} or abnormal_exit
-        monitor.observe(key, bad if state else None, "容器异常：" + str(container.get("name") or key),
-                        str(container.get("status") or state), "docker")
-    # Removed containers stop being watched; disappearance is not a recovery event.
+    container_monitoring.evaluate_containers(monitor, docker)
     with monitor.lock:
-        for key in list(monitor.incidents):
-            if key.startswith("docker:container:") and key not in observed:
-                monitor.incidents.pop(key, None)
-                monitor.pending.pop(key, None)
+        coverage = monitor.coverage.get("docker_containers", {})
+        complete = coverage.get("inspected", 0) == len(docker.get("containers") or [])
+        monitor.coverage["docker"] = {
+            "status": "not_installed" if not installed else "healthy" if docker.get("available") and complete else "unknown",
+            "detail": (f"已检查 {coverage.get('inspected', 0)}/{len(docker.get('containers') or [])} 个容器"
+                       if docker.get("available") else "Docker 无法读取" if installed else "未安装 Docker"),
+            "checked_at": monitor.clock()}
 
 
 def _alerts_payload(system: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2394,8 +2412,8 @@ def _verify_password(password: str) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
-def _session_signature(expires: int) -> str:
-    msg = f"deploy-ui:{expires}".encode("utf-8")
+def _session_signature(expires: int, nonce: str = "") -> str:
+    msg = (f"deploy-ui:{expires}:{nonce}" if nonce else f"deploy-ui:{expires}").encode("utf-8")
     return hmac.new(UI_SESSION_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()
 
 
@@ -2406,7 +2424,8 @@ def _csrf_token(session_value: str) -> str:
 
 def _make_session_cookie() -> str:
     expires = int(time.time()) + UI_SESSION_TTL_SECONDS
-    payload = f"{expires}:{_session_signature(expires)}"
+    nonce = secrets.token_hex(16)
+    payload = f"{expires}:{nonce}:{_session_signature(expires, nonce)}"
     return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
 
 
@@ -2415,13 +2434,20 @@ def _verify_session_cookie(value: str) -> bool:
         return False
     try:
         payload = base64.urlsafe_b64decode(value.encode("ascii")).decode("utf-8")
-        expires_text, signature = payload.split(":", 1)
+        parts = payload.split(":")
+        if len(parts) == 3:
+            expires_text, nonce, signature = parts
+            if not re.fullmatch(r"[a-f0-9]{32}", nonce):
+                return False
+        else:
+            expires_text, signature = parts
+            nonce = ""
         expires = int(expires_text)
     except Exception:
         return False
     if expires < int(time.time()):
         return False
-    return _constant_time_equal(signature, _session_signature(expires))
+    return _constant_time_equal(signature, _session_signature(expires, nonce))
 
 
 def _request_client_ip(handler: Any) -> str:
@@ -2538,6 +2564,13 @@ def _normal_path(path: str) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "previews/ssh-ai/index.html": "text/html; charset=utf-8",
+    "previews/ssh-ai/preview.js": "application/javascript; charset=utf-8",
+    "previews/ssh-ai/preview.css": "text/css; charset=utf-8",
+    "ssh-terminal.js": "application/javascript; charset=utf-8",
+    "vendor/xterm.js": "application/javascript; charset=utf-8",
+    "vendor/addon-fit.js": "application/javascript; charset=utf-8",
+    "vendor/xterm.css": "text/css; charset=utf-8",
     "sites.js": "application/javascript; charset=utf-8",
     "monitoring.js": "application/javascript; charset=utf-8",
     "request-gateway.js": "application/javascript; charset=utf-8",
@@ -2553,6 +2586,16 @@ UI_ASSET_TYPES = {
     "style.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
 }
+UI_ASSET_TYPES.update({
+    f"previews/ssh-ai/icons/{name}.svg": "image/svg+xml"
+    for name in (
+        "moon", "sun", "settings-2", "plus", "server", "sliders-horizontal", "copy",
+        "eraser", "unplug", "terminal", "scan-text", "panel-right-close", "panel-right-open",
+        "lock-keyhole", "circle-alert", "arrow-right", "sparkles", "chevron-down",
+        "message-square", "layers-2", "chevron-right", "corner-up-left", "play", "text-select",
+        "arrow-up", "x", "loader-circle",
+    )
+})
 
 
 def _read_ui_file(name: str) -> str:
@@ -2596,7 +2639,109 @@ def _render_ui() -> str:
     return _read_ui_file("index.html")
 
 
+_ssh_manager_instance = None
+_ssh_manager_lock = threading.Lock()
+
+
+def _ssh_manager():
+    global _ssh_manager_instance
+    with _ssh_manager_lock:
+        if _ssh_manager_instance is None:
+            _ssh_manager_instance = ssh_terminal.Manager(STATE_FILE.parent / "ssh",
+                audit=lambda kind, spec: _audit_event(kind, target=spec.get("host", ""),
+                    success=kind != "ssh_connect_failed", detail={k: spec[k] for k in ("port", "username") if k in spec}))
+        return _ssh_manager_instance
+
+
 class Handler(BaseHTTPRequestHandler):
+    def _ssh_owner(self):
+        cookie = self._session_cookie_value()
+        if len(base64.urlsafe_b64decode(cookie).decode().split(":")) != 3:
+            raise ssh_terminal.SSHError("登录凭据需要更新，请退出面板后重新登录再使用远程终端。", 401)
+        return hashlib.sha256(cookie.encode()).hexdigest()
+
+    def _ssh_secure(self):
+        return ssh_terminal.secure_request(self.client_address[0], self.headers,
+            trusted_proxy=TRUST_LOOPBACK_PROXY_HEADERS, tls=isinstance(self.connection, ssl.SSLSocket))
+
+    def _handle_ssh(self, path, parsed):
+        if not self._require_auth_json():
+            return
+        try:
+            if self.command == "GET" and path == "/ssh":
+                self._write_json(200, {**_ssh_manager().status(self._ssh_owner()),
+                    "secure": self._ssh_secure(), "csrf_token": self._csrf_token_for_request()})
+                return
+            if not self._ssh_secure():
+                self.close_connection = True
+                raise ssh_terminal.SSHError("远程终端需要 HTTPS 或本地 SSH 隧道，公网 HTTP 已禁止提交凭据。", 403)
+            if self.command == "GET" and path in {"/ssh/output", "/ssh/stream"}:
+                query = parse_qs(parsed.query)
+                session = _ssh_manager().session(self._ssh_owner(), query.get("id", [""])[0])
+                cursor = int(query.get("cursor", ["0"])[0])
+                if path == "/ssh/stream":
+                    self._write_ssh_stream(session, cursor)
+                else:
+                    self._write_json(200, session.poll(cursor))
+                return
+            if self.command != "POST":
+                raise ssh_terminal.SSHError("不支持的终端操作。", 404)
+            origin = urlparse(self.headers.get("Origin", ""))
+            if origin.scheme not in {"http", "https"} or origin.netloc != self.headers.get("Host", ""):
+                raise ssh_terminal.SSHError("终端请求来源无效，请刷新面板重试。", 403)
+            data = _read_json_body(self, max_bytes=48 * 1024)
+            manager, owner = _ssh_manager(), self._ssh_owner()
+            manager.check_owner(owner)
+            if path == "/ssh/profiles":
+                result = manager.profile(data)
+                _audit_event("ssh_profile", actor=self.client_address[0], success=True,
+                    detail={"action": "delete" if data.get("action") == "delete" else "save"})
+            elif path == "/ssh/probe":
+                result = manager.probe(owner, data)
+            elif path == "/ssh/connect":
+                expires = int(base64.urlsafe_b64decode(self._session_cookie_value()).decode().split(":", 1)[0])
+                result = manager.connect(owner, data, expires)
+            elif path in {"/ssh/input", "/ssh/resize", "/ssh/disconnect"}:
+                session = manager.session(owner, data.get("id"))
+                if path == "/ssh/input":
+                    session.write(data.get("data"))
+                elif path == "/ssh/resize":
+                    session.resize(data)
+                else:
+                    session.close("连接已断开。")
+                result = {"ok": True}
+            else:
+                raise ssh_terminal.SSHError("不支持的终端操作。", 404)
+            self._write_json(200, result)
+        except (ssh_terminal.SSHError, ValueError, OSError) as exc:
+            detail = str(exc) if isinstance(exc, ssh_terminal.SSHError) else "终端操作失败，请检查配置和文件权限后重试。"
+            self._write_json(getattr(exc, "status", 400), {"error": "ssh_failed", "detail": detail})
+
+    def _write_ssh_stream(self, session, cursor):
+        stream = session.stream(cursor)
+        # Validate the cursor and reserve the reader before sending HTTP headers.
+        first = next(stream)
+        self.close_connection = True
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.connection.settimeout(10)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write((json.dumps(first, ensure_ascii=False) + "\n").encode())
+            self.wfile.flush()
+            for result in stream:
+                self.wfile.write((json.dumps(result, ensure_ascii=False) + "\n").encode())
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            stream.close()
+
     def _retired_deployment_route(self, path: str) -> bool:
         if path not in {"/webhook", "/redeploy", "/rollback", "/cancel", "/force-unlock", "/preflight", "/projects-config"} and not path.startswith("/projects-config/"):
             return False
@@ -2620,6 +2765,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -2766,6 +2913,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == "/ssh" or path.startswith("/ssh/"):
+            self._handle_ssh(path, parsed)
+            return
         if self._retired_deployment_route(path):
             return
         if path == "/sites":
@@ -2883,6 +3033,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = _request_history().query(query.get("key", [""])[0],
                         period=query.get("period", ["24h"])[0], layout=query.get("layout", ["tree"])[0],
                         search=query.get("search", [""])[0], status=query.get("status", ["all"])[0],
+                        slow_ms=int(query.get("slow_ms", ["1000"])[0]),
                         page=int(query.get("page", ["0"])[0]))
                     self._write_json(200, result)
                 except ValueError as exc:
@@ -2919,6 +3070,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._write_json(200, {"events": _audit_tail(lines=lines), "line_limit": lines})
             return
         if path == "/logout":
+            if self._authenticated() and _ssh_manager_instance is not None:
+                cookie = self._session_cookie_value()
+                expires = int(base64.urlsafe_b64decode(cookie).decode().split(":", 1)[0])
+                _ssh_manager_instance.close_owner(hashlib.sha256(cookie.encode()).hexdigest(), expires)
             self._redirect("ui", clear_cookie=True)
             return
         self._write_json(404, {"error": "not_found"})
@@ -2926,6 +3081,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path.startswith("/ssh/"):
+            self._handle_ssh(path, parsed)
+            return
         if self._retired_deployment_route(path):
             return
         if path == "/monitoring":
@@ -3246,6 +3404,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         with _system_status_lock:
             _system_status_cache.clear()
+        try:
+            monitor = _monitor()
+            container_monitoring.mark_intentional_stop(monitor, container, stopped=action in {"stop", "pause", "remove"})
+            labels = {"restart": "重启", "stop": "停止", "start": "启动", "pause": "暂停", "unpause": "恢复", "remove": "移除"}
+            monitor.record_event("operation", f"面板操作：{labels.get(action, action)}容器 {container}",
+                                 "用户主动操作已成功执行", "docker", metadata={"container": container, "action": action})
+            monitor.flush()
+        except Exception as exc:
+            _log(f"docker operation history failed: {type(exc).__name__}")
         _log(f"docker action {action} container={container} actor={self.client_address[0]}")
         _audit_event("docker_action", actor=self.client_address[0], target=container, success=True, detail={"action": action})
         self._write_json(200, {
@@ -3429,6 +3596,10 @@ def main() -> None:
     threading.Thread(target=_system_metric_sampler, name="system-metric-sampler", daemon=True).start()
     threading.Thread(target=_docker_log_metric_sampler, name="docker-log-metric-sampler", daemon=True).start()
     threading.Thread(target=_health_check_sampler, name="health-check-sampler", daemon=True).start()
+    docker_event_stop = threading.Event()
+    docker_event_worker = threading.Thread(target=docker_events.run, args=(_monitor,),
+        kwargs={"stop_event": docker_event_stop}, name="docker-event-observer", daemon=True)
+    docker_event_worker.start()
     threading.Thread(target=_certificate_discovery_sampler, name="certificate-discovery-sampler", daemon=True).start()
     history_stop = threading.Event()
     history_worker = threading.Thread(target=request_history.Collector(_request_history()).run,
@@ -3439,7 +3610,11 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        docker_event_stop.set()
         history_stop.set()
+        if _ssh_manager_instance is not None:
+            _ssh_manager_instance.shutdown()
+        docker_event_worker.join(timeout=5)
         history_worker.join(timeout=10)
         server.server_close()
 

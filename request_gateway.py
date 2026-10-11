@@ -96,7 +96,7 @@ def revision(spec: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
 
 
-def config(spec: dict[str, Any]) -> str:
+def config(spec: dict[str, Any], *, details: bool = True, diagnostics: bool = True) -> str:
     listener = f'{spec["bind"]}:{spec["port"]}' if spec["network"] == "host" else "10000"
     # Custom bridge networks use Docker DNS on each new resolution, surviving backend recreation.
     upstream = (f'resolver 127.0.0.11 valid=10s ipv6=off;\n'
@@ -106,6 +106,9 @@ def config(spec: dict[str, Any]) -> str:
     proto = "$gateway_proto" if spec["trust_proxy"] else "$scheme"
     body_limit = str(spec['max_body_bytes']) if 'max_body_bytes' in spec else '64m'
     connect_timeout = f"{spec['connect_timeout_ms']}ms" if 'connect_timeout_ms' in spec else '5s'
+    request_id_headers = ('\n            proxy_set_header X-Request-ID $mini_deploy_request_id;'
+                          '\n            proxy_hide_header X-Request-ID;'
+                          '\n            add_header X-Request-ID $mini_deploy_request_id always;') if details and diagnostics else ''
     return f'''# mini-deploy-managed: request-gateway-v1
 worker_processes 1;
 pid /tmp/nginx.pid;
@@ -119,7 +122,7 @@ http {{
     scgi_temp_path /tmp/scgi;
     map $http_upgrade $gateway_connection {{ default upgrade; '' ''; }}
     map $http_x_forwarded_proto $gateway_proto {{ default $scheme; http http; https https; }}
-    {nginx_requests.config_text("docker")}
+    {nginx_requests.config_text("docker", details=details, diagnostics=diagnostics)}
     server {{
         listen {listener};
         server_name _;
@@ -127,7 +130,7 @@ http {{
         location / {{
             {upstream}
             proxy_http_version 1.1;
-            proxy_set_header Host $http_host;
+            proxy_set_header Host $http_host;{request_id_headers}
             proxy_set_header X-Forwarded-For {forwarded};
             proxy_set_header X-Forwarded-Proto {proto};
             proxy_set_header Upgrade $http_upgrade;
@@ -143,6 +146,10 @@ http {{
     }}
 }}
 '''
+
+
+def managed_configs(spec: dict[str, Any]) -> tuple[str, ...]:
+    return (config(spec), config(spec, diagnostics=False), config(spec, details=False))
 
 
 class Store:
@@ -240,7 +247,7 @@ class Store:
         path = conf_dir / "nginx.conf"
         trusted_path(path)
         previous = path.read_text(encoding="utf-8") if path.exists() else None
-        if previous is not None and (not old or previous != config(old["spec"])):
+        if previous is not None and (not old or previous not in managed_configs(old["spec"])):
             raise CertificateError("网关文件已被外部修改，不会覆盖")
         journal = directory / "pending.json"
         committed = False
@@ -299,7 +306,7 @@ class Store:
             raise CertificateError("网关配置不属于待恢复事务，不会覆盖文件")
         path = directory / "conf" / "nginx.conf"
         trusted_path(path)
-        if path.exists() and path.read_text(encoding="utf-8") not in [config(e["spec"]) for e in versions]:
+        if path.exists() and path.read_text(encoding="utf-8") not in [text for e in versions for text in managed_configs(e["spec"])]:
             raise CertificateError("网关文件已被外部修改，不会自动恢复")
         # The manifest is the commit point. Before commit restore old; after commit keep new.
         atomic_write(path, config(current["spec"]))
@@ -316,6 +323,29 @@ class Store:
         run(["docker", "exec", container_id, "nginx", "-t", "-c", "/gateway/nginx.conf"], timeout=10)
         run(["docker", "exec", container_id, "nginx", "-s", "reload", "-c", "/gateway/nginx.conf"], timeout=10)
 
+    def upgrade_logging(self, entry: dict[str, Any], item: dict[str, Any] | None) -> None:
+        spec = entry["spec"]
+        path = self.directory(spec["key"]) / "conf" / "nginx.conf"
+        trusted_path(path)
+        previous = path.read_text(encoding="utf-8")
+        if previous == config(spec):
+            return
+        if previous not in managed_configs(spec):
+            raise CertificateError("网关文件已被外部修改，不会更新日志格式")
+        if item and (item["State"].get("Paused") or item["State"].get("Restarting")):
+            raise CertificateError("网关尚未稳定，稍后更新日志格式")
+        try:
+            atomic_write(path, config(spec))
+            os.chmod(path, 0o644)
+            if item and item["State"].get("Running"):
+                self.reload(item["Id"])
+        except (ValueError, OSError) as exc:
+            atomic_write(path, previous)
+            os.chmod(path, 0o644)
+            if item and item["State"].get("Running"):
+                self.reload(item["Id"])
+            raise CertificateError("日志格式更新失败，已恢复原配置") from exc
+
     def start(self, entry: dict[str, Any]) -> None:
         if os.name != "posix" or os.geteuid() != 0:
             raise CertificateError("网关运行需要 Linux root 和本机 Docker")
@@ -324,9 +354,10 @@ class Store:
         trusted_path(conf_dir / "nginx.conf")
         if "," in str(conf_dir):
             raise CertificateError("网关数据路径不能包含逗号")
-        if (conf_dir / "nginx.conf").read_text(encoding="utf-8") != config(spec):
+        if (conf_dir / "nginx.conf").read_text(encoding="utf-8") not in managed_configs(spec):
             raise CertificateError("配置文件已被外部修改，请核对后重试")
         item = self.inspect(entry)
+        self.upgrade_logging(entry, item)
         base = ["docker", "run", "--network", spec["network"], "--read-only", "--user", "101:101",
                 "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit", "64", "--memory", "128m",
                 "--tmpfs", "/tmp:rw,noexec,nosuid,size=32m,mode=1777", "--entrypoint", "nginx",

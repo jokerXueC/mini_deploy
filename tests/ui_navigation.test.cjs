@@ -36,7 +36,7 @@ function setup() {
 
 test('every tab switches without an undefined refresh function', async () => {
   const {context} = setup();
-  for (const view of ['server', 'events', 'notify', 'certificates', 'requests']) {
+  for (const view of ['server', 'events', 'notify', 'certificates', 'requests', 'terminal']) {
     context.setView(view);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(context.activeView, view);

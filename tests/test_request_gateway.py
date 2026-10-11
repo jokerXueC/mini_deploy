@@ -57,6 +57,35 @@ def test_generated_config_preserves_streaming_and_limits_log_contents():
     assert "proxy_pass http://127.0.0.1:8000;" in host
 
 
+@pytest.mark.parametrize("legacy_options", [{"details": False}, {"diagnostics": False}])
+def test_logging_upgrade_accepts_only_exact_managed_legacy_config_and_rolls_back(store, monkeypatch, legacy_options):
+    store.save(spec())
+    entry = store.read("api")
+    path = store.directory("api") / "conf/nginx.conf"
+    legacy = gateway.config(entry["spec"], **legacy_options)
+    path.write_text(legacy, encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(store, "reload", lambda identifier: calls.append(identifier))
+    item = {"Id": "a" * 64, "State": {"Running": True}}
+    store.upgrade_logging(entry, item)
+    store.upgrade_logging(entry, item)
+    assert calls == [item["Id"]] and path.read_text() == gateway.config(entry["spec"])
+    path.write_text(legacy + "# external edit\n", encoding="utf-8")
+    with pytest.raises(CertificateError, match="外部修改"):
+        store.upgrade_logging(entry, item)
+    assert path.read_text() == legacy + "# external edit\n"
+    path.write_text(legacy, encoding="utf-8")
+    attempts = []
+    def fail_once(identifier):
+        attempts.append(identifier)
+        if len(attempts) == 1:
+            raise CertificateError("reload failed")
+    monkeypatch.setattr(store, "reload", fail_once)
+    with pytest.raises(CertificateError, match="已恢复"):
+        store.upgrade_logging(entry, item)
+    assert path.read_text() == legacy and len(attempts) == 2
+
+
 def test_automatic_caddy_hop_preserves_outer_limits_and_connection_timeout(store):
     automatic = spec(max_body_bytes=0, connect_timeout_ms=10000)
     text = gateway.config(automatic)

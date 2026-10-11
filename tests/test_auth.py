@@ -78,6 +78,14 @@ def test_csrf_token_is_bound_to_session(monkeypatch: pytest.MonkeyPatch) -> None
     assert first != agent._csrf_token("session-b")
 
 
+def test_simultaneous_logins_get_distinct_session_owners(monkeypatch):
+    monkeypatch.setattr(agent, "UI_SESSION_SECRET", "session-secret")
+    monkeypatch.setattr(agent.time, "time", lambda: 1000)
+    first, second = agent._make_session_cookie(), agent._make_session_cookie()
+    assert first != second
+    assert agent._verify_session_cookie(first) and agent._verify_session_cookie(second)
+
+
 @pytest.mark.parametrize(
     ("peer_ip", "forwarded_ip", "trust_proxy", "expected"),
     [
