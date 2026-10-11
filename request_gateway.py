@@ -80,8 +80,16 @@ def normalize(raw: Any) -> dict[str, Any]:
     trust = raw.get("trust_proxy", False)
     if type(trust) is not bool:
         raise CertificateError("代理请求头选项无效")
+    options = {}
+    for field, default, lower, upper in (("max_body_bytes", 64 * 1024 * 1024, 0, 1024 * 1024 * 1024),
+                                        ("connect_timeout_ms", 5000, 1, 75000)):
+        value = raw.get(field, default)
+        if type(value) is not int or not lower <= value <= upper:
+            raise CertificateError("网关上传限制或连接超时无效")
+        if value != default:
+            options[field] = value
     return dict(key=key, name=name, port=port, bind=bind, network=network, image=image,
-                upstream=f"http://{host}:{upstream_port}", trust_proxy=trust)
+                upstream=f"http://{host}:{upstream_port}", trust_proxy=trust, **options)
 
 
 def revision(spec: dict[str, Any]) -> str:
@@ -96,6 +104,8 @@ def config(spec: dict[str, Any]) -> str:
                 if spec["network"] != "host" else f'proxy_pass {spec["upstream"]};')
     forwarded = "$proxy_add_x_forwarded_for" if spec["trust_proxy"] else "$remote_addr"
     proto = "$gateway_proto" if spec["trust_proxy"] else "$scheme"
+    body_limit = str(spec['max_body_bytes']) if 'max_body_bytes' in spec else '64m'
+    connect_timeout = f"{spec['connect_timeout_ms']}ms" if 'connect_timeout_ms' in spec else '5s'
     return f'''# mini-deploy-managed: request-gateway-v1
 worker_processes 1;
 pid /tmp/nginx.pid;
@@ -113,7 +123,7 @@ http {{
     server {{
         listen {listener};
         server_name _;
-        client_max_body_size 64m;
+        client_max_body_size {body_limit};
         location / {{
             {upstream}
             proxy_http_version 1.1;
@@ -126,7 +136,7 @@ http {{
             proxy_request_buffering off;
             proxy_cache off;
             proxy_next_upstream off;
-            proxy_connect_timeout 5s;
+            proxy_connect_timeout {connect_timeout};
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
         }}

@@ -132,6 +132,9 @@ window.RequestGateway = (() => {
     const spec = {key: $('gatewayKey').value.trim(), name: $('gatewayName').value.trim(),
       upstream: $('gatewayUpstream').value.trim(), port: Number($('gatewayPort').value), bind: $('gatewayBind').value,
       network: $('gatewayNetwork').value, image: $('gatewayImage').value.trim(), trust_proxy: $('gatewayTrust').checked};
+    for (const field of ['max_body_bytes', 'connect_timeout_ms']) {
+      if (editing?.[field] !== undefined) spec[field] = editing[field];
+    }
     act({action: 'save', spec, revision: editing?.revision || ''},
       `入口 ${spec.name}，后端 ${spec.upstream}，端口 ${spec.port}，网络 ${spec.network}。${spec.bind === '0.0.0.0' ? '所有网卡监听可能允许外部直接访问。' : ''}${spec.trust_proxy ? '仅应允许可信前置代理连接此入口。' : ''}${editing ? '运行中将平滑重载，已有长连接继续使用原后端。' : '保存后还需启动，再切换前置代理上游。'}`);
   });

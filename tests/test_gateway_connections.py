@@ -1,4 +1,7 @@
 import json
+import copy
+import os
+import subprocess
 
 import pytest
 
@@ -55,6 +58,46 @@ NGINX = '''server {
 }
 '''
 
+ZHUNKEDA = '''{$PUBLIC_DOMAIN} {
+    encode zstd gzip
+    route {
+        @root path /
+        redir @root /zhunkeda{uri} 308
+        @webBase path /zhunkeda
+        redir @webBase /zhunkeda/?{query} 308
+        @apiBase path /ad/push
+        redir @apiBase /ad/push/?{query} 308
+        @demo path /zhunkeda/demo /zhunkeda/demo/*
+        handle @demo {
+            respond 404
+        }
+        @api path /ad/push/*
+        handle @api {
+            request_body {
+                max_size 150MB
+            }
+            header Cache-Control "no-store"
+            reverse_proxy api:8080 {
+                flush_interval -1
+                transport http {
+                    dial_timeout 10s
+                    response_header_timeout 160s
+                }
+            }
+        }
+        @web path /zhunkeda/*
+        handle @web {
+            reverse_proxy web:3000 {
+                flush_interval -1
+            }
+        }
+        handle {
+            respond 404
+        }
+    }
+}
+'''
+
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
@@ -88,6 +131,159 @@ def test_caddy_parser_preserves_placeholders_strings_and_static_routes():
     assert routes[0]['kind'] == 'static'
     assert routes[1]['upstream'] == 'http://aimore-cloud:8766'
     assert '/cloud/*' in routes[1]['label']
+
+
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+def test_caddy_embedded_placeholders_and_proxy_options_are_supported(newline):
+    text = ZHUNKEDA.replace('\n', newline)
+    nodes = connections.parse(text, 'caddy')
+    redirs = [node for node in connections.walk(nodes) if node.words[:1] == ['redir']]
+    assert redirs[0].words[2] == '/zhunkeda{uri}'
+    assert redirs[1].words[2] == '/zhunkeda/?{query}'
+    routes = connections.routes(text, 'caddy', {'{$PUBLIC_DOMAIN}': 'https://new.example.test'})
+    assert len(routes) == 2 and all(route['supported'] for route in routes)
+    assert [route['upstream'] for route in routes] == ['http://api:8080', 'http://web:3000']
+    assert all(route['site'] == 'new.example.test' for route in routes)
+    assert '/ad/push/*' in routes[0]['label']
+    assert '/zhunkeda/*' in routes[1]['label']
+    assert routes[0]['_connect_timeout'] == 10000
+    assert routes[1]['_connect_timeout'] == 3000
+
+
+def test_only_domain_environment_is_exposed_and_missing_domains_are_visible():
+    values = connections.caddy_addresses(ZHUNKEDA, [
+        'PUBLIC_DOMAIN=new.example.test', 'DATABASE_PASSWORD=private-secret', 'OTHER_HOST=other.test'])
+    assert values == {'{$PUBLIC_DOMAIN}': 'new.example.test'}
+    assert connections.caddy_addresses(ZHUNKEDA, ['PUBLIC_DOMAIN=site.test bad.test']) == {}
+    assert connections.caddy_addresses(ZHUNKEDA, ['PUBLIC_DOMAIN=https://u:password@site.test']) == {}
+    missing = connections.routes(ZHUNKEDA, 'caddy')
+    assert len(missing) == 2 and all(not route['supported'] for route in missing)
+    assert all('域名变量' in route['reason'] for route in missing)
+    assert connections.caddy_addresses('{$DOMAIN:default.test} {\n reverse_proxy api:80\n}\n', []) == {
+        '{$DOMAIN:default.test}': 'default.test'}
+    assert connections.caddy_addresses('{$DOMAIN:default.test} {\n reverse_proxy api:80\n}\n', ['DOMAIN=']) == {
+        '{$DOMAIN:default.test}': 'default.test'}
+
+
+@pytest.mark.parametrize('option', [
+    'header_up Host different.test', 'dynamic a {\n name api.test\n }',
+    'transport http {\n tls\n }', 'transport http {\n dial_timeout 0\n }',
+    'transport http {\n dial_timeout 76s\n }', 'transport http {\n read_timeout 2h\n }',
+    'flush_interval unsafe', 'health_uri /health',
+])
+def test_unsupported_proxy_options_are_listed_but_never_rewritten(option):
+    text = 'site.test {\n reverse_proxy api:80 {\n ' + option + '\n }\n}\n'
+    route = connections.routes(text, 'caddy')[0]
+    assert route['upstream'] == 'http://api:80'
+    assert not route['supported'] and route['reason']
+
+
+def test_same_domain_backends_can_be_connected_and_undone_independently(setup):
+    store, source, path = setup
+    source['addresses'] = {'{$PUBLIC_DOMAIN}': 'new.example.test'}
+    original = ZHUNKEDA.replace('\n', '\r\n')
+    with path.open('w', encoding='utf-8', newline='') as stream:
+        stream.write(original)
+
+    def plan_for(upstream, key, port):
+        inspected = store.inspect(source)
+        route = next(route for route in inspected['routes'] if route['upstream'] == upstream)
+        return store.preview({'source': source, 'source_revision': inspected['revision'], 'route_id': route['id'],
+                              'key': key, 'port': port, 'network': 'app_default'})
+
+    api = plan_for('http://api:8080', 'api', 18080)
+    assert api['gateway']['max_body_bytes'] == 0
+    assert api['gateway']['connect_timeout_ms'] == 10000
+    plan = connections.read_record(store.directory('api') / 'plan.json')
+    assert plan['candidate'] == original.replace('reverse_proxy api:8080', 'reverse_proxy mini-gateway-api:10000')
+    store.apply({'key': 'api', 'token': api['token']})
+    web = plan_for('http://web:3000', 'web', 18082)
+    store.apply({'key': 'web', 'token': web['token']})
+    expected = original.replace('reverse_proxy api:8080', 'reverse_proxy mini-gateway-api:10000').replace(
+        'reverse_proxy web:3000', 'reverse_proxy mini-gateway-web:10000')
+    assert connections.read_config(path) == expected
+    store.disconnect({'key': 'api', 'token': api['token']})
+    assert connections.read_config(path) == original.replace('reverse_proxy web:3000', 'reverse_proxy mini-gateway-web:10000')
+    assert store.status('web')['state'] == 'connected'
+    store.disconnect({'key': 'web', 'token': web['token']})
+    assert connections.read_config(path) == original
+
+
+def test_failed_second_backend_connection_preserves_first(setup, monkeypatch):
+    store, source, path = setup
+    source['addresses'] = {'{$PUBLIC_DOMAIN}': 'new.example.test'}
+    path.write_text(ZHUNKEDA, encoding='utf-8')
+    api = preview(store, source)
+    store.apply({'key': 'api', 'token': api['token']})
+    first = connections.read_config(path)
+    inspected = store.inspect(source)
+    route = next(route for route in inspected['routes'] if route['upstream'] == 'http://web:3000')
+    web = store.preview({'source': source, 'source_revision': inspected['revision'], 'route_id': route['id'],
+                         'key': 'web', 'port': 18082, 'network': 'app_default'})
+    calls = []
+
+    def activate(_):
+        calls.append(1)
+        if len(calls) == 1:
+            raise CertificateError('restart failed')
+
+    monkeypatch.setattr(store, 'activate', activate)
+    with pytest.raises(CertificateError, match='已恢复'):
+        store.apply({'key': 'web', 'token': web['token']})
+    assert connections.read_config(path) == first
+    assert store.status('api')['state'] == 'connected'
+    assert store.status('web')['state'] == 'not_connected'
+
+
+def test_identical_proxy_fragments_can_be_undone_without_touching_other_routes(setup):
+    store, source, path = setup
+    text = 'site.test {\n handle /a/* {\n reverse_proxy api:80\n }\n handle /b/* {\n reverse_proxy api:80\n }\n}\n'
+    assert all(route['supported'] for route in connections.routes(text, 'caddy'))
+    path.write_text(text)
+    inspected = store.inspect(source)
+    plan = store.preview({'source': source, 'source_revision': inspected['revision'], 'route_id': inspected['routes'][1]['id'],
+                          'key': 'api', 'port': 18080, 'network': 'app_default'})
+    store.apply({'key': 'api', 'token': plan['token']})
+    assert path.read_text().startswith(text.split(' handle /b/*')[0])
+    store.disconnect({'key': 'api', 'token': plan['token']})
+    assert path.read_text() == text
+
+
+@pytest.mark.skipif(not os.environ.get('MINI_DEPLOY_TEST_CADDY'), reason='Native Caddy opt-in')
+def test_real_caddy_validates_original_and_gateway_candidates(setup):
+    store, source, path = setup
+    source['addresses'] = {'{$PUBLIC_DOMAIN}': 'new.example.test'}
+    path.write_text(ZHUNKEDA, encoding='utf-8')
+    environment = {**os.environ, 'PUBLIC_DOMAIN': 'new.example.test'}
+    def adapt(config):
+        result = subprocess.run([os.environ['MINI_DEPLOY_TEST_CADDY'], 'adapt', '--validate',
+                                 '--config', str(config), '--adapter', 'caddyfile'],
+                                env=environment, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    original = adapt(path)
+    inspected = store.inspect(source)
+    for route, key, port in zip(inspected['routes'], ['api', 'web'], [18080, 18082]):
+        store.preview({'source': source, 'source_revision': inspected['revision'], 'route_id': route['id'],
+                       'key': key, 'port': port, 'network': 'app_default'})
+        candidate = connections.read_record(store.directory(key) / 'plan.json')['candidate']
+        candidate_path = path.with_name(key + '.Caddyfile')
+        candidate_path.write_text(candidate, encoding='utf-8')
+        expected = copy.deepcopy(original)
+
+        def replace_address(value):
+            if isinstance(value, dict):
+                if value.get('dial') == route['upstream'].removeprefix('http://'):
+                    value['dial'] = f'mini-gateway-{key}:10000'
+                for child in value.values():
+                    replace_address(child)
+            elif isinstance(value, list):
+                for child in value:
+                    replace_address(child)
+
+        replace_address(expected)
+        assert adapt(candidate_path) == expected
 
 
 def test_nginx_parser_finds_only_simple_http_upstream():
@@ -303,6 +499,26 @@ def test_docker_source_maps_longest_bind_mount_and_rejects_changed_startup(tmp_p
     item['Config']['Cmd'].append('--resume')
     with pytest.raises(CertificateError, match='resume'):
         connections.resolve(raw)
+
+
+def test_fresh_docker_caddy_domain_is_automatically_resolved_without_saving_secrets(tmp_path, monkeypatch):
+    config = tmp_path / 'Caddyfile'
+    config.write_text(ZHUNKEDA, encoding='utf-8')
+    item = {'Id': 'a' * 64, 'State': {'Status': 'running'},
+            'Config': {'Entrypoint': [], 'Cmd': ['caddy', 'run', '--config', '/etc/caddy/Caddyfile'],
+                       'Env': ['PUBLIC_DOMAIN=new.example.test', 'DATABASE_PASSWORD=private-secret']},
+            'Mounts': [{'Type': 'bind', 'Source': str(config), 'Destination': '/etc/caddy/Caddyfile'}],
+            'NetworkSettings': {'Networks': {'app_default': {}}}}
+    monkeypatch.setattr(connections.nginx_runtime, 'require_local_docker', lambda: None)
+    monkeypatch.setattr(connections, 'command', lambda args, **kw: json.dumps([item]) if 'inspect' in args else 'v2')
+    raw = dict(kind='caddy', mode='docker', container='edge', config_path='/etc/caddy/Caddyfile')
+    source = connections.resolve(raw)
+    assert source['addresses'] == {'{$PUBLIC_DOMAIN}': 'new.example.test'}
+    inspected = connections.Connections(tmp_path / 'data').inspect(raw)
+    assert len(inspected['routes']) == 2 and all(route['supported'] for route in inspected['routes'])
+    assert 'private-secret' not in json.dumps(inspected)
+    config.write_text(ZHUNKEDA.replace('reverse_proxy api:8080', 'reverse_proxy mini-gateway-api:10000'))
+    assert connections.resolve(raw) == source
 
 
 def test_static_port_and_probe_injection_are_rejected(setup):

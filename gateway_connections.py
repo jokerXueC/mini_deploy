@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import secrets
@@ -57,16 +58,20 @@ class Node:
     body: int = 0
     close: int = 0
     children: list[Node] = field(default_factory=list)
+    spans: list[tuple[int, int]] = field(default_factory=list)
 
 
 TOKEN = re.compile(r'\{\$[^}\n]*\}|\$\{[^}\n]*\}|"(?:\\.|[^"\\])*"|\x27(?:\\.|[^\x27\\])*\x27|`[^`]*`|#[^\n]*|[ \t\r]+|\n|[{};]|[^\s{};#"\x27`]+')
+CADDY_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|`[^`]*`|#[^\n]*|[ \t\r]+|\n|(?:\{\$[^{}\n]*\}|\{[^{}\s]+\}|[^\s{};#"`])+|[{};]')
+ENV_ADDRESS = re.compile(r'\{\$([A-Za-z_][A-Za-z0-9_]*)(?::([^{}]*))?\}')
+ADDRESS = re.compile(r'(?:https?://)?[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::[0-9]{1,5})?')
 
 
 def parse(text: str, kind: str) -> list[Node]:
     """Locate conservative source spans; the real proxy still validates the complete config."""
     root = Node([], 0)
-    stack, words, start, previous = [root], [], 0, 0
-    for match in TOKEN.finditer(text):
+    stack, words, spans, start, previous = [root], [], [], 0, 0
+    for match in (CADDY_TOKEN if kind == 'caddy' else TOKEN).finditer(text):
         if match.start() != previous:
             raise CertificateError('配置使用了暂不支持的语法，请查看手动接入指引')
         previous = match.end()
@@ -76,23 +81,25 @@ def parse(text: str, kind: str) -> list[Node]:
         if token in (';', '\n'):
             if token == ';' or kind == 'caddy':
                 if words:
-                    stack[-1].children.append(Node(words, start, match.start() if token == '\n' else match.end()))
-                    words = []
+                    stack[-1].children.append(Node(words, start, match.start() if token == '\n' else match.end(), spans=spans))
+                    words, spans = [], []
             continue
         if token == '{':
-            node = Node(words, start if words else match.start(), body=match.end())
+            node = Node(words, start if words else match.start(), body=match.end(), spans=spans)
             stack[-1].children.append(node)
             stack.append(node)
-            words = []
+            words, spans = [], []
         elif token == '}':
             if words or len(stack) == 1:
-                raise CertificateError('配置块无法可靠识别，请检查换行和分号')
+                line = text.count('\n', 0, match.start()) + 1
+                raise CertificateError(f'第 {line} 行配置块无法可靠识别，未作修改；请核对该行或提供配置以完善兼容性')
             node = stack.pop()
             node.close, node.end = match.start(), match.end()
         else:
             if not words:
                 start = match.start()
             words.append(token)
+            spans.append((match.start(), match.end()))
     if words or len(stack) != 1 or previous != len(text):
         raise CertificateError('配置结构不完整，未作修改')
     return root.children
@@ -104,38 +111,100 @@ def walk(nodes: list[Node]):
         yield from walk(node.children)
 
 
-def routes(text: str, kind: str) -> list[dict[str, Any]]:
+def caddy_addresses(text: str, environment: list[str]) -> dict[str, str]:
+    """Keep only validated endpoint expansions; never publish or persist the container environment."""
+    values = dict(value.split('=', 1) for value in environment if isinstance(value, str) and '=' in value)
+    nodes = parse(text, 'caddy')
+    tokens = [node.words[0] for node in nodes if node.words]
+    addresses = {}
+    for token in tokens:
+        if '{$' in token:
+            expanded = ENV_ADDRESS.sub(lambda match: values.get(match[1]) or match[2] or '', token)
+            if ADDRESS.fullmatch(expanded):
+                addresses[token] = expanded
+    return addresses
+
+
+def duration_ms(value: str) -> int:
+    parts = list(re.finditer(r'([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)', value))
+    if not parts or ''.join(part[0] for part in parts) != value:
+        raise ValueError('unsupported duration')
+    total = sum(float(part[1]) * {'ms': 1, 's': 1000, 'm': 60000, 'h': 3600000}[part[2]] for part in parts)
+    if not math.isfinite(total) or not 0 < total <= 3600000:
+        raise ValueError('unsupported duration')
+    return math.ceil(total)
+
+
+def caddy_proxy_options(proxy: Node) -> tuple[str, int]:
+    connect_timeout = 3000  # Caddy's default dial timeout.
+    for option in proxy.children:
+        if option.words[:1] == ['flush_interval'] and len(option.words) == 2 and not option.body:
+            try:
+                if option.words[1] not in ('-1', '0'):
+                    duration_ms(option.words[1].lstrip('-'))
+            except ValueError:
+                return 'flush_interval 的时间格式暂不支持自动接入', connect_timeout
+        elif option.words == ['transport', 'http'] and option.body:
+            for timeout in option.children:
+                if (len(timeout.words) != 2 or timeout.body or timeout.words[0] not in
+                        {'dial_timeout', 'response_header_timeout', 'read_timeout', 'write_timeout'}):
+                    return 'HTTP transport 含暂不支持自动接入的选项；原配置保留', connect_timeout
+                try:
+                    value = duration_ms(timeout.words[1])
+                except ValueError:
+                    return 'HTTP transport 的超时格式或范围暂不支持自动接入', connect_timeout
+                if timeout.words[0] == 'dial_timeout':
+                    if value > 75000:
+                        return 'dial_timeout 超过网关可可靠支持的 75 秒，暂不自动接入', connect_timeout
+                    connect_timeout = value
+        else:
+            return '此转发块含暂不支持的选项（如自定义请求头、负载均衡或动态上游），原配置保留', connect_timeout
+    return '', connect_timeout
+
+
+def routes(text: str, kind: str, addresses: dict[str, str] | None = None) -> list[dict[str, Any]]:
     nodes = parse(text, kind)
     result = []
     imported = kind == 'caddy' and any(n.words[:1] == ['import'] for n in walk(nodes))
     sites = nodes if kind == 'caddy' else [n for n in walk(nodes) if n.words == ['server']]
+    site_slots = {}
     for site in sites:
         if not site.body or (kind == 'caddy' and (not site.words or site.words[0].startswith('('))):
             continue
         names = site.words if kind == 'caddy' else next((n.words[1:] for n in site.children if n.words[:1] == ['server_name']), [])
         domain = names[0] if len(names) == 1 else ''
+        domain = (addresses or {}).get(domain, domain)
         domain = re.sub(r'^https?://', '', domain) if kind == 'caddy' else domain
-        if not re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::[0-9]{1,5})?', domain):
+        unresolved = kind == 'caddy' and '{$' in domain
+        if not unresolved and not re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::[0-9]{1,5})?', domain):
             continue
+        site_key = json.dumps([site.words, domain])
+        site_slot = site_slots.get(site_key, 0)
+        site_slots[site_key] = site_slot + 1
+        rule_slots = {}
         all_nodes = list(walk(site.children))
         proxies = [n for n in all_nodes if n.words[:1] == (['reverse_proxy'] if kind == 'caddy' else ['proxy_pass'])]
         if not proxies:
             proxies = [None]
         for proxy in proxies:
-            reason, upstream = '', ''
+            reason, upstream, connect_timeout = '', '', 3000
             route_kind = 'proxy' if proxy else 'static'
-            if imported:
+            if unresolved:
+                reason = '站点域名变量未能解析为单个域名，请检查代理容器中的变量值'
+            elif imported:
                 reason = 'Caddyfile 使用 import；请先确认导入文件和实际生效规则'
             elif proxy:
-                if proxy.body or len(proxy.words) != 2:
+                if len(proxy.words) != 2 or (kind != 'caddy' and proxy.body):
                     reason = '此规则含多上游、匹配器或高级转发选项，暂不自动改写'
                 else:
-                    raw = proxy.words[1]
+                    raw = (addresses or {}).get(proxy.words[1], proxy.words[1])
                     upstream = raw if '://' in raw else 'http://' + raw
                     try:
                         gateway.normalize({'key': 'check', 'upstream': upstream, 'network': 'host'})
                     except ValueError:
                         reason = '只自动接入无路径、无变量的单个 HTTP 上游'
+                    if not reason and kind == 'caddy':
+                        reason, connect_timeout = caddy_proxy_options(proxy)
                 if not reason and kind == 'nginx':
                     scopes = [n for n in all_nodes if n.body and n.start < proxy.start < n.end]
                     scope = scopes[-1] if scopes else site
@@ -173,10 +242,22 @@ def routes(text: str, kind: str) -> list[dict[str, Any]]:
             if proxy and 'mini-gateway-' in upstream:
                 reason = '该规则已指向网关，请使用原入口的接入状态或撤销操作'
             context = [n.words for n in all_nodes if proxy and n.body and n.start < proxy.start < n.end]
-            label = ' / '.join(' '.join(w) for w in context) or ('静态网站' if not proxy else '全部请求')
+            rule_key = json.dumps(context)
+            rule_slot = rule_slots.get(rule_key, 0)
+            rule_slots[rule_key] = rule_slot + 1
+            selector = digest(json.dumps([site_key, site_slot, context, rule_slot]))
+            def context_label(words):
+                label = ' '.join(words)
+                if kind == 'caddy' and len(words) == 2 and words[1].startswith('@'):
+                    matchers = [n for n in all_nodes if n.words[:2] == [words[1], 'path'] and not n.body]
+                    if len(matchers) == 1:
+                        label += ' (' + ' '.join(matchers[0].words[2:]) + ')'
+                return label
+            label = ' / '.join(context_label(w) for w in context) or ('静态网站' if not proxy else '全部请求')
             result.append({'id': digest(f'{site.start}:{proxy.start if proxy else -1}:{text[site.start:site.end]}')[:24],
                            'site': domain, 'label': label, 'kind': route_kind, 'upstream': upstream,
-                           'reason': reason, 'supported': not reason, '_site': site, '_proxy': proxy})
+                           'reason': reason, 'supported': not reason, '_site': site, '_proxy': proxy,
+                           '_connect_timeout': connect_timeout, '_selector': selector})
     return result
 
 
@@ -266,7 +347,11 @@ def resolve(raw: Any) -> dict[str, Any]:
         source.update(container=name, container_id=item['Id'], networks=[n for n in names if n not in ('bridge', 'none')])
         if not source['networks']:
             raise CertificateError('前置代理需要 host 或自定义 Docker 网络，默认 bridge 不支持服务名解析')
-    read_config(Path(source['path']))
+    text = read_config(Path(source['path']))
+    if kind == 'caddy' and mode == 'docker':
+        addresses = caddy_addresses(text, item.get('Config', {}).get('Env') or [])
+        if addresses:
+            source['addresses'] = addresses
     return source
 
 
@@ -347,7 +432,7 @@ class Connections:
     def inspect(self, raw: dict) -> dict:
         source = resolve(raw)
         text = read_config(Path(source['path']))
-        return {'source': source, 'revision': digest(text), 'routes': [public_route(r) for r in routes(text, source['kind'])],
+        return {'source': source, 'revision': digest(text), 'routes': [public_route(r) for r in routes(text, source['kind'], source.get('addresses'))],
                 'networks': source['networks'], 'help': help_items(source)}
 
     def preview(self, data: dict) -> dict:
@@ -355,7 +440,7 @@ class Connections:
         text = read_config(Path(source['path']))
         if data.get('source_revision') != digest(text):
             raise CertificateError('代理配置已变化，请重新检测网站')
-        route = next((r for r in routes(text, source['kind']) if r['id'] == data.get('route_id')), None)
+        route = next((r for r in routes(text, source['kind'], source.get('addresses')) if r['id'] == data.get('route_id')), None)
         if not route or not route['supported']:
             raise CertificateError(route['reason'] if route else '请选择本次检测出的站点规则')
         key = data.get('key', '')
@@ -365,7 +450,8 @@ class Connections:
         for record in self.root.glob('*/connection.json') if self.root.exists() else []:
             existing = read_record(record)
             if existing['source']['path'] == source['path'] and existing['site'] == route['site']:
-                raise CertificateError('此站点已有接入记录，请先撤销原接入；同一文件中的其他站点可独立接入')
+                if route['kind'] != 'proxy' or not existing.get('rule_scoped'):
+                    raise CertificateError('此站点已有整站接入记录，请先撤销原接入；分开的后端规则可独立接入')
         network = data.get('network', '')
         if network not in source['networks']:
             raise CertificateError('请选择前置代理已加入的网络')
@@ -390,26 +476,35 @@ class Connections:
         spec = gateway.normalize({'key': key, 'name': data.get('name') or route['site'], 'port': data.get('port', 18080),
                                   'network': network, 'upstream': upstream, 'image': data.get('image', gateway.IMAGE),
                                   'bind': '127.0.0.1', 'trust_proxy': True})
+        if source['kind'] == 'caddy':
+            # The outer Caddy enforces business upload limits; the inserted hop must not lower them.
+            spec = gateway.normalize({**spec, 'max_body_bytes': 0, 'connect_timeout_ms': route['_connect_timeout']})
         probe_path = data.get('probe_path', '/')
         if (not isinstance(probe_path, str) or not re.fullmatch(r'/[!-~]{0,511}', probe_path)
                 or any(c in probe_path for c in ('?', '#')) or probe_path.startswith('//')):
             raise CertificateError('检测路径应以 / 开头，不含查询参数；例如 /cloud/health')
         target = f'127.0.0.1:{spec["port"]}' if network == 'host' else f'mini-gateway-{key}:10000'
         if proxy:
-            replacement = ('reverse_proxy ' if source['kind'] == 'caddy' else 'proxy_pass http://') + target
-            if source['kind'] == 'nginx':
+            before = text[proxy.start:proxy.end]
+            if source['kind'] == 'caddy':
+                start, end = proxy.spans[1]
+                after = text[proxy.start:start] + target + text[end:proxy.end]
+            else:
+                replacement = 'proxy_pass http://' + target
                 # A trailing slash controls location-prefix stripping in Nginx.
                 replacement += '/;' if proxy.words[1].endswith('/') else ';'
-            after = before[:proxy.start - site.start] + replacement + before[proxy.end - site.start:]
+                after = replacement
+            candidate = text[:proxy.start] + after + text[proxy.end:]
         else:
             after = f'{site.words[0]} {{\n    reverse_proxy {target}\n}}'
-        candidate = text[:site.start] + after + text[site.end:] + extra
+            candidate = text[:site.start] + after + text[site.end:] + extra
         entry_path = self.gateways.directory(key) / 'entry.json'
         old = self.gateways.read(key) if entry_path.exists() else None
-        if old and any(old['spec'][k] != spec[k] for k in ('upstream', 'network', 'port', 'bind', 'image')):
+        if old and any(old['spec'].get(k) != spec.get(k) for k in ('upstream', 'network', 'port', 'bind', 'image', 'max_body_bytes', 'connect_timeout_ms')):
             raise CertificateError('该标识已有不同的网关配置，请使用新的入口标识，或先在网关管理中核对配置')
         plan = {'token': secrets.token_hex(16), 'created': time.time(), 'source': source, 'site': route['site'],
-                'kind': route['kind'], 'scope': route['label'], 'before': before, 'after': after, 'extra': extra,
+                'kind': route['kind'], 'scope': route['label'], 'rule_scoped': bool(proxy), 'selector': route['_selector'],
+                'before': before, 'after': after, 'extra': extra,
                 'source_revision': digest(text), 'candidate': candidate, 'spec': spec,
                 'probe_path': probe_path,
                 'gateway_revision': gateway.revision(old['spec']) if old else ''}
@@ -521,7 +616,15 @@ class Connections:
             raise CertificateError('代理容器或挂载已变化，请人工核对后恢复备份')
         path = Path(source['path'])
         current = read_config(path)
-        if current.count(record['after']) == 1:
+        if record.get('rule_scoped'):
+            selected = next((route for route in routes(current, source['kind'], source.get('addresses'))
+                             if route['_selector'] == record.get('selector')), None)
+            proxy = selected['_proxy'] if selected else None
+            fragment = current[proxy.start:proxy.end] if proxy else None
+            if fragment not in (record['before'], record['after']):
+                raise CertificateError('接入规则已被外部修改，请核对备份；其他规则不会被覆盖')
+            restored = current[:proxy.start] + record['before'] + current[proxy.end:]
+        elif current.count(record['after']) == 1:
             restored = current.replace(record['after'], record['before'], 1)
             if record['extra']:
                 if restored.count(record['extra']) != 1:

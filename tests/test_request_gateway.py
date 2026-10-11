@@ -32,6 +32,8 @@ def store(tmp_path):
     {"upstream": "http://mini-gateway-api:10000"},
     {"network": "host", "upstream": "http://127.0.0.1:18080"},
     {"upstream": "http://api;return:80"}, {"trust_proxy": "true"},
+    {"max_body_bytes": -1}, {"max_body_bytes": True}, {"max_body_bytes": "0;return 200"},
+    {"connect_timeout_ms": 0}, {"connect_timeout_ms": 75001}, {"connect_timeout_ms": "10s"},
 ])
 def test_invalid_configuration_never_reaches_runtime(changes):
     with pytest.raises(CertificateError):
@@ -53,6 +55,17 @@ def test_generated_config_preserves_streaming_and_limits_log_contents():
     host = gateway.config(spec(network="host", upstream="http://127.0.0.1:8000"))
     assert "listen 127.0.0.1:18080" in host
     assert "proxy_pass http://127.0.0.1:8000;" in host
+
+
+def test_automatic_caddy_hop_preserves_outer_limits_and_connection_timeout(store):
+    automatic = spec(max_body_bytes=0, connect_timeout_ms=10000)
+    text = gateway.config(automatic)
+    assert 'client_max_body_size 0;' in text
+    assert 'proxy_connect_timeout 10000ms;' in text
+    store.save(automatic)
+    assert store.read('api')['spec'] == automatic
+    assert 'max_body_bytes' not in spec()
+    assert 'connect_timeout_ms' not in spec()
 
 
 def test_save_is_a_draft_and_rejects_stale_edit(store, monkeypatch):

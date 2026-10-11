@@ -284,6 +284,25 @@ def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
     assert [p['action'] for path, p in state['posts'] if path == '/request-gateways'] == ['save', 'start', 'stop', 'delete']
 
 
+def test_editing_auto_gateway_keeps_inherited_proxy_limits(browser_page):
+    page, state = browser_page
+    automatic = request_gateway.normalize({'key': 'api', 'upstream': 'http://api:8080',
+                                           'network': 'app_default', 'max_body_bytes': 0, 'connect_timeout_ms': 10000})
+    state['gateway_entries'] = [{**automatic, 'revision': request_gateway.revision(automatic), 'state': 'not_created',
+                                'local_address': '127.0.0.1:18080', 'caddy_upstream': 'mini-gateway-api:10000'}]
+    page.locator('#requestsViewTab').click()
+    page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayMaintenance > summary').click()
+    page.locator('[data-gateway-action="edit"]').click()
+    page.locator('#gatewayName').fill('Renamed API')
+    page.locator('#gatewaySave').click()
+    page.locator('#confirmOkBtn').click()
+    page.wait_for_selector('#requestGatewayForm', state='hidden')
+    saved = next(payload['spec'] for path, payload in state['posts'] if path == '/request-gateways')
+    assert saved['max_body_bytes'] == 0
+    assert saved['connect_timeout_ms'] == 10000
+
+
 def test_gateway_save_error_keeps_form_values(browser_page):
     page, state = browser_page
     page.locator('#requestsViewTab').click()
