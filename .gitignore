@@ -13,3 +13,5 @@ projects.json.*.bak
 .backups/
 state.json
 *.log
+*.sqlite3
+*.sqlite3-journal

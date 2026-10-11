@@ -45,7 +45,7 @@ UPGRADE_SERVICE_FAILSAFE_ARMED="false"
 # retired deployment scripts and user-owned business resources must survive.
 RELEASE_ENTRIES=(
   agent.py cpu_metrics.py certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
-  caddy_requests.py request_gateway.py request_history.py gateway_connections.py monitoring.py container_monitoring.py docker_events.py docker_mirrors.py ssh_terminal.py terminal_ai.py terminal_tools.py requirements-ssh.txt
+  caddy_requests.py request_gateway.py request_history.py gateway_connections.py monitoring.py container_monitoring.py docker_events.py docker_mirrors.py ssh_terminal.py terminal_ai.py terminal_tools.py terminal_history.py requirements-ssh.txt
   install.sh env.example server.env.example LICENSE THIRD_PARTY_NOTICES.md ui
   examples/nginx.compose.yml
   systemd/mini-deploy-agent.service
@@ -1955,6 +1955,12 @@ upsert_env_assignment "MINI_DEPLOY_HOME" "$APP_HOME"
 upsert_env_assignment "DEPLOY_AGENT_HOST" "0.0.0.0"
 upsert_env_assignment "DEPLOY_AGENT_PORT" "6868"
 upsert_env_assignment "DEPLOY_COOKIE_SECURE" "auto"
+case "$(env_file_value DEPLOY_UI_SESSION_TTL_SECONDS)" in
+  ""|28800)
+    # Migrate the previous bundled eight-hour default; preserve custom lifetimes.
+    upsert_env_assignment "DEPLOY_UI_SESSION_TTL_SECONDS" "86400"
+    ;;
+esac
 upsert_env_assignment "DEPLOY_AGENT_ENV_FILE" "$ENV_FILE"
 upsert_env_assignment "DEPLOY_AGENT_SERVICE_NAME" "$SERVICE_NAME"
 upsert_env_assignment "DEPLOY_PROJECTS_FILE" "$DATA_HOME/projects.json"

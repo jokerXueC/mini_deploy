@@ -42,6 +42,7 @@ def test_release_manifest_excludes_deployment_adapters_and_templates():
     assert "agent.py" in entries
     assert "monitoring.py" in entries
     assert "docker_mirrors.py" in entries
+    assert "terminal_history.py" in entries
     assert "scripts/verify_backup.py" in entries
     assert "scripts/doctor.sh" in entries
     assert "examples/nginx.compose.yml" in entries
@@ -53,6 +54,18 @@ def test_release_manifest_excludes_deployment_adapters_and_templates():
     assert "docker-compose" not in INSTALLER
     assert "import yaml" not in INSTALLER
     assert "DEPLOY_LOG_FILE" not in INSTALLER
+
+
+@pytest.mark.parametrize('value, expected', [('', '86400'), ('28800', '86400'), ('"28800"', '86400'), ('3600', '')])
+def test_upgrade_migrates_only_previous_default_login_lifetime(tmp_path, value, expected):
+    env_file = tmp_path / 'test.env'
+    env_file.write_text(f'DEPLOY_UI_SESSION_TTL_SECONDS={value}\n', encoding='utf-8')
+    start = INSTALLER.index('case "$(env_file_value DEPLOY_UI_SESSION_TTL_SECONDS)" in')
+    migration = INSTALLER[start:INSTALLER.index('\nesac', start) + 6]
+    script = function('env_file_value') + '\nupsert_env_assignment() { printf "%s" "$2"; }\n' + migration
+    result = bash_run(script, ENV_FILE=env_file.as_posix())
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
 
 
 @pytest.mark.parametrize("copier", ["cp", "rsync"])

@@ -5,6 +5,7 @@
   let dialogTest = false, saving = false;
   let pendingEntry;
   let savedSession = '';
+  let archiveId = '', historyTarget = '', historyOffset = 0, historyBefore = null, historyLoading = false, historyGeneration = 0;
   let permission = 'approve', accessLoading = false, accessDraft = '', accessSession = '', submitting = 0;
   const context = () => window.SSHTerminal?.context() || {session_id: '', selection: '', cursor: 0, target: ''};
   const message = (text, error = false, id = 'aiFeedback') => {
@@ -41,8 +42,13 @@
   }
   function controls() {
     const connected = !!context().session_id;
-    el('aiAskSend').disabled = working || accessLoading || saving;
-    el('aiNewChat').disabled = working;
+    const historyMismatch = archiveId && historyTarget && historyTarget !== context().target;
+    el('aiAskSend').disabled = working || accessLoading || saving || historyLoading || !!historyMismatch;
+    el('aiNewChat').disabled = working || historyLoading;
+    el('aiHistoryOpen').disabled = working || historyLoading || !allowed;
+    el('aiHistoryOlder').disabled = el('aiHistoryLatest').disabled = working || historyLoading;
+    el('aiTest').classList.toggle('is-loading', working && dialogTest);
+    el('aiAskSend').classList.toggle('is-loading', working && !dialogTest);
     el('aiShareOutput').disabled = !connected || working;
     el('aiPermission').disabled = !connected || !allowed || accessLoading || saving;
     el('aiPermission').value = connected ? permission : 'chat';
@@ -50,6 +56,7 @@
     el('aiStop').hidden = !working;
     el('aiSave').disabled = el('aiTest').disabled = !allowed || working || saving;
     el('aiTargetLabel').textContent = connected ? context().target : '普通对话';
+    if (historyMismatch) el('aiTargetLabel').textContent = `连接 ${historyTarget} 后可继续，或新建对话`;
     let scope = connected && el('aiShareOutput').checked ? '问题、对话记录与最近输出（常见凭据会脱敏）' : '问题与对话记录';
     if (connected && permission !== 'chat') scope += '及工具检查结果';
     el('aiSendContext').textContent = settings.configured ? `发送${scope}至 ${settings.base_url}` : '先配置模型';
@@ -124,20 +131,35 @@
       } catch (error) { stopAuto(); message(error.message, true); }
     }, 30000);
   }
-  function appendEntry(asked) {
+  function appendEntry(asked, bounded = true) {
     el('aiEmpty')?.remove();
-    while (el('aiMessages').children.length >= 12) el('aiMessages').firstElementChild.remove();
+    while (bounded && el('aiMessages').children.length >= 12) el('aiMessages').firstElementChild.remove();
     const entry = document.createElement('article'); entry.className = 'tai-entry';
     const q = document.createElement('p'); q.className = 'tai-question'; q.textContent = asked;
-    const answer = document.createElement('div'); answer.className = 'tai-answer'; answer.textContent = '正在回复…';
+    const answer = document.createElement('div'); answer.className = 'tai-answer';
+    const loading = document.createElement('div'); loading.className = 'tai-loading'; loading.setAttribute('role', 'status');
+    const spinner = document.createElement('i'); spinner.className = 'tai-icon'; spinner.dataset.aiIcon = 'loader-circle';
+    const label = document.createElement('span'); label.textContent = '等待模型回复';
+    const elapsed = document.createElement('span'); elapsed.className = 'tai-elapsed';
+    loading.append(spinner, label, elapsed); icons(loading);
     const tools = document.createElement('div'); tools.className = 'tai-steps';
     const approval = document.createElement('div'); approval.className = 'tai-approval'; approval.hidden = true;
     const meta = document.createElement('p'); meta.className = 'tai-entry-meta';
-    entry.append(q, tools, approval, answer, meta); el('aiMessages').append(entry); el('aiMessages').scrollTop = el('aiMessages').scrollHeight;
-    return {answer, meta, tools, approval, steps: new Map(), approvalId: ''};
+    entry.append(q, tools, approval, loading, answer, meta); entry.setAttribute('aria-busy', 'true');
+    el('aiMessages').append(entry); el('aiMessages').scrollTop = el('aiMessages').scrollHeight;
+    return {root: entry, answer, loading, label, elapsed, started: Date.now(), meta, tools, approval, steps: new Map(), approvalId: ''};
+  }
+  function finishEntry(entry) {
+    entry.loading.hidden = true; entry.root.setAttribute('aria-busy', 'false');
   }
   function renderProgress(entry, result, id) {
     if (!entry) return;
+    const running = (result.events || []).find(step => step.status === 'running');
+    entry.loading.hidden = result.status === 'awaiting_approval' || ['done', 'failed', 'cancelled'].includes(result.status);
+    entry.label.textContent = result.stage === 'tools' && running ? `正在${running.title}`
+      : result.events?.length ? '正在整理检查结果' : '等待模型回复';
+    const elapsed = Math.floor((Date.now() - entry.started) / 1000);
+    entry.elapsed.textContent = elapsed ? `${elapsed} 秒` : '';
     const labels = {running: '执行中', awaiting_approval: '等待确认', done: '已完成', failed: '未完成', blocked: '未执行', cancelled: '已停止'};
     for (const step of result.events || []) {
       let row = entry.steps.get(step.id);
@@ -152,7 +174,11 @@
       const content = [step.command, step.result].filter(Boolean).join('\n\n');
       if (row.pre.textContent !== content) row.pre.textContent = content;
     }
-    if (!result.approval) { entry.approval.hidden = true; entry.approvalId = ''; return; }
+    if (!result.approval) {
+      entry.approval.hidden = true; entry.approvalId = '';
+      if (entry.answer.textContent === '确认后继续排查') entry.answer.textContent = '';
+      return;
+    }
     entry.answer.textContent = '确认后继续排查'; message('有操作需要你确认');
     if (entry.approvalId === result.approval.id) return;
     const approval = result.approval; entry.approvalId = approval.id;
@@ -217,7 +243,10 @@
     return null;
   }
   async function ask(asked, automatic = false) {
-    if (working || saving || accessLoading || !asked.trim()) return;
+    if (working || saving || accessLoading || historyLoading || !asked.trim()) return;
+    if (archiveId && historyTarget && historyTarget !== context().target) {
+      message('请连接历史对话对应的服务器，或新建对话。', true); return;
+    }
     panel(true);
     if (!settings.configured) { message('先配置模型，问题会保留。'); await openSettings(); return; }
     if (!allowed) { message('请先确认允许本次登录使用 HTTP，或通过 HTTPS / 本地隧道使用 AI 对话。', true); return; }
@@ -228,25 +257,28 @@
     try {
       submitting = current;
       const submitted = await api('/terminal-ai/chat', {session_id: sessionId, conversation_id: conversationId,
-        include_terminal: includeTerminal, consent: true, question: asked, automatic,
+        include_terminal: includeTerminal, consent: true, question: asked, automatic, history_id: archiveId,
         permission: sessionId ? permission : 'chat',
         provider: {base_url: settings.base_url, protocol: settings.protocol, model: settings.model}});
       if (submitting === current) submitting = 0;
       if (current !== generation) { cancelJob(submitted.id); return; }
       conversationId = submitted.conversation_id;
+      archiveId = submitted.history_id; historyTarget = context().target;
       if (!automatic) el('aiQuestion').value = '';
       job = submitted.id;
       const result = await waitForJob(job, current, entry);
       if (!result || current !== generation) return;
       renderAnswer(entry.answer, result.text);
+      finishEntry(entry);
       const usage = result.usage || {}; const tokens = usage.total_tokens ?? ((usage.input_tokens || 0) + (usage.output_tokens || 0));
       const scope = result.context?.lines ? `最近输出 ${result.context.lines} 行` : '未附带终端输出';
       entry.meta.textContent = `${result.model} · ${scope}${result.events?.length ? ` · ${result.events.length} 项检查` : ''}${tokens ? ` · ${tokens} tokens` : ''}`;
-      message('可继续追问');
+      message(result.history_error || '可继续追问', !!result.history_error);
       el('aiMessages').scrollTop = el('aiMessages').scrollHeight;
     } catch (error) {
       if (current === generation) {
         entry.answer.textContent = error.message; entry.answer.classList.add('tai-error'); message(error.message, true); stopAuto();
+        finishEntry(entry);
         if (error.status === 404 || error.status === 409 && /连接或模型|模型配置/.test(error.message)) conversationId = '';
       }
     } finally {
@@ -255,13 +287,67 @@
     }
   }
   function newChat() {
-    conversationId = ''; stopAuto();
+    conversationId = ''; archiveId = ''; historyTarget = ''; historyBefore = null; historyGeneration++; stopAuto();
+    el('aiHistoryBar').hidden = true;
     el('aiMessages').replaceChildren();
     const empty = document.createElement('div'); empty.id = 'aiEmpty'; empty.className = 'tai-empty';
     const title = document.createElement('strong'); title.textContent = '想排查什么问题？';
     const hint = document.createElement('p'); hint.textContent = '例如：这段报错是什么原因？';
     empty.append(title, hint); el('aiMessages').append(empty); message('等待提问'); controls();
   }
+  const historyDate = value => new Date(value * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
+  async function listHistory(offset = 0) {
+    if (!allowed || working || historyLoading) return;
+    historyLoading = true; controls();
+    if (!el('aiHistoryDialog').open) el('aiHistoryDialog').showModal();
+    message('正在读取历史记录…', false, 'aiHistoryFeedback');
+    try {
+      const result = await api(`/terminal-ai/history?offset=${offset}`);
+      if (!offset) el('aiHistoryList').replaceChildren();
+      for (const item of result.conversations) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'tai-history-row';
+        const title = document.createElement('strong'); title.textContent = item.title;
+        const detail = document.createElement('span'); detail.textContent = `${item.target || '普通对话'} · ${historyDate(item.updated)} · ${item.model}`;
+        button.append(title, detail); button.addEventListener('click', () => openHistory(item.id));
+        el('aiHistoryList').append(button);
+      }
+      historyOffset = result.next_offset;
+      el('aiHistoryMore').hidden = historyOffset === null;
+      message(el('aiHistoryList').children.length ? '' : '暂无对话历史，发送第一条问题后会自动保存。', false, 'aiHistoryFeedback');
+    } catch (error) { message(error.message, true, 'aiHistoryFeedback'); }
+    finally { historyLoading = false; controls(); }
+  }
+  async function openHistory(id, before = null) {
+    if (working || historyLoading) return;
+    historyLoading = true; controls();
+    const current = ++historyGeneration;
+    try {
+      const result = await api(`/terminal-ai/history?id=${encodeURIComponent(id)}${before ? `&before=${before}` : ''}`);
+      if (current !== historyGeneration) return;
+      stopAuto(); conversationId = ''; archiveId = id; historyTarget = result.conversation.target;
+      historyBefore = result.next_before;
+      el('aiHistoryDialog').close(); panel(true); el('aiMessages').replaceChildren();
+      const status = {failed: '未完成', cancelled: '已停止', running: '本轮尚未完成或已中断'};
+      for (const turn of result.turns) {
+        const entry = appendEntry(turn.question, false);
+        const events = turn.events.map(event => ['running', 'awaiting_approval'].includes(event.status)
+          ? {...event, status: 'cancelled'} : event);
+        renderProgress(entry, {events, status: 'done'}, '');
+        renderAnswer(entry.answer, turn.answer || status[turn.status] || '本轮没有回复'); finishEntry(entry);
+        entry.meta.textContent = `${historyDate(turn.created)}${status[turn.status] ? ` · ${status[turn.status]}` : ''}`;
+      }
+      el('aiHistoryBar').hidden = false;
+      el('aiHistoryCaption').textContent = result.conversation.title;
+      el('aiHistoryOlder').hidden = historyBefore === null;
+      el('aiHistoryLatest').hidden = !before;
+      message(historyTarget && historyTarget !== context().target ? '这是历史记录，连接对应服务器后可继续。' : '历史已加载，可继续追问');
+    } catch (error) { message(error.message, true, el('aiHistoryDialog').open ? 'aiHistoryFeedback' : 'aiFeedback'); }
+    finally { historyLoading = false; controls(); }
+  }
+  el('aiHistoryOpen').addEventListener('click', () => listHistory());
+  el('aiHistoryMore').addEventListener('click', () => { if (historyOffset !== null) listHistory(historyOffset); });
+  el('aiHistoryOlder').addEventListener('click', () => { if (historyBefore !== null) openHistory(archiveId, historyBefore); });
+  el('aiHistoryLatest').addEventListener('click', () => openHistory(archiveId));
   el('aiSettingsOpen').addEventListener('click', openSettings);
   el('aiPanelModel').addEventListener('click', openSettings);
   el('aiProtocol').addEventListener('change', protocolHint);
@@ -313,7 +399,9 @@
   }
   function stopWaiting() {
     cancelJob(job);
-    if (pendingEntry) { pendingEntry.answer.textContent = '已请求停止任务。'; pendingEntry.approval.hidden = true; pendingEntry = undefined; }
+    if (pendingEntry) {
+      pendingEntry.answer.textContent = '已请求停止任务。'; pendingEntry.approval.hidden = true; finishEntry(pendingEntry); pendingEntry = undefined;
+    }
     generation++; if (!submitting) controller?.abort(); working = false; dialogTest = false; job = ''; stopAuto();
     message('已请求停止；已提交的远端操作可能仍在执行。'); controls();
   }

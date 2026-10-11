@@ -56,6 +56,7 @@ import sqlite3
 import docker_mirrors
 import ssh_terminal
 import terminal_ai
+import terminal_history
 
 try:
     import fcntl
@@ -134,7 +135,7 @@ HEALTH_CHECK_TIMEOUT_SECONDS = max(1, min(float(os.getenv("DEPLOY_HEALTH_CHECK_T
 
 UI_PASSWORD_HASH = os.getenv("DEPLOY_UI_PASSWORD_HASH", "")
 UI_SESSION_SECRET = os.getenv("DEPLOY_UI_SESSION_SECRET", "").strip()
-UI_SESSION_TTL_SECONDS = int(os.getenv("DEPLOY_UI_SESSION_TTL_SECONDS", str(8 * 60 * 60)))
+UI_SESSION_TTL_SECONDS = int(os.getenv("DEPLOY_UI_SESSION_TTL_SECONDS", str(24 * 60 * 60)))
 COOKIE_SECURE_MODE = os.getenv("DEPLOY_COOKIE_SECURE", "auto").strip().lower()
 COOKIE_NAME = "mini_deploy_session"
 TERMINAL_HTTP_COOKIE = "mini_deploy_terminal_http"
@@ -2711,6 +2712,17 @@ class Handler(BaseHTTPRequestHandler):
                 key = parse_qs(parsed.query).get("id", [""])[0]
                 self._write_json(200, manager.job(owner, key))
                 return
+            if self.command == "GET" and path == "/terminal-ai/history":
+                query = parse_qs(parsed.query)
+                key = query.get("id", [""])[0]
+                if len(key) > 128:
+                    raise terminal_ai.AIError("对话历史编号无效。")
+                before = int(query["before"][0]) if "before" in query else None
+                offset = int(query.get("offset", ["0"])[0])
+                if not 0 <= offset <= 1000000000 or (before is not None and not 1 <= before < 2**63):
+                    raise terminal_ai.AIError("历史分页参数无效。")
+                self._write_json(200, manager.history.detail(key, before) if key else manager.history.list(offset))
+                return
             if self.command == "GET" and path == "/terminal-ai/access":
                 session_id = parse_qs(parsed.query).get("session_id", [""])[0]
                 session = _ssh_manager().session(self._ssh_owner(), session_id)
@@ -2788,7 +2800,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise terminal_ai.AIError("不支持的模型操作。", 404)
             self._write_json(200, result)
         except (terminal_ai.AIError, ssh_terminal.SSHError, ValueError, OSError) as exc:
-            detail = str(exc) if isinstance(exc, (terminal_ai.AIError, ssh_terminal.SSHError)) else (
+            detail = str(exc) if isinstance(exc, (terminal_ai.AIError, ssh_terminal.SSHError, terminal_history.HistoryError)) else (
                 "无法读写模型配置，请检查目录权限；原文件已保留。")
             self._write_json(getattr(exc, "status", 400), {"error": "ai_failed", "detail": detail})
 

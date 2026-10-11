@@ -5,7 +5,14 @@
 .ssh-connections { min-width: 0; }
 .ssh-section-title, .ssh-terminal-toolbar, .ssh-terminal-actions, .ssh-terminal-footer, .ssh-profile { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .ssh-section-title h2 { font-size: 16px; margin: 0; }
-#sshConnectionToggle { display: none; }
+#sshConnectionToggle { display: inline-flex; }
+.ssh-connections.collapsed #sshProfiles, .ssh-connections.collapsed #sshForm, .ssh-connections.collapsed #sshOtherSessions { display: none; }
+.ssh-connections.collapsed #sshConnectionToggle svg { transform: rotate(-90deg); }
+@media (min-width: 761px) {
+  .ssh-layout.connections-collapsed { grid-template-columns: 36px minmax(0, 1fr); gap: 16px; }
+  .ssh-connections.collapsed .ssh-section-title h2, .ssh-connections.collapsed #sshNew { display: none; }
+  .ssh-connections.collapsed .ssh-terminal-actions { gap: 0; }
+}
 .ssh-profile-list { margin: 12px 0 20px; max-height: 200px; overflow: auto; }
 .ssh-profile { padding: 4px 0; }
 .ssh-profile-select { flex: 1; min-width: 0; padding: 8px; background: transparent; border: 0; text-align: left; color: var(--fg); cursor: pointer; border-radius: 4px; }

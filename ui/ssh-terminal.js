@@ -15,7 +15,11 @@
   };
   function collapseConnections(collapsed) {
     el('sshForm').closest('.ssh-connections').classList.toggle('collapsed', collapsed);
+    el('sshLayout').classList.toggle('connections-collapsed', collapsed);
     el('sshConnectionToggle').setAttribute('aria-expanded', String(!collapsed));
+    el('sshConnectionToggle').title = collapsed ? '展开连接设置' : '收起连接设置';
+    try { localStorage.setItem('mini-deploy-ssh-collapsed', String(collapsed)); } catch { /* Storage may be disabled. */ }
+    requestAnimationFrame(resize);
   }
 
   async function api(path, body, {keepalive = false, signal, raw = false} = {}) {
@@ -46,6 +50,7 @@
     el('sshPaste').disabled = !session;
     el('sshMobileKeys').hidden = !session;
     el('sshNew').disabled = busy;
+    if (terminal) terminal.options.disableStdin = !session;
     el('sshProfiles').querySelectorAll('button').forEach(button => { button.disabled = busy || !allowed; });
     window.dispatchEvent(new CustomEvent('ssh-session-change'));
   }
@@ -195,7 +200,13 @@
         await api('/ssh/input', {id, data: bytes64(chunk)});
       }
     } catch (error) {
-      if (current === generation) { await disconnect(); feedback(`${error.message} 未自动重发输入，请核对服务器状态。`); }
+      if (current === generation) {
+        input = '';
+        if ([401, 403, 404, 410].includes(error.status)) finish(error.message);
+        else state('网络重试中');
+        feedback(`${error.message} 未自动重发输入，请核对服务器状态。`, 'error');
+        el('sshRelogin').hidden = error.status !== 401;
+      }
     } finally { sending = false; if (input && session) sendInput(); }
   }
 
@@ -260,9 +271,13 @@
       } catch (error) {
         if (session !== id || generation !== current) return;
         if (streaming && error.status === 404) { streaming = false; continue; }
-        if ([401, 403, 404, 410].includes(error.status) || ++failures >= 3) { await disconnect(); feedback(error.message); return; }
+        if ([401, 403, 404, 410].includes(error.status)) {
+          finish(error.message); feedback(error.message, 'error'); el('sshRelogin').hidden = error.status !== 401; return;
+        }
         state('网络重试中');
-        await new Promise(resolve => setTimeout(resolve, 1000 * failures));
+        failures = Math.min(failures + 1, 5);
+        feedback('终端输出暂时中断，正在恢复连接…');
+        await new Promise(resolve => setTimeout(resolve, Math.min(15000, 1000 * 2 ** (failures - 1))));
       }
     }
   }
@@ -382,5 +397,9 @@
     },
     viewChanged(view) { if (view === 'terminal') { refresh(); requestAnimationFrame(resize); } }
   };
+  try { collapseConnections(localStorage.getItem('mini-deploy-ssh-collapsed') === 'true'); } catch { /* Use expanded default. */ }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && activeView === 'terminal') { refresh(); requestAnimationFrame(resize); }
+  });
   if (activeView === 'terminal') window.SSHTerminal.viewChanged('terminal');
 })();

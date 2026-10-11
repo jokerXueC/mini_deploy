@@ -316,7 +316,7 @@ class Manager:
             self.check_owner(owner)
             return {"available": paramiko is not None, "profiles": list(self.profiles),
                     "sessions": [{"id": s.id, **s.spec} for s in self.sessions.values() if s.owner == owner and not s.closed],
-                    "idle_minutes": 15, "csrf_token": ""}
+                    "idle_minutes": 1440, "csrf_token": ""}
 
     def profile(self, data):
         with self.lock:
@@ -502,7 +502,7 @@ class Manager:
 
     def close_owner(self, owner, expires=None):
         with self.lock:
-            self.revoked[owner] = expires if expires is not None else time.time() + 8 * 3600
+            self.revoked[owner] = expires if expires is not None else time.time() + 24 * 3600
             for session in self.sessions.values():
                 if session.owner == owner:
                     session.close("已退出面板，连接已关闭。")
@@ -515,10 +515,10 @@ class Manager:
         for key, session in list(self.sessions.items()):
             if time.time() >= session.expires:
                 session.close("面板登录已过期，请重新登录。")
-            elif now - session.last_poll > 60:
+            elif now - session.last_poll > 24 * 3600:
                 session.close("页面已离线，连接已关闭。")
-            elif now - session.activity > 900:
-                session.close("空闲超过 15 分钟，连接已关闭。")
+            elif now - session.activity > 24 * 3600:
+                session.close("空闲超过 24 小时，连接已关闭。")
             if session.closed and now - session.closed_at > 60:
                 del self.sessions[key]
 

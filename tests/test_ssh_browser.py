@@ -35,6 +35,65 @@ def fill(page, peer):
     page.locator("#sshPassword").fill("safe-password")
 
 
+def test_desktop_connection_sidebar_collapses_and_idle_terminal_still_accepts_input(page, http_server, manager, peer, tmp_path):
+    page.goto(http_server.origin + '/ui?view=terminal')
+    playwright.expect(page.locator('#sshHost')).to_be_enabled()
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    playwright.expect(page.locator('#sshFingerprintDialog')).to_be_visible()
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    before = page.locator('#sshTerminal').bounding_box()['width']
+    page.locator('#sshConnectionToggle').click()
+    playwright.expect(page.locator('#sshForm')).not_to_be_visible()
+    page.wait_for_function("document.querySelector('#sshTerminal').clientWidth > " + str(before))
+    session = next(iter(manager.sessions.values()))
+    session.activity -= 20 * 60
+    session.last_poll -= 20 * 60
+    with manager.lock:
+        manager._cleanup()
+    assert not session.closed
+    page.locator('.xterm-helper-textarea').focus()
+    page.keyboard.type('after-idle')
+    playwright.expect(page.locator('.xterm-rows')).to_contain_text('after-idle')
+    page.screenshot(path=str(tmp_path / 'ssh-collapsed-desktop.png'), full_page=True)
+    page.locator('#sshConnectionToggle').click()
+    playwright.expect(page.locator('#sshForm')).to_be_visible()
+    page.locator('#sshDisconnect').click()
+
+
+def test_temporary_output_failures_recover_without_disconnecting_or_replaying_input(page, http_server, manager, peer, monkeypatch):
+    import ssh_terminal
+    original_stream = ssh_terminal.Session.stream
+    monkeypatch.setattr(ssh_terminal.Session, 'stream', lambda self, cursor: original_stream(self, cursor, duration=.2))
+    failures, disconnects = [], []
+    def output(route):
+        if len(failures) < 3:
+            failures.append(True)
+            route.fulfill(status=503, json={'detail': 'temporary output failure'})
+        else:
+            route.continue_()
+    def disconnect(route):
+        disconnects.append(True)
+        route.continue_()
+    page.route('**/ssh/stream?*', output)
+    page.route('**/ssh/disconnect', disconnect)
+    page.goto(http_server.origin + '/ui?view=terminal')
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('网络重试中')
+    page.locator('.xterm-helper-textarea').focus()
+    page.keyboard.type('one-input')
+    playwright.expect(page.locator('.xterm-rows')).to_contain_text('one-input', timeout=15000)
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    assert not disconnects and b''.join(peer['input']) == b'one-input'
+    assert len(failures) == 3 and not next(iter(manager.sessions.values())).closed
+    page.locator('#sshDisconnect').click()
+
+
 def test_real_connection_fingerprint_cancel_then_input_resize_and_disconnect(page, http_server, manager, peer):
     page.goto(http_server.origin + "/ui?view=terminal")
     playwright.expect(page.locator("#sshHost")).to_be_enabled()

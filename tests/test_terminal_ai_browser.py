@@ -1,5 +1,6 @@
 """Real panel -> model mock HTTP and optional SSH -> conversational diagnosis."""
 import json
+import threading
 
 import pytest
 
@@ -12,6 +13,46 @@ ai_manager = ai_tests.manager
 model_server = ai_tests.model_server
 
 playwright = pytest.importorskip('playwright.sync_api')
+
+
+def test_chat_waiting_animation_and_saved_history_after_refresh(page, http_server, ai_manager, model_server, tmp_path):
+    ai_manager.save(ai_tests.config(model_server))
+    model_server.gate = threading.Event()
+    page.goto(http_server.origin + '/ui?view=terminal')
+    page.locator('#sshConnectionToggle').click()
+    assert page.locator('#sshLayout').evaluate("el => el.classList.contains('connections-collapsed')")
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiQuestion').fill('检查这台服务器的状态')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('.tai-loading')).to_be_visible()
+    assert page.locator('.tai-loading .tai-icon').evaluate("el => getComputedStyle(el).animationName") == 'tai-spin'
+    page.screenshot(path=str(tmp_path / 'chat-waiting-desktop.png'), full_page=True)
+    model_server.gate.set()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    playwright.expect(page.locator('.tai-loading')).not_to_be_visible()
+    page.reload()
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiHistoryOpen').click()
+    playwright.expect(page.locator('#aiHistoryDialog')).to_be_visible()
+    playwright.expect(page.locator('.tai-history-row')).to_contain_text('检查这台服务器的状态')
+    page.screenshot(path=str(tmp_path / 'chat-history-desktop.png'), full_page=True)
+    page.locator('.tai-history-row').click()
+    playwright.expect(page.locator('#aiHistoryBar')).to_be_visible()
+    playwright.expect(page.locator('#aiMessages')).to_contain_text('检查容器网络')
+    playwright.expect(page.locator('.tai-loading')).not_to_be_visible()
+    page.locator('#aiQuestion').fill('继续分析')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    assert len(model_server.calls) == 2
+    assert '检查容器网络' in json.dumps(model_server.calls[-1][2], ensure_ascii=False)
+    assert len(ai_manager.history.list()['conversations']) == 1
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / 'chat-history-mobile.png'))
+    page.locator('#aiHistoryOpen').click()
+    playwright.expect(page.locator('#aiHistoryDialog')).to_be_visible()
+    page.screenshot(path=str(tmp_path / 'chat-history-mobile-list.png'))
+    page.get_by_role('button', name='关闭对话历史', exact=True).click()
 
 
 def settings_form(page, http_server, model_server, protocol='openai'):

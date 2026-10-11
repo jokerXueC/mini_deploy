@@ -276,14 +276,28 @@ def test_session_caps_idle_expiry_and_logout(manager, peer):
     with pytest.raises(ssh.SSHError) as error:
         manager.probe("owner", peer["spec"])
     assert error.value.status == 429
-    sessions[0].activity -= 901
-    sessions[1].last_poll -= 61
+    sessions[0].activity -= 86401
+    sessions[1].last_poll -= 86401
     sessions[2].expires = time.time() - 1
     with manager.lock:
         manager._cleanup()
     assert all(s.closed for s in sessions[:3])
     manager.close_owner("owner")
     assert sessions[3].closed and not manager.tickets
+
+
+def test_quiet_or_background_terminal_remains_writable_until_24_hours(manager, peer):
+    session = connect(manager, peer)
+    session.activity -= 23 * 3600
+    session.last_poll -= 23 * 3600
+    with manager.lock:
+        manager._cleanup()
+    assert not session.closed and manager.status('owner')['idle_minutes'] == 1440
+    session.write(base64.b64encode(b'after-idle').decode())
+    deadline = time.monotonic() + 2
+    while b'after-idle' not in b''.join(peer['input']) and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert b'after-idle' in b''.join(peer['input'])
 
 
 def test_profile_strips_credentials_and_deletion_keeps_host_pin_and_business_files(manager, tmp_path):
