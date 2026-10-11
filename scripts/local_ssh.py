@@ -32,7 +32,7 @@ class Handler(agent.Handler):
                     '本地 SSH 实测 · 连接真实服务器；本入口仅提供远程终端。</div>')
                 self._write_html(200, page)
             return
-        if path.startswith("/ui/") or path in {"/ssh", "/ssh/output", "/ssh/stream", "/logout", "/health"}:
+        if path.startswith(("/ui/", "/terminal-ai/")) or path in {"/ssh", "/ssh/output", "/ssh/stream", "/logout", "/health"}:
             super().do_GET()
             return
         if not self._require_auth_json():
@@ -47,7 +47,7 @@ class Handler(agent.Handler):
 
     def do_POST(self):  # noqa: N802
         path = agent._normal_path(urlparse(self.path).path)
-        if path == "/login" or path.startswith("/ssh/"):
+        if path == "/login" or path.startswith(("/ssh/", "/terminal-ai/")):
             super().do_POST()
         else:
             self.close_connection = True
@@ -79,6 +79,9 @@ def configure(directory, port=60678):
     agent.LOG_FILE = directory / "agent.log"
     # Use the normal manager: no test peer restriction or automatic session cookie.
     agent._ssh_manager_instance = None
+    if agent._ai_manager_instance is not None:
+        agent._ai_manager_instance.shutdown()
+    agent._ai_manager_instance = None
     return password_path
 
 
@@ -104,6 +107,8 @@ def main():
     finally:
         if agent._ssh_manager_instance is not None:
             agent._ssh_manager_instance.shutdown()
+        if agent._ai_manager_instance is not None:
+            agent._ai_manager_instance.shutdown()
         server.server_close()
 
 

@@ -16,6 +16,7 @@
     })();
   </script>
   <link rel="stylesheet" href="ui/style.css">
+  <link rel="stylesheet" href="ui/terminal-ai.css">
   <link rel="stylesheet" href="ui/vendor/xterm.css">
 </head>
 <body>
@@ -61,12 +62,13 @@
     </nav>
 
     <div id="terminalView" class="dashboard-view">
+      <div class="tai-page-tools"><span id="aiModelSummary" class="muted">AI 尚未配置</span><button id="aiSettingsOpen" class="ghost-button compact-action" type="button"><i class="tai-icon" data-ai-icon="settings-2"></i>模型设置</button></div>
       <div id="sshSecurityNotice" class="ssh-notice" hidden>
         <strong>请通过 HTTPS 或 SSH 隧道连接</strong>
         <p>当前是公网 HTTP，无法安全传输 SSH 密码、私钥和终端内容。</p>
         <details><summary>没有域名？使用本地隧道</summary><p>在你自己的电脑上执行，将“服务器IP”换成面板所在服务器地址；SSH 端口不同则修改 22。</p><pre>ssh -p 22 -N -L 16868:127.0.0.1:6868 root@服务器IP</pre><p>保持此命令运行，再打开 <a href="http://127.0.0.1:16868/ui?view=terminal" target="_blank" rel="noopener">本地面板</a>。</p></details>
       </div>
-      <div class="ssh-layout">
+      <div id="sshLayout" class="ssh-layout">
         <aside class="ssh-connections">
           <div class="ssh-section-title"><h2>连接</h2><div class="ssh-terminal-actions"><button id="sshConnectionToggle" type="button" class="toolbar-icon" aria-label="展开或收起连接设置" title="展开或收起连接设置" aria-expanded="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><button id="sshNew" type="button" class="toolbar-icon" aria-label="新建连接" title="新建连接（断开当前终端）">+</button></div></div>
           <div id="sshProfiles" class="ssh-profile-list"><p class="muted">暂无保存的连接</p></div>
@@ -85,17 +87,29 @@
         </aside>
         <section class="ssh-workspace" aria-label="远程终端">
           <div class="ssh-terminal-toolbar"><div><span id="sshState" class="ssh-state">未连接</span><span id="sshTarget" class="muted"></span></div><div class="ssh-terminal-actions">
+            <button id="aiAnalyzeOutput" class="ghost-button compact-action" type="button"><i class="tai-icon" data-ai-icon="scan-text"></i>分析输出</button>
+            <button id="aiPanelToggle" class="toolbar-icon" type="button" title="展开诊断助手" aria-label="展开诊断助手" aria-expanded="false"><i class="tai-icon" data-ai-icon="panel-right-open"></i></button>
             <button id="sshCopy" class="toolbar-icon" type="button" title="复制选中内容" aria-label="复制选中内容" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
             <button id="sshPaste" class="toolbar-icon" type="button" title="粘贴" aria-label="粘贴" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3"/></svg></button>
             <button id="sshClear" class="toolbar-icon" type="button" title="清空显示" aria-label="清空显示" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m16 3 5 5M4 20h16M14 5 3 16l5 5L19 10M7 12l5 5"/></svg></button>
             <button id="sshDisconnect" class="ghost-button compact-action" type="button" disabled>断开连接</button>
           </div></div>
           <div id="sshFeedback" class="ssh-feedback" role="status" aria-live="polite">填写服务器地址和登录凭据后连接。</div>
+          <a id="sshRelogin" class="tai-relogin" href="/logout" hidden>退出并重新登录</a>
           <div class="ssh-terminal-surface"><div id="sshEmpty" class="ssh-empty"><span>&gt;_</span><strong>远程终端</strong><p>尚未连接服务器</p></div><div id="sshTerminal" hidden></div></div>
           <div id="sshMobileKeys" class="ssh-mobile-keys" hidden><button type="button" data-ssh-key="\u0003">Ctrl+C</button><button type="button" data-ssh-key="\u0009">Tab</button><button type="button" data-ssh-key="\u001b">Esc</button><button type="button" data-ssh-key="\u001b[A" aria-label="向上">↑</button><button type="button" data-ssh-key="\u001b[B" aria-label="向下">↓</button></div>
           <div class="ssh-terminal-footer"><span>SSH · 加密连接</span><span>空闲 15 分钟自动断开</span></div>
         </section>
+        <aside id="aiPanel" class="tai-panel" aria-label="AI 诊断助手" hidden>
+          <div class="tai-panel-head"><div><h2><i class="tai-icon" data-ai-icon="sparkles"></i>诊断助手</h2><button id="aiPanelModel" type="button" class="tai-model">配置模型</button></div><button id="aiPanelClose" class="toolbar-icon" type="button" aria-label="收起诊断助手" title="收起诊断助手"><i class="tai-icon" data-ai-icon="panel-right-close"></i></button></div>
+          <div class="tai-watch"><span id="aiScopeLabel">按需分析</span><label><span>持续分析</span><input id="aiAuto" type="checkbox" role="switch" aria-label="持续分析"><span class="tai-switch" aria-hidden="true"></span></label></div>
+          <div id="aiMessages" class="tai-messages" aria-live="polite"><div id="aiEmpty" class="tai-empty"><i class="tai-icon" data-ai-icon="scan-text"></i><strong>等待分析</strong><p>配置模型并连接 SSH 后，选择终端片段或分析最近输出。</p></div></div>
+          <form id="aiAskForm" class="tai-compose"><div class="tai-compose-target"><span id="aiTargetLabel">尚未连接 SSH</span><button id="aiStop" type="button" class="tai-text-button" hidden>停止等待</button></div><textarea id="aiQuestion" rows="2" maxlength="2000" aria-label="向诊断助手提问" placeholder="这段报错是什么原因？"></textarea><div class="tai-compose-bottom"><span id="aiFeedback" role="status">分析不会执行服务器命令</span><button id="aiAskSend" class="toolbar-icon tai-send" type="submit" title="发送问题" aria-label="发送问题"><i class="tai-icon" data-ai-icon="arrow-up"></i></button></div></form>
+        </aside>
       </div>
+      <div id="aiBackdrop" class="tai-backdrop" hidden></div>
+      <dialog id="aiSettingsDialog" class="tai-dialog"><div class="tai-dialog-head"><h2>模型设置</h2><button type="button" class="toolbar-icon" data-ai-close aria-label="关闭模型设置" title="关闭模型设置"><i class="tai-icon" data-ai-icon="x"></i></button></div><form id="aiSettingsForm" autocomplete="off"><label>接口类型<select id="aiProtocol"><option value="openai">OpenAI 兼容（含兼容中转服务）</option><option value="anthropic">Anthropic / Claude 原生</option></select></label><label>接口地址<input id="aiBaseUrl" type="url" required maxlength="1024" placeholder="https://api.openai.com/v1" spellcheck="false"></label><p id="aiEndpointHint" class="tai-hint">填写服务商的 Base URL；本机 Ollama 可填 http://127.0.0.1:11434/v1。</p><label>模型名称<input id="aiModel" required maxlength="200" placeholder="服务商提供的模型名称" spellcheck="false"></label><label>API Key<input id="aiKey" type="password" autocomplete="new-password" maxlength="4096" placeholder="输入服务商的 API Key"></label><label class="tai-check"><input id="aiClearKey" type="checkbox">清除已保存的密钥</label><p class="tai-hint">密钥仅保存在面板服务器，不回显。修改时留空会沿用原密钥。</p><p id="aiSettingsFeedback" role="status" class="tai-hint"></p><div class="tai-dialog-actions"><button id="aiTest" class="ghost-button" type="button">测试连接</button><button id="aiSave" class="ghost-button ssh-primary" type="submit">保存设置</button></div></form></dialog>
+      <dialog id="aiPreviewDialog" class="tai-dialog tai-preview-dialog"><div class="tai-dialog-head"><h2>确认分析内容</h2><button type="button" class="toolbar-icon" data-ai-close aria-label="关闭分析预览" title="关闭分析预览"><i class="tai-icon" data-ai-icon="x"></i></button></div><p id="aiPreviewDestination" class="tai-hint"></p><p id="aiPreviewCount" class="tai-hint"></p><pre id="aiPreviewText"></pre><label class="tai-check"><input id="aiConsent" type="checkbox">已检查片段，同意发送给上述模型服务</label><label class="tai-check"><input id="aiContinuousConsent" type="checkbox">持续分析当前连接的新输出，每 30 秒最多一次</label><p class="tai-hint">常见密钥已做脱敏，请检查其他敏感内容。切换连接或离开本页会停止持续分析。</p><div class="tai-dialog-actions"><button type="button" class="ghost-button" data-ai-close>取消</button><button id="aiPreviewSend" type="button" class="ghost-button ssh-primary" disabled>确认发送</button></div></dialog>
       <dialog id="sshFingerprintDialog" class="ssh-fingerprint-dialog"><form method="dialog"><h2 id="sshFingerprintTitle">核对服务器指纹</h2><p id="sshFingerprintMessage"></p><dl><dt>服务器</dt><dd id="sshFingerprintHost"></dd><dt>当前指纹</dt><dd id="sshFingerprintValue"></dd><dt id="sshPreviousLabel" hidden>原指纹</dt><dd id="sshPreviousValue" hidden></dd></dl><details><summary>如何核对？</summary><p>通过云厂商控制台或可信的现有 SSH 连接，在目标服务器执行：</p><pre>for key in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$key" -E sha256; done</pre><p>将输出与上方 SHA256 指纹比对。</p></details><label class="ssh-trust-check"><input id="sshTrustCheck" type="checkbox">已通过可信渠道核对指纹</label><div class="ssh-dialog-actions"><button value="cancel" class="ghost-button">取消</button><button id="sshTrustConfirm" value="trust" class="ghost-button ssh-primary" disabled>信任并连接</button></div></form></dialog>
     </div>
     <div id="requestsView" class="dashboard-view">
@@ -565,5 +579,6 @@
   <script src="ui/vendor/xterm.js"></script>
   <script src="ui/vendor/addon-fit.js"></script>
   <script src="ui/ssh-terminal.js"></script>
+  <script src="ui/terminal-ai.js"></script>
 </body>
 </html>

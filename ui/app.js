@@ -504,6 +504,8 @@ function setView(view) {
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
   $('panelSubtitle').textContent = subtitle;
+  $('liveIndicator')?.classList.toggle('terminal-status-hidden', activeView === 'terminal');
+  $('updatedAt')?.classList.toggle('terminal-status-hidden', activeView === 'terminal');
   clearServerRefresh();
   clearEventsRefresh();
   if (activeView === 'server') {
@@ -516,6 +518,7 @@ function setView(view) {
   else if (activeView === 'requests') window.NginxRequests?.refresh();
   if (activeView !== 'events') window.WebsiteMonitoring?.refresh();
   window.SSHTerminal?.viewChanged(activeView);
+  window.TerminalAI?.viewChanged(activeView);
 }
 
 
@@ -1657,7 +1660,7 @@ $('refreshBtn').addEventListener('click', () => {
   else if (activeView === 'notify') refreshNotificationConfig();
   else if (activeView === 'certificates') refreshCertificates();
   else if (activeView === 'requests') window.NginxRequests?.refresh();
-  else if (activeView === 'terminal') window.SSHTerminal?.viewChanged('terminal');
+  else if (activeView === 'terminal') { window.SSHTerminal?.viewChanged('terminal'); window.TerminalAI?.viewChanged('terminal'); }
 });
 $('serverViewTab').addEventListener('click', () => setView('server'));
 $('eventsViewTab')?.addEventListener('click', () => setView('events'));

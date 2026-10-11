@@ -22,6 +22,7 @@ the product.
 - Request collection from supported Nginx/Caddy logs.
 - Independent Docker request gateways for HTTP, SSE and WebSocket traffic.
 - Remote SSH terminals with password/private-key authentication, host fingerprint verification and saved addresses; HTTPS or a local SSH tunnel is required.
+- Optional terminal AI diagnostics with OpenAI-compatible or native Claude APIs: configure before connecting, preview output before sending, and review suggested commands before execution.
 
 Business services must already be running. There is no repository onboarding,
 deployment script form, push-to-deploy WebHook, build pipeline, application rollback

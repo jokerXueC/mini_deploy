@@ -55,6 +55,7 @@ import cpu_metrics
 import sqlite3
 import docker_mirrors
 import ssh_terminal
+import terminal_ai
 
 try:
     import fcntl
@@ -2564,6 +2565,8 @@ def _normal_path(path: str) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "terminal-ai.js": "application/javascript; charset=utf-8",
+    "terminal-ai.css": "text/css; charset=utf-8",
     "previews/ssh-ai/index.html": "text/html; charset=utf-8",
     "previews/ssh-ai/preview.js": "application/javascript; charset=utf-8",
     "previews/ssh-ai/preview.css": "text/css; charset=utf-8",
@@ -2641,6 +2644,19 @@ def _render_ui() -> str:
 
 _ssh_manager_instance = None
 _ssh_manager_lock = threading.Lock()
+_ai_manager_instance = None
+_ai_manager_lock = threading.Lock()
+
+
+def _ai_manager():
+    global _ai_manager_instance
+    with _ai_manager_lock:
+        directory = STATE_FILE.parent / "ai"
+        if _ai_manager_instance is None or _ai_manager_instance.directory != directory:
+            if _ai_manager_instance is not None:
+                _ai_manager_instance.shutdown()
+            _ai_manager_instance = terminal_ai.Manager(directory)
+        return _ai_manager_instance
 
 
 def _ssh_manager():
@@ -2654,6 +2670,55 @@ def _ssh_manager():
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _handle_terminal_ai(self, path, parsed):
+        if not self._require_auth_json():
+            return
+        try:
+            owner = terminal_ai.owner(self._session_cookie_value())
+            manager = _ai_manager()
+            if self.command == "GET" and path == "/terminal-ai/settings":
+                self._write_json(200, {**manager.settings(), "secure": self._ssh_secure(),
+                                       "csrf_token": self._csrf_token_for_request()})
+                return
+            if not self._ssh_secure():
+                self.close_connection = True
+                raise terminal_ai.AIError("模型密钥和终端分析需要 HTTPS 或本地 SSH 隧道。", 403)
+            if self.command == "GET" and path == "/terminal-ai/jobs":
+                key = parse_qs(parsed.query).get("id", [""])[0]
+                self._write_json(200, manager.job(owner, key))
+                return
+            if self.command != "POST":
+                raise terminal_ai.AIError("不支持的模型操作。", 404)
+            origin = urlparse(self.headers.get("Origin", ""))
+            if origin.scheme not in {"http", "https"} or origin.netloc != self.headers.get("Host", ""):
+                raise terminal_ai.AIError("模型请求来源无效，请刷新面板重试。", 403)
+            data = _read_json_body(self, max_bytes=48 * 1024)
+            if path == "/terminal-ai/settings":
+                result = manager.save(data)
+                _audit_event("ai_settings_saved", actor=self.client_address[0], success=True)
+            elif path == "/terminal-ai/test":
+                result = manager.submit(owner, action="test", data=data)
+            elif path in {"/terminal-ai/prepare", "/terminal-ai/analyze"}:
+                session_id = str(data.get("session_id", ""))
+                session = _ssh_manager().session(self._ssh_owner(), session_id)
+                if path == "/terminal-ai/prepare":
+                    selected = data.get("selection")
+                    if selected is not None and (not isinstance(selected, str) or len(selected) > 16000):
+                        raise terminal_ai.AIError("选中片段超过 16000 字，请缩小选择范围。")
+                    with session.condition:
+                        output = selected if selected else b"".join(chunk for _, chunk in session.chunks).decode(
+                            "utf-8", errors="replace")
+                    result = manager.prepare(owner, session_id, output)
+                else:
+                    result = manager.submit(owner, action="analyze", data=data, session_id=session_id)
+            else:
+                raise terminal_ai.AIError("不支持的模型操作。", 404)
+            self._write_json(200, result)
+        except (terminal_ai.AIError, ssh_terminal.SSHError, ValueError, OSError) as exc:
+            detail = str(exc) if isinstance(exc, (terminal_ai.AIError, ssh_terminal.SSHError)) else (
+                "无法读写模型配置，请检查目录权限；原文件已保留。")
+            self._write_json(getattr(exc, "status", 400), {"error": "ai_failed", "detail": detail})
+
     def _ssh_owner(self):
         cookie = self._session_cookie_value()
         if len(base64.urlsafe_b64decode(cookie).decode().split(":")) != 3:
@@ -2913,6 +2978,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path.startswith("/terminal-ai/"):
+            self._handle_terminal_ai(path, parsed)
+            return
         if path == "/ssh" or path.startswith("/ssh/"):
             self._handle_ssh(path, parsed)
             return
@@ -3070,6 +3138,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._write_json(200, {"events": _audit_tail(lines=lines), "line_limit": lines})
             return
         if path == "/logout":
+            if self._authenticated() and _ai_manager_instance is not None:
+                _ai_manager_instance.revoke(terminal_ai.owner(self._session_cookie_value()))
             if self._authenticated() and _ssh_manager_instance is not None:
                 cookie = self._session_cookie_value()
                 expires = int(base64.urlsafe_b64decode(cookie).decode().split(":", 1)[0])
@@ -3081,6 +3151,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path.startswith("/terminal-ai/"):
+            self._handle_terminal_ai(path, parsed)
+            return
         if path.startswith("/ssh/"):
             self._handle_ssh(path, parsed)
             return
@@ -3614,6 +3687,8 @@ def main() -> None:
         history_stop.set()
         if _ssh_manager_instance is not None:
             _ssh_manager_instance.shutdown()
+        if _ai_manager_instance is not None:
+            _ai_manager_instance.shutdown()
         docker_event_worker.join(timeout=5)
         history_worker.join(timeout=10)
         server.server_close()

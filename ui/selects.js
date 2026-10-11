@@ -34,7 +34,10 @@ window.AppSelects = (() => {
     const option = state.menu.children[index];
     if (option) {
       state.button.setAttribute('aria-activedescendant', option.id);
-      option.scrollIntoView({block: 'nearest'});
+      if (option.offsetTop < state.menu.scrollTop) state.menu.scrollTop = option.offsetTop;
+      else if (option.offsetTop + option.offsetHeight > state.menu.scrollTop + state.menu.clientHeight) {
+        state.menu.scrollTop = option.offsetTop + option.offsetHeight - state.menu.clientHeight;
+      }
     }
   }
 
@@ -121,12 +124,14 @@ window.AppSelects = (() => {
     button.setAttribute('aria-describedby', error.id);
     root.append(button, error);
     select.insertAdjacentElement('afterend', root);
-    document.body.appendChild(menu);
+    const dialog = select.closest('dialog');
+    (dialog || document.body).appendChild(menu);
     select.classList.add('form-select-native');
     select.tabIndex = -1;
     select.setAttribute('aria-hidden', 'true');
     const state = {select, root, button, menu, error, active: 0, search: '', searchAt: 0};
     controls.set(select, state);
+    dialog?.addEventListener('close', () => { if (opened === state) close(); });
     button.addEventListener('click', event => { event.preventDefault(); opened === state ? close() : open(state); });
     button.addEventListener('keydown', event => {
       if (event.key === 'Escape') { event.preventDefault(); close(); return; }

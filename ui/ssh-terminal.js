@@ -46,6 +46,7 @@
     el('sshMobileKeys').hidden = !session;
     el('sshNew').disabled = busy;
     el('sshProfiles').querySelectorAll('button').forEach(button => { button.disabled = busy || !secure; });
+    window.dispatchEvent(new CustomEvent('ssh-session-change'));
   }
 
   function renderProfiles() {
@@ -84,6 +85,7 @@
     loading = true;
     try {
       const data = await api('/ssh');
+      el('sshRelogin').hidden = true;
       token = data.csrf_token; profiles = data.profiles; secure = data.secure && window.isSecureContext; available = data.available;
       el('sshSecurityNotice').hidden = secure;
       renderProfiles();
@@ -100,7 +102,7 @@
         button.addEventListener('click', async () => { try { await api('/ssh/disconnect', {id: item.id}); await refresh(); } catch (error) { feedback(error.message); } });
         row.append(address, button); el('sshSessions').append(row);
       }
-    } catch (error) { secure = false; feedback(error.message); }
+    } catch (error) { secure = false; feedback(error.message); el('sshRelogin').hidden = error.status !== 401; }
     finally { loading = false; controls(); }
   }
 
@@ -348,6 +350,15 @@
     credentials();
   });
   window.addEventListener('beforeunload', event => { if (session || busy) { event.preventDefault(); event.returnValue = ''; } });
-  window.SSHTerminal = {viewChanged(view) { if (view === 'terminal') { refresh(); requestAnimationFrame(resize); } }};
+  window.SSHTerminal = {
+    context() { return {session_id: session, selection: terminal?.getSelection() || '', cursor,
+                       target: session ? el('sshTarget').textContent : ''}; },
+    insertCommand(command) {
+      if (!session || !terminal || /[\x00-\x1f\x7f]/.test(command) || command.length > 3000) return false;
+      if (!confirm(`将以下命令填入当前终端，不自动按回车。检查后自行执行：\n\n${command}`)) return false;
+      terminal.paste(command); terminal.focus(); return true;
+    },
+    viewChanged(view) { if (view === 'terminal') { refresh(); requestAnimationFrame(resize); } }
+  };
   if (activeView === 'terminal') window.SSHTerminal.viewChanged('terminal');
 })();
