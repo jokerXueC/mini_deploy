@@ -91,6 +91,8 @@ def test_private_key_upload_and_untrusted_http_disable_credentials(page, http_se
     page.locator("#sshDisconnect").click()
     page.route("**/ssh", lambda route: route.fulfill(json={"available": True, "secure": False,
         "profiles": [], "sessions": [], "csrf_token": "token"}))
+    page.route("**/terminal-ai/settings", lambda route: route.fulfill(json={"configured": False, "secure": False,
+        "http_enabled": False, "csrf_token": "token"}))
     page.goto(http_server.origin + "/ui?view=terminal")
     playwright.expect(page.locator("#sshSecurityNotice")).to_be_visible()
     playwright.expect(page.locator("#sshHost")).to_be_disabled()

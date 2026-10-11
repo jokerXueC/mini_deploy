@@ -2711,6 +2711,13 @@ class Handler(BaseHTTPRequestHandler):
                 key = parse_qs(parsed.query).get("id", [""])[0]
                 self._write_json(200, manager.job(owner, key))
                 return
+            if self.command == "GET" and path == "/terminal-ai/access":
+                session_id = parse_qs(parsed.query).get("session_id", [""])[0]
+                session = _ssh_manager().session(self._ssh_owner(), session_id)
+                if session.closed or time.time() >= session.expires:
+                    raise terminal_ai.AIError("SSH 连接已结束，请重新连接。", 410)
+                self._write_json(200, manager.access(owner, session_id))
+                return
             if self.command != "POST":
                 raise terminal_ai.AIError("不支持的模型操作。", 404)
             origin = urlparse(self.headers.get("Origin", ""))
@@ -2722,6 +2729,48 @@ class Handler(BaseHTTPRequestHandler):
                 _audit_event("ai_settings_saved", actor=self.client_address[0], success=True)
             elif path == "/terminal-ai/test":
                 result = manager.submit(owner, action="test", data=data)
+            elif path == "/terminal-ai/chat":
+                session_id = str(data.get("session_id") or "")
+                output = ""
+                executor, validate, target = None, None, ""
+                if session_id:
+                    session = _ssh_manager().session(self._ssh_owner(), session_id)
+                    spec = getattr(session, "spec", {})
+                    target = f"{spec.get('username', '')}@{spec.get('host', '')}:{spec.get('port', 22)}"
+                    def validate():
+                        current = _ssh_manager().session(owner, session_id)
+                        if getattr(current, "closed", False) or time.time() >= getattr(current, "expires", float('inf')):
+                            raise terminal_ai.AIError("SSH 连接已结束或登录已过期，任务已停止。", 410)
+                        return current
+                    def executor(plan, cancel):
+                        success = False
+                        try:
+                            result = validate().execute_tool(plan["command"], cancel)
+                            success = result.get("exit_code") == 0
+                            return result
+                        finally:
+                            _audit_event("ai_tool_executed", actor=self.client_address[0],
+                                         target=f"{target} / {plan['name']}", success=success)
+                    if data.get("include_terminal") is True:
+                        with session.condition:
+                            output = b"".join(chunk for _, chunk in session.chunks).decode("utf-8", errors="replace")
+                elif data.get("include_terminal") is True:
+                    raise terminal_ai.AIError("请先连接 SSH，或关闭附带终端输出。")
+                result = manager.submit(owner, action="chat", data=data, session_id=session_id, output=output,
+                                        executor=executor, validate=validate, target=target)
+            elif path == "/terminal-ai/access":
+                session_id = str(data.get("session_id") or "")
+                session = _ssh_manager().session(self._ssh_owner(), session_id)
+                if session.closed or time.time() >= session.expires:
+                    raise terminal_ai.AIError("SSH 连接已结束或登录已过期。", 410)
+                result = manager.set_access(owner, session_id, data)
+                _audit_event("ai_access_changed", actor=self.client_address[0], target=result["mode"], success=True)
+            elif path == "/terminal-ai/approve":
+                result = manager.approve(owner, data.get("id"), data.get("approval_id"), data.get("approve"))
+                _audit_event("ai_operation_approved" if data.get("approve") else "ai_operation_rejected",
+                             actor=self.client_address[0], target=str(data.get("id") or ""), success=True)
+            elif path == "/terminal-ai/cancel":
+                result = manager.cancel(owner, data.get("id"))
             elif path in {"/terminal-ai/prepare", "/terminal-ai/analyze"}:
                 session_id = str(data.get("session_id", ""))
                 session = _ssh_manager().session(self._ssh_owner(), session_id)
@@ -2809,6 +2858,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == "/ssh/resize":
                     session.resize(data)
                 else:
+                    if _ai_manager_instance is not None:
+                        _ai_manager_instance.cancel_session(owner, session.id)
                     session.close("连接已断开。")
                 result = {"ok": True}
             else:

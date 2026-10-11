@@ -199,6 +199,61 @@ class Session:
             except Exception:
                 raise SSHError("调整终端尺寸失败，请检查连接。", 502) from None
 
+    def execute_tool(self, command, cancel, *, timeout=20, max_bytes=24000):
+        """Run a backend-built command on a separate channel, never in the PTY."""
+        if self.closed or time.time() >= self.expires or cancel.is_set():
+            raise SSHError("连接已关闭、登录已过期或任务已停止。", 410)
+        channel, finished = None, threading.Event()
+        deadline = time.monotonic() + timeout
+        output, truncated = bytearray(), False
+        try:
+            channel = self.transport.open_session(timeout=min(5, timeout))
+            def watch():
+                while not finished.wait(.05):
+                    if cancel.is_set() or self.closed or time.time() >= self.expires or time.monotonic() >= deadline:
+                        channel.close()
+                        return
+            threading.Thread(target=watch, name="ssh-tool-watch", daemon=True).start()
+            if cancel.is_set() or self.closed:
+                raise SSHError("任务已停止或连接已关闭。", 410)
+            channel.settimeout(.2)
+            channel.exec_command(command)
+            channel.shutdown_write()
+            while True:
+                if cancel.is_set() or self.closed or time.time() >= self.expires:
+                    raise SSHError("任务已停止或连接已关闭；已提交的操作可能仍在远端执行。", 410)
+                if time.monotonic() >= deadline:
+                    raise SSHError("服务器检查超时；已提交的操作可能仍在远端执行，请核对状态后再操作。", 504)
+                read = False
+                for ready, receive in ((channel.recv_ready, channel.recv), (channel.recv_stderr_ready, channel.recv_stderr)):
+                    if ready():
+                        piece = receive(8192)
+                        remaining = max_bytes - len(output)
+                        output.extend(piece[:remaining])
+                        truncated |= len(piece) > remaining
+                        read = True
+                if truncated:
+                    break
+                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    break
+                if not read:
+                    cancel.wait(.03)
+            self.activity = time.monotonic()
+            return {"output": output.decode("utf-8", errors="replace"), "truncated": truncated,
+                    "exit_code": channel.recv_exit_status() if channel.exit_status_ready() else None}
+        except SSHError:
+            raise
+        except Exception:
+            if cancel.is_set() or self.closed:
+                raise SSHError("任务已停止或连接已关闭。", 410) from None
+            if time.monotonic() >= deadline:
+                raise SSHError("服务器检查超时，请核对远端状态。", 504) from None
+            raise SSHError("SSH 工具执行失败，请检查连接与账号权限；操作不会自动重试。", 502) from None
+        finally:
+            finished.set()
+            if channel is not None:
+                channel.close()
+
 
 class Manager:
     def __init__(self, directory: Path, audit=None):

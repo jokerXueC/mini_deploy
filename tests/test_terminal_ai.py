@@ -24,6 +24,8 @@ def model_server():
             if state.gate:
                 state.gate.wait(3)
             result = state.content
+            if callable(result):
+                result = result(body, len(state.calls))
             if result is None:
                 result = ({'content': [{'type': 'text', 'text': '检查容器网络\n```sh\ndocker ps\n```'}],
                            'usage': {'input_tokens': 10, 'output_tokens': 5}} if self.path.endswith('/messages')
@@ -183,7 +185,7 @@ def test_job_ownership_concurrency_and_revocation(manager, model_server):
     manager.revoke('owner')
     with pytest.raises(ai.AIError):
         manager.job('owner', submitted['id'])
-    assert manager.jobs[submitted['id']]['status'] == 'running'
+    assert manager.jobs[submitted['id']]['status'] == 'cancelling'
     model_server.gate.set()
 
 
@@ -225,3 +227,136 @@ def test_installer_publishes_ai_backend_and_real_ui_assets():
     assert 'terminal_ai.py' in (root / 'install.sh').read_text(encoding='utf-8')
     assert (agent.UI_DIR / 'terminal-ai.js').exists()
     assert 'terminal-ai.js' in agent.UI_ASSET_TYPES
+
+
+def chat_data(manager, question='为什么连接失败？', **kwargs):
+    return {'consent': True, 'provider': manager.settings(), 'question': question, **kwargs}
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_chat_followup_retains_sanitized_context_and_new_chat_is_independent(manager, model_server, protocol):
+    manager.save(config(model_server, protocol))
+    first = manager.submit('owner', action='chat', session_id='ssh', output='ERROR DNS failed\npassword=secret-value',
+                           data=chat_data(manager, 'test-key-only 连接失败怎么办？'))
+    result = finished(manager, 'owner', first['id'])
+    assert result['status'] == 'done' and result['context']['lines'] == 2
+    assert not any(k.startswith('_') for k in result)
+    second = manager.submit('owner', action='chat', session_id='ssh', data=chat_data(
+        manager, '你刚才建议的命令是什么意思？', conversation_id=first['conversation_id']))
+    assert finished(manager, 'owner', second['id'])['status'] == 'done'
+    path, _, payload = model_server.calls[-1]
+    messages = [m for m in payload['messages'] if m['role'] != 'system']
+    assert [m['role'] for m in messages] == ['user', 'assistant', 'user']
+    assert 'DNS failed' in messages[0]['content'] and 'docker ps' in messages[1]['content']
+    assert '是什么意思' in messages[-1]['content']
+    assert 'secret-value' not in json.dumps(payload) and 'test-key-only' not in json.dumps(payload)
+    assert path.endswith('/messages' if protocol == 'anthropic' else '/chat/completions')
+    third = manager.submit('owner', action='chat', data=chat_data(manager, '什么是 Docker？'))
+    assert finished(manager, 'owner', third['id'])['context']['characters'] == 0
+    assert third['conversation_id'] != first['conversation_id']
+    messages = [m for m in model_server.calls[-1][2]['messages'] if m['role'] != 'system']
+    assert len(messages) == 1 and 'DNS failed' not in messages[0]['content']
+
+
+def test_chat_rejects_invalid_question_consent_destination_and_foreign_scope(manager, model_server):
+    manager.save(config(model_server))
+    for values in [{'consent': False}, {'provider': {}}, {'question': ''}, {'question': ' '},
+                   {'question': 42}, {'question': 'x' * 2001}, {'conversation_id': 'unknown'}]:
+        with pytest.raises(ai.AIError):
+            manager.submit('owner', action='chat', data=chat_data(manager, **values))
+    assert not model_server.calls
+    first = manager.submit('owner', action='chat', session_id='ssh', data=chat_data(manager))
+    finished(manager, 'owner', first['id'])
+    followup = chat_data(manager, conversation_id=first['conversation_id'])
+    with pytest.raises(ai.AIError) as error:
+        manager.submit('other', action='chat', session_id='ssh', data=followup)
+    assert error.value.status == 404
+    with pytest.raises(ai.AIError) as error:
+        manager.submit('owner', action='chat', session_id='different-ssh', data=followup)
+    assert error.value.status == 409
+    manager.save({**config(model_server), 'api_key': 'changed-key'})
+    with pytest.raises(ai.AIError) as error:
+        manager.submit('owner', action='chat', session_id='ssh', data=chat_data(
+            manager, conversation_id=first['conversation_id']))
+    assert error.value.status == 409
+    assert len(model_server.calls) == 1
+
+
+def test_chat_failures_and_logout_never_enter_history(manager, model_server):
+    manager.save(config(model_server))
+    model_server.status = 500
+    first = manager.submit('owner', action='chat', data=chat_data(manager, '失败的问题'))
+    assert finished(manager, 'owner', first['id'])['status'] == 'failed'
+    assert not manager.conversations[first['conversation_id']]['messages']
+    model_server.status = 200
+    model_server.gate = threading.Event()
+    second = manager.submit('owner', action='chat', data=chat_data(manager,
+                            conversation_id=first['conversation_id']))
+    manager.revoke('owner')
+    assert not manager.conversations
+    model_server.gate.set()
+    deadline = time.monotonic() + 4
+    while manager.jobs[second['id']]['_active'] and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert manager.jobs[second['id']]['status'] == 'cancelled'
+    assert 'text' not in manager.jobs[second['id']] and '_user_content' not in manager.jobs[second['id']]
+    assert not manager.conversations
+
+
+def test_chat_memory_bounds_eviction_and_expiry(manager, model_server, monkeypatch):
+    manager.save(config(model_server))
+    seen = []
+    monkeypatch.setattr(ai, 'complete', lambda config, messages: seen.append(messages) or {'text': '回答' * 4000, 'usage': {}})
+    conversation = ''
+    for i in range(66):
+        result = manager.submit('owner', action='chat', output='日志\n' * 8000,
+                                data=chat_data(manager, str(i), conversation_id=conversation))
+        conversation = result['conversation_id']
+        assert finished(manager, 'owner', result['id'])['status'] == 'done'
+    history = manager.conversations[conversation]
+    assert len(history['messages']) % 2 == 0 and len(history['messages']) <= 12
+    assert sum(len(m['content']) for m in history['messages']) <= 32000
+    assert len(manager.jobs) <= 64
+    assert all(len(m['content']) < 18100 for m in seen[-1])
+    for i in range(25):
+        result = manager.submit('owner', action='chat', data=chat_data(manager, str(i)))
+        finished(manager, 'owner', result['id'])
+    assert len(manager.conversations) == 24 and conversation not in manager.conversations
+    manager.conversations[result['conversation_id']]['updated'] -= 1801
+    with pytest.raises(ai.AIError) as error:
+        manager.submit('owner', action='chat', data=chat_data(manager, conversation_id=result['conversation_id']))
+    assert error.value.status == 404
+
+
+def test_chat_route_checks_access_and_optional_owned_ssh_output(http_server, manager, model_server, monkeypatch):
+    manager.save(config(model_server))
+    data = chat_data(manager)
+    assert request(http_server, 'POST', '/terminal-ai/chat', data, authenticated=False)[0] == 401
+    assert request(http_server, 'POST', '/terminal-ai/chat', data, csrf=False)[0] == 403
+    assert request(http_server, 'POST', '/terminal-ai/chat', data, origin=False)[0] == 403
+    seen = []
+    session = SimpleNamespace(condition=threading.Condition(), chunks=[(1, b'ERROR DNS failed\npassword=private')])
+    def owned(owner, key):
+        seen.append((owner, key))
+        if key != 'allowed':
+            raise ai.AIError('not owned', 404)
+        return session
+    monkeypatch.setattr(agent, '_ssh_manager', lambda: SimpleNamespace(session=owned))
+    assert request(http_server, 'POST', '/terminal-ai/chat', {**data, 'include_terminal': True})[0] == 400
+    assert request(http_server, 'POST', '/terminal-ai/chat', {**data, 'session_id': 'other'})[0] == 404
+    status, result = request(http_server, 'POST', '/terminal-ai/chat', data)
+    assert status == 200
+    finished(manager, ai.owner(http_server.cookie), result['id'])
+    assert len(seen) == 1
+    assert 'DNS failed' not in json.dumps(model_server.calls[-1][2])
+    for include in [True, False]:
+        status, result = request(http_server, 'POST', '/terminal-ai/chat', {
+            **data, 'session_id': 'allowed', 'include_terminal': include})
+        assert status == 200
+        done = finished(manager, ai.owner(http_server.cookie), result['id'])
+        assert (done['context']['characters'] > 0) is include
+        payload = json.dumps(model_server.calls[-1][2])
+        assert ('DNS failed' in payload) is include and 'private' not in payload
+    assert seen[-1][0] == ai.owner(http_server.cookie) and len(session.chunks) == 1
+    monkeypatch.setattr(agent.Handler, '_ssh_secure', lambda self: False)
+    assert request(http_server, 'POST', '/terminal-ai/chat', data)[0] == 403

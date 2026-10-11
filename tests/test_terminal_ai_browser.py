@@ -1,10 +1,11 @@
-"""Real panel -> model mock HTTP and SSH -> consent -> diagnosis flows."""
+"""Real panel -> model mock HTTP and optional SSH -> conversational diagnosis."""
 import json
 
 import pytest
 
 import agent
 import test_terminal_ai as ai_tests
+import test_terminal_agent as agent_tests
 from test_ssh_browser import page as page, fill
 from test_ssh_terminal import http_server as http_server, runtime as runtime, manager as manager, peer as peer
 ai_manager = ai_tests.manager
@@ -43,7 +44,7 @@ def test_claude_configuration_and_connection_test_without_ssh(page, http_server,
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
-def test_ssh_analysis_requires_preview_and_renders_model_as_text(page, http_server, manager, peer, ai_manager, model_server):
+def test_ssh_chat_opens_without_sending_then_followup_and_optional_output(page, http_server, manager, peer, ai_manager, model_server, tmp_path):
     model_server.content = {'choices': [{'message': {'content': '检查输出 <img src=x onerror=alert(1)>\n```sh\ndocker ps\n```'}}]}
     settings_form(page, http_server, model_server)
     page.get_by_role('button', name='保存设置', exact=True).click()
@@ -55,19 +56,119 @@ def test_ssh_analysis_requires_preview_and_renders_model_as_text(page, http_serv
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
     playwright.expect(page.locator('.xterm-rows')).to_contain_text('本地测试终端')
-    page.locator('#aiAnalyzeOutput').click()
-    playwright.expect(page.locator('#aiPreviewDialog')).to_be_visible()
-    playwright.expect(page.locator('#aiPreviewSend')).to_be_disabled()
+    page.locator('#aiChatOpen').click()
+    playwright.expect(page.locator('#aiPanel')).to_be_visible()
+    playwright.expect(page.locator('#aiQuestion')).to_be_focused()
     assert not model_server.calls
-    page.locator('#aiConsent').check()
-    page.locator('#aiPreviewSend').click()
+    assert page.locator('#aiPreviewDialog').count() == 0
+    page.locator('#aiQuestion').fill('分析当前终端情况')
+    page.locator('#aiAskSend').click()
     playwright.expect(page.locator('#aiMessages')).to_contain_text('docker ps', timeout=10000)
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
     assert page.locator('#aiMessages img').count() == 0
     assert len(model_server.calls) == 1 and 'safe-password' not in json.dumps(model_server.calls[0][2])
+    assert '本地测试终端' in json.dumps(model_server.calls[0][2], ensure_ascii=False)
+    page.locator('#aiQuestion').fill('为什么建议 docker ps？')
+    page.locator('#aiQuestion').press('Enter')
+    playwright.expect(page.locator('#aiMessages .tai-entry')).to_have_count(2)
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    assert [m['role'] for m in model_server.calls[-1][2]['messages']] == ['system', 'user', 'assistant', 'user']
+    page.screenshot(path=str(tmp_path / 'chat-desktop.png'), full_page=True)
+    page.locator('#aiNewChat').click()
+    playwright.expect(page.locator('#aiEmpty')).to_be_visible()
+    page.locator('#aiShareOutput').uncheck()
+    page.locator('#aiQuestion').fill('什么是容器网络？')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    messages = model_server.calls[-1][2]['messages']
+    assert len(messages) == 2 and '本地测试终端' not in json.dumps(messages, ensure_ascii=False)
     assert 'PRIVATE KEY' not in ai_manager.path.read_text(encoding='utf-8')
     page.set_viewport_size({'width': 390, 'height': 844})
     playwright.expect(page.locator('#aiPanel')).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / 'chat-mobile.png'), full_page=True)
+    page.locator('#aiQuestion').fill('这是下一条问题\n继续补充说明')
+    assert len(model_server.calls) == 3
+    page.screenshot(path=str(tmp_path / 'chat-mobile-viewport.png'))
+    page.locator('#aiPanelClose').click()
+    page.locator('#sshDisconnect').click()
+
+
+def test_general_chat_does_not_require_ssh_and_preserves_unsent_question(page, http_server, ai_manager, model_server):
+    page.goto(http_server.origin + '/ui?view=terminal')
+    page.locator('#aiChatOpen').click()
+    playwright.expect(page.locator('#aiEmpty')).to_be_visible()
+    page.locator('#aiQuestion').fill('Docker 的网络怎么用？')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('#aiSettingsDialog')).to_be_visible()
+    playwright.expect(page.locator('#aiQuestion')).to_have_value('Docker 的网络怎么用？')
+    assert not model_server.calls
+    page.locator('#aiBaseUrl').fill(model_server.origin + '/v1')
+    page.locator('#aiModel').fill('test-model')
+    page.locator('#aiKey').fill('test-key-only')
+    page.locator('#aiSave').click()
+    playwright.expect(page.locator('#aiSettingsDialog')).not_to_be_visible()
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    playwright.expect(page.locator('#sshState')).to_have_text('未连接')
+    playwright.expect(page.locator('#aiTargetLabel')).to_have_text('普通对话')
+    playwright.expect(page.locator('#aiShareOutput')).to_be_disabled()
+    assert len(model_server.calls) == 1 and len(model_server.calls[0][2]['messages']) == 2
+
+
+@pytest.mark.parametrize('protocol,approve', [('openai', True), ('anthropic', False)])
+def test_agent_permission_dialog_progress_and_actual_operation_approval(page, http_server, manager, peer, ai_manager, model_server, tmp_path, protocol, approve):
+    model_server.content = lambda body, n: (
+        agent_tests.tool_response(protocol, 'list_containers', {}) if n == 1 else
+        agent_tests.tool_response(protocol, 'restart_service', {'service': 'nginx'}, 'call_two') if n == 2 else
+        agent_tests.answer(protocol))
+    settings_form(page, http_server, model_server, protocol)
+    page.locator('#aiSave').click()
+    playwright.expect(page.locator('#aiSettingsDialog')).not_to_be_visible()
+    playwright.expect(page.locator('#sshHost')).to_be_enabled()
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    playwright.expect(page.locator('#sshFingerprintDialog')).to_be_visible(timeout=10000)
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    page.locator('#aiChatOpen').click()
+    permission = page.get_by_role('combobox', name='操作权限', exact=True)
+    playwright.expect(permission).to_be_enabled()
+    permission.click()
+    page.get_by_role('option', name='自动操作', exact=True).click()
+    playwright.expect(page.locator('#aiAccessDialog')).to_be_visible()
+    playwright.expect(page.locator('#aiAccessConfirm')).to_be_disabled()
+    assert all(p['mode'] != 'auto' for p in ai_manager.permissions.values())
+    page.get_by_role('button', name='取消 AI 授权', exact=True).click()
+    playwright.expect(permission).to_contain_text('只读检查')
+    permission.click()
+    page.get_by_role('option', name='修改需确认', exact=True).click()
+    page.locator('#aiAccessConsent').check()
+    page.locator('#aiAccessConfirm').click()
+    playwright.expect(page.locator('#aiAccessDialog')).not_to_be_visible()
+    playwright.expect(permission).to_contain_text('修改需确认')
+    page.locator('#aiQuestion').fill('检查容器状态，必要时重启 nginx')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('.tai-approval')).to_be_visible(timeout=10000)
+    playwright.expect(page.locator('.tai-steps')).to_contain_text('已完成')
+    playwright.expect(page.locator('.tai-approval')).to_contain_text('nginx.service')
+    assert len(peer['exec']) == 1 and b'docker ps' in peer['exec'][0]
+    page.screenshot(path=str(tmp_path / 'agent-approval-desktop.png'), full_page=True)
+    page.locator('#themeToggleBtn').click()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.wait_for_function("!document.documentElement.matches('.theme-reveal-light, .theme-reveal-dark')")
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / 'agent-approval-mobile.png'))
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.screenshot(path=str(tmp_path / 'agent-approval-alternate-theme.png'), full_page=True)
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.get_by_role('button', name='同意执行' if approve else '拒绝', exact=True).click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)
+    assert len(peer['exec']) == (2 if approve else 1)
+    playwright.expect(page.locator('.tai-steps')).to_contain_text('已完成' if approve else '未执行')
+    assert len(model_server.calls) == 3
+    assert not peer['input']
     page.locator('#aiPanelClose').click()
     page.locator('#sshDisconnect').click()
 
@@ -126,6 +227,13 @@ def test_real_insecure_http_requires_confirmation_then_supports_claude_and_ssh(p
     page.locator('.xterm-helper-textarea').focus()
     page.keyboard.type('http-input')
     playwright.expect(page.locator('.xterm-rows')).to_contain_text('http-input')
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiQuestion').fill('帮我看看终端')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)
+    assert model_server.calls[-1][0] == '/v1/messages'
+    assert 'http-input' in json.dumps(model_server.calls[-1][2])
+    page.locator('#aiPanelClose').click()
     page.locator('#sshDisconnect').click()
     page.goto(origin + '/logout')
     page.context.add_cookies([{'name': agent.COOKIE_NAME, 'value': agent._make_session_cookie(), 'url': origin}])

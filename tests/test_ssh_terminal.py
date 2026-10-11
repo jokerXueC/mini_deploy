@@ -35,7 +35,8 @@ def peer():
     listener.listen(16)
     listener.settimeout(.2)
     done = threading.Event()
-    state = {"key": host_key, "auth": [], "input": [], "sizes": [], "transports": [], "channels": []}
+    state = {"key": host_key, "auth": [], "input": [], "sizes": [], "transports": [], "channels": [],
+             "exec": [], "exec_output": b"mock inspection result\n", "exec_hang": False}
 
     class Server(paramiko.ServerInterface):
         def check_auth_password(self, username, password):
@@ -62,6 +63,21 @@ def peer():
 
         def check_channel_shell_request(self, channel):
             threading.Thread(target=echo, args=(channel,), daemon=True).start()
+            return True
+
+        def check_channel_exec_request(self, channel, command):
+            state["exec"].append(command)
+            def respond():
+                if state["exec_hang"]:
+                    return
+                time.sleep(.02)
+                try:
+                    channel.sendall(state["exec_output"])
+                    channel.send_exit_status(0)
+                    channel.close()
+                except (OSError, EOFError):
+                    pass
+            threading.Thread(target=respond, daemon=True).start()
             return True
 
     def echo(channel):

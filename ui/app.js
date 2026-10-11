@@ -68,9 +68,12 @@ function toggleTheme() {
   if (document.startViewTransition) {
     document.documentElement.classList.add(revealClass);
     const transition = document.startViewTransition(() => applyTheme(next));
-    transition.finished.finally(() => {
+    // A resize or another transition can skip the reveal without changing the theme.
+    transition.ready.catch(() => {});
+    const cleanup = () => {
       document.documentElement.classList.remove('theme-reveal-light', 'theme-reveal-dark');
-    });
+    };
+    transition.finished.then(cleanup, cleanup);
     return;
   }
   applyTheme(next);
