@@ -1,4 +1,7 @@
 .ssh-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 24px; align-items: start; }
+.ssh-http-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.7; margin: 12px 0; }
+.ssh-http-check input { flex: 0 0 auto; margin-top: 5px; accent-color: var(--green); }
+#sshHttpConsent[hidden], #sshHttpFeedback:empty { display: none; }
 .ssh-connections { min-width: 0; }
 .ssh-section-title, .ssh-terminal-toolbar, .ssh-terminal-actions, .ssh-terminal-footer, .ssh-profile { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .ssh-section-title h2 { font-size: 16px; margin: 0; }

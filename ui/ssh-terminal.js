@@ -1,7 +1,8 @@
 (() => {
   const el = id => document.getElementById(id);
   let token = '', profiles = [], profileId = '', session = '', cursor = 0;
-  let terminal, fit, generation = 0, loading = false, busy = false, secure = false, available = false;
+  let terminal, fit, generation = 0, loading = false, busy = false, allowed = false, available = false;
+  let allowingHttp = false;
   let input = '', inputTimer, sending = false, resizeTimer, lastSize = '', outputController;
   const feedback = (message, kind = 'info') => { el('sshFeedback').textContent = message; el('sshFeedback').dataset.kind = kind; };
   const credentials = () => { ['sshPassword', 'sshPrivateKey', 'sshPassphrase', 'sshKeyFile'].forEach(id => { el(id).value = ''; }); };
@@ -38,14 +39,14 @@
   }
 
   function controls() {
-    el('sshFields').disabled = !secure || !available || busy;
+    el('sshFields').disabled = !allowed || !available || busy;
     el('sshConnect').disabled = !!session || busy;
     el('sshDisconnect').disabled = !session;
     ['sshCopy', 'sshPaste', 'sshClear'].forEach(id => { el(id).disabled = !terminal; });
     el('sshPaste').disabled = !session;
     el('sshMobileKeys').hidden = !session;
     el('sshNew').disabled = busy;
-    el('sshProfiles').querySelectorAll('button').forEach(button => { button.disabled = busy || !secure; });
+    el('sshProfiles').querySelectorAll('button').forEach(button => { button.disabled = busy || !allowed; });
     window.dispatchEvent(new CustomEvent('ssh-session-change'));
   }
 
@@ -80,17 +81,37 @@
     }
   }
 
+  function updateAccess(data) {
+    token = data.csrf_token || token;
+    allowed = !!((data.secure && window.isSecureContext) || data.http_enabled === true);
+    el('sshSecurityNotice').hidden = !!(data.secure && window.isSecureContext);
+    el('sshHttpConsent').hidden = data.http_enabled === true;
+    el('sshHttpTitle').textContent = data.http_enabled ? 'HTTP 已允许 · 仅限本次登录' : '当前通过 HTTP 访问';
+    el('sshTransportLabel').textContent = data.http_enabled && !data.secure ? 'SSH 通道加密 · 面板 HTTP 明文' : 'SSH 通道加密';
+    if (data.http_enabled) el('sshHttpFeedback').textContent = '退出并重新登录后，需要再次确认。';
+    controls();
+  }
+  el('sshHttpCheck').addEventListener('change', () => { el('sshAllowHttp').disabled = allowingHttp || !el('sshHttpCheck').checked; });
+  el('sshAllowHttp').addEventListener('click', async () => {
+    if (allowingHttp || !el('sshHttpCheck').checked) return;
+    allowingHttp = true; el('sshAllowHttp').disabled = true;
+    try {
+      await api('/ssh/allow-http', {consent: true});
+      await refresh(); window.TerminalAI?.viewChanged('terminal');
+    } catch (error) { el('sshHttpFeedback').textContent = error.message; el('sshRelogin').hidden = error.status !== 401; }
+    finally { allowingHttp = false; el('sshAllowHttp').disabled = !el('sshHttpCheck').checked; }
+  });
+
   async function refresh() {
     if (loading) return;
     loading = true;
     try {
       const data = await api('/ssh');
       el('sshRelogin').hidden = true;
-      token = data.csrf_token; profiles = data.profiles; secure = data.secure && window.isSecureContext; available = data.available;
-      el('sshSecurityNotice').hidden = secure;
+      profiles = data.profiles; available = data.available; updateAccess(data);
       renderProfiles();
       if (!available) feedback('SSH 组件尚未安装。请重新运行安装脚本，或执行 apt-get install -y python3-paramiko 后重启 mini-deploy-agent。');
-      else if (!secure) feedback('请切换到 HTTPS 或本地隧道后连接。');
+      else if (!allowed) feedback('先在上方确认允许本次登录使用 HTTP，再填写连接信息。也可使用 HTTPS 或本地隧道。');
       else if (!session) feedback('填写服务器地址和登录凭据后连接。');
       const other = data.sessions.filter(item => item.id !== session);
       el('sshOtherSessions').hidden = !other.length;
@@ -98,11 +119,11 @@
       for (const item of other) {
         const row = document.createElement('div'); row.className = 'ssh-profile';
         const address = document.createElement('span'); address.textContent = `${item.username}@${item.host}:${item.port}`;
-        const button = document.createElement('button'); button.className = 'ghost-button compact-action'; button.textContent = '断开'; button.type = 'button'; button.disabled = !secure;
+        const button = document.createElement('button'); button.className = 'ghost-button compact-action'; button.textContent = '断开'; button.type = 'button'; button.disabled = !allowed;
         button.addEventListener('click', async () => { try { await api('/ssh/disconnect', {id: item.id}); await refresh(); } catch (error) { feedback(error.message); } });
         row.append(address, button); el('sshSessions').append(row);
       }
-    } catch (error) { secure = false; feedback(error.message); el('sshRelogin').hidden = error.status !== 401; }
+    } catch (error) { allowed = false; feedback(error.message); el('sshRelogin').hidden = error.status !== 401; }
     finally { loading = false; controls(); }
   }
 
@@ -279,7 +300,7 @@
   }
 
   el('sshForm').addEventListener('submit', async event => {
-    event.preventDefault(); if (busy || session || !secure || !available) return;
+    event.preventDefault(); if (busy || session || !allowed || !available) return;
     busy = true; controls(); state('检查主机中'); feedback('正在连接 SSH 服务并检查主机指纹…');
     try {
       const probe = await api('/ssh/probe', spec());
@@ -351,6 +372,7 @@
   });
   window.addEventListener('beforeunload', event => { if (session || busy) { event.preventDefault(); event.returnValue = ''; } });
   window.SSHTerminal = {
+    updateAccess,
     context() { return {session_id: session, selection: terminal?.getSelection() || '', cursor,
                        target: session ? el('sshTarget').textContent : ''}; },
     insertCommand(command) {

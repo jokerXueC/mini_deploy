@@ -137,6 +137,7 @@ UI_SESSION_SECRET = os.getenv("DEPLOY_UI_SESSION_SECRET", "").strip()
 UI_SESSION_TTL_SECONDS = int(os.getenv("DEPLOY_UI_SESSION_TTL_SECONDS", str(8 * 60 * 60)))
 COOKIE_SECURE_MODE = os.getenv("DEPLOY_COOKIE_SECURE", "auto").strip().lower()
 COOKIE_NAME = "mini_deploy_session"
+TERMINAL_HTTP_COOKIE = "mini_deploy_terminal_http"
 PASSWORD_HASH_ITERATIONS = 260_000
 MIN_PASSWORD_HASH_ITERATIONS = 200_000
 MAX_PASSWORD_HASH_ITERATIONS = 2_000_000
@@ -2670,6 +2671,30 @@ def _ssh_manager():
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _terminal_http_grant(self):
+        cookie = self._session_cookie_value()
+        if not cookie:
+            return ""
+        material = f"terminal-http-v1:{cookie}:{self.headers.get('Host', '')}"
+        return hmac.new(UI_SESSION_SECRET.encode(), material.encode(), hashlib.sha256).hexdigest()
+
+    def _terminal_http_enabled(self):
+        jar = cookies.SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except cookies.CookieError:
+            return False
+        grant = jar.get(TERMINAL_HTTP_COOKIE)
+        expected = self._terminal_http_grant()
+        return bool(grant and expected and _constant_time_equal(grant.value, expected))
+
+    def _terminal_access_status(self):
+        return {"secure": self._ssh_secure(), "http_enabled": self._terminal_http_enabled(),
+                "csrf_token": self._csrf_token_for_request()}
+
+    def _terminal_access_allowed(self):
+        return self._ssh_secure() or self._terminal_http_enabled()
+
     def _handle_terminal_ai(self, path, parsed):
         if not self._require_auth_json():
             return
@@ -2677,12 +2702,11 @@ class Handler(BaseHTTPRequestHandler):
             owner = terminal_ai.owner(self._session_cookie_value())
             manager = _ai_manager()
             if self.command == "GET" and path == "/terminal-ai/settings":
-                self._write_json(200, {**manager.settings(), "secure": self._ssh_secure(),
-                                       "csrf_token": self._csrf_token_for_request()})
+                self._write_json(200, {**manager.settings(), **self._terminal_access_status()})
                 return
-            if not self._ssh_secure():
+            if not self._terminal_access_allowed():
                 self.close_connection = True
-                raise terminal_ai.AIError("模型密钥和终端分析需要 HTTPS 或本地 SSH 隧道。", 403)
+                raise terminal_ai.AIError("请先在远程终端确认允许本次登录使用 HTTP，或改用 HTTPS / 本地隧道。", 403)
             if self.command == "GET" and path == "/terminal-ai/jobs":
                 key = parse_qs(parsed.query).get("id", [""])[0]
                 self._write_json(200, manager.job(owner, key))
@@ -2733,13 +2757,25 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_auth_json():
             return
         try:
+            if self.command == "POST" and path == "/ssh/allow-http":
+                self._ssh_owner()
+                origin = urlparse(self.headers.get("Origin", ""))
+                if origin.scheme not in {"http", "https"} or origin.netloc != self.headers.get("Host", ""):
+                    raise ssh_terminal.SSHError("请求来源无效，请刷新面板重试。", 403)
+                data = _read_json_body(self, max_bytes=1024)
+                if data.get("consent") is not True:
+                    raise ssh_terminal.SSHError("请确认已了解 HTTP 明文传输风险。")
+                _audit_event("terminal_http_allowed", actor=self.client_address[0], success=True)
+                self._write_json(200, {"http_enabled": True}, headers={"Set-Cookie":
+                    f"{TERMINAL_HTTP_COOKIE}={self._terminal_http_grant()}; Path=/; HttpOnly; SameSite=Strict"})
+                return
             if self.command == "GET" and path == "/ssh":
                 self._write_json(200, {**_ssh_manager().status(self._ssh_owner()),
-                    "secure": self._ssh_secure(), "csrf_token": self._csrf_token_for_request()})
+                    **self._terminal_access_status()})
                 return
-            if not self._ssh_secure():
+            if not self._terminal_access_allowed():
                 self.close_connection = True
-                raise ssh_terminal.SSHError("远程终端需要 HTTPS 或本地 SSH 隧道，公网 HTTP 已禁止提交凭据。", 403)
+                raise ssh_terminal.SSHError("请先确认允许本次登录使用 HTTP，或改用 HTTPS / 本地隧道。", 403)
             if self.command == "GET" and path in {"/ssh/output", "/ssh/stream"}:
                 query = parse_qs(parsed.query)
                 session = _ssh_manager().session(self._ssh_owner(), query.get("id", [""])[0])
@@ -2816,9 +2852,11 @@ class Handler(BaseHTTPRequestHandler):
 
     server_version = "mini_deploy_agent/1.1"
 
-    def _write_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _write_json(self, status: int, payload: dict[str, Any], *, headers=None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
@@ -2895,6 +2933,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", location)
         if clear_cookie:
+            self.send_header("Set-Cookie", f"{TERMINAL_HTTP_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
             self.send_header(
                 "Set-Cookie",
                 f"{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",

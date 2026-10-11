@@ -1,6 +1,6 @@
 (() => {
   const el = id => document.getElementById(id);
-  let token = '', settings = {}, secure = false, loading = false, working = false;
+  let token = '', settings = {}, allowed = false, loading = false, working = false;
   let snapshot, question = '', job = '', generation = 0, autoTimer, autoSession = '', autoCursor = -1, controller;
   let dialogTest = false, saving = false;
   let pendingEntry;
@@ -45,7 +45,7 @@
     el('aiAskSend').disabled = working;
     el('aiAuto').disabled = working && !autoSession;
     el('aiStop').hidden = !working;
-    el('aiSave').disabled = el('aiTest').disabled = !secure || working || saving;
+    el('aiSave').disabled = el('aiTest').disabled = !allowed || working || saving;
     el('aiTargetLabel').textContent = connected ? context().target : '尚未连接 SSH';
   }
   function renderSettings() {
@@ -58,7 +58,9 @@
     loading = true;
     try {
       settings = await api('/terminal-ai/settings'); token = settings.csrf_token;
-      secure = settings.secure && window.isSecureContext;
+      allowed = !!((settings.secure && window.isSecureContext) || settings.http_enabled === true);
+      window.SSHTerminal?.updateAccess(settings);
+      if (el('aiSettingsDialog').open) settingsFeedback();
       renderSettings();
     } catch (error) { message(error.message, true); }
     finally { loading = false; controls(); }
@@ -69,6 +71,10 @@
     el('aiEndpointHint').textContent = claude ? '填写 Claude 原生接口地址，例如 https://api.anthropic.com/v1；系统使用 Messages API。'
       : '填写服务商的 Base URL；本机 Ollama 可填 http://127.0.0.1:11434/v1。';
   }
+  function settingsFeedback() {
+    message(allowed ? (settings.http_enabled && !settings.secure ? 'HTTP 已允许，模型密钥到面板的传输为明文。' : '无需连接 SSH 即可配置和测试模型。')
+      : '先关闭此窗口，在远程终端上方确认允许本次登录使用 HTTP；也可通过 HTTPS 或本地隧道打开面板。', !allowed, 'aiSettingsFeedback');
+  }
   async function openSettings() {
     await refresh();
     el('aiProtocol').value = settings.protocol || 'openai'; el('aiBaseUrl').value = settings.base_url || '';
@@ -76,7 +82,7 @@
     el('aiKey').placeholder = settings.has_key ? '已保存密钥；留空保留，输入新密钥可替换' : '输入 API Key；无密钥的本机服务可留空';
     protocolHint();
     window.AppSelects?.syncAll();
-    message(secure ? '无需连接 SSH 即可配置和测试模型。' : '通过 HTTPS 或 SSH 本地隧道打开面板后，才能安全保存模型密钥。', !secure, 'aiSettingsFeedback');
+    settingsFeedback();
     el('aiSettingsDialog').showModal(); controls();
   }
   const draft = () => ({protocol: el('aiProtocol').value, base_url: el('aiBaseUrl').value.trim(),
@@ -175,7 +181,7 @@
   async function preview(asked, continuous = false) {
     if (working) return;
     if (!settings.configured) { await openSettings(); return; }
-    if (!secure) { message('请通过 HTTPS 或 SSH 本地隧道使用终端分析。', true); panel(true); return; }
+    if (!allowed) { message('请先确认允许本次登录使用 HTTP，或通过 HTTPS / 本地隧道使用终端分析。', true); panel(true); return; }
     const current = context();
     if (!current.session_id) { message('请先连接 SSH，再选择需要分析的输出。', true); panel(true); stopAuto(); return; }
     try {
@@ -193,7 +199,7 @@
   el('aiPanelModel').addEventListener('click', openSettings);
   el('aiProtocol').addEventListener('change', protocolHint);
   el('aiSettingsForm').addEventListener('submit', async event => {
-    event.preventDefault(); if (!secure || working || saving) return;
+    event.preventDefault(); if (!allowed || working || saving) return;
     saving = true; controls();
     try {
       settings = await api('/terminal-ai/settings', draft()); stopAuto(); renderSettings();
@@ -202,7 +208,7 @@
     finally { saving = false; controls(); }
   });
   el('aiTest').addEventListener('click', async () => {
-    if (!secure || working || saving || !el('aiSettingsForm').reportValidity()) return;
+    if (!allowed || working || saving || !el('aiSettingsForm').reportValidity()) return;
     working = true; dialogTest = true; controls(); const current = ++generation;
     message('正在连接模型服务…', false, 'aiSettingsFeedback');
     try {

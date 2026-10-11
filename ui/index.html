@@ -64,8 +64,10 @@
     <div id="terminalView" class="dashboard-view">
       <div class="tai-page-tools"><span id="aiModelSummary" class="muted">AI 尚未配置</span><button id="aiSettingsOpen" class="ghost-button compact-action" type="button"><i class="tai-icon" data-ai-icon="settings-2"></i>模型设置</button></div>
       <div id="sshSecurityNotice" class="ssh-notice" hidden>
-        <strong>请通过 HTTPS 或 SSH 隧道连接</strong>
-        <p>当前是公网 HTTP，无法安全传输 SSH 密码、私钥和终端内容。</p>
+        <strong id="sshHttpTitle">当前通过 HTTP 访问</strong>
+        <p>浏览器到面板的 SSH 凭据、终端内容和模型密钥会以明文传输；面板到目标服务器的 SSH 仍然加密。建议使用 HTTPS 或本地隧道。</p>
+        <div id="sshHttpConsent"><label class="ssh-http-check"><input id="sshHttpCheck" type="checkbox">我已了解，允许本次登录通过 HTTP 使用 SSH 和模型功能</label><button id="sshAllowHttp" type="button" class="ghost-button compact-action" disabled>允许本次登录使用 HTTP</button></div>
+        <p id="sshHttpFeedback" role="status"></p>
         <details><summary>没有域名？使用本地隧道</summary><p>在你自己的电脑上执行，将“服务器IP”换成面板所在服务器地址；SSH 端口不同则修改 22。</p><pre>ssh -p 22 -N -L 16868:127.0.0.1:6868 root@服务器IP</pre><p>保持此命令运行，再打开 <a href="http://127.0.0.1:16868/ui?view=terminal" target="_blank" rel="noopener">本地面板</a>。</p></details>
       </div>
       <div id="sshLayout" class="ssh-layout">
@@ -98,7 +100,7 @@
           <a id="sshRelogin" class="tai-relogin" href="/logout" hidden>退出并重新登录</a>
           <div class="ssh-terminal-surface"><div id="sshEmpty" class="ssh-empty"><span>&gt;_</span><strong>远程终端</strong><p>尚未连接服务器</p></div><div id="sshTerminal" hidden></div></div>
           <div id="sshMobileKeys" class="ssh-mobile-keys" hidden><button type="button" data-ssh-key="\u0003">Ctrl+C</button><button type="button" data-ssh-key="\u0009">Tab</button><button type="button" data-ssh-key="\u001b">Esc</button><button type="button" data-ssh-key="\u001b[A" aria-label="向上">↑</button><button type="button" data-ssh-key="\u001b[B" aria-label="向下">↓</button></div>
-          <div class="ssh-terminal-footer"><span>SSH · 加密连接</span><span>空闲 15 分钟自动断开</span></div>
+          <div class="ssh-terminal-footer"><span id="sshTransportLabel">SSH 通道加密</span><span>空闲 15 分钟自动断开</span></div>
         </section>
         <aside id="aiPanel" class="tai-panel" aria-label="AI 诊断助手" hidden>
           <div class="tai-panel-head"><div><h2><i class="tai-icon" data-ai-icon="sparkles"></i>诊断助手</h2><button id="aiPanelModel" type="button" class="tai-model">配置模型</button></div><button id="aiPanelClose" class="toolbar-icon" type="button" aria-label="收起诊断助手" title="收起诊断助手"><i class="tai-icon" data-ai-icon="panel-right-close"></i></button></div>
