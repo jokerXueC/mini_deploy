@@ -1,5 +1,6 @@
 (() => {
   const el = id => document.getElementById(id);
+  el('aiSettingsFeedback').insertAdjacentHTML('beforebegin', '<details class="tai-model-options"><summary>响应设置</summary><label>无响应等待时间（秒，0 表示不限）<input id="aiResponseTimeout" type="number" min="0" step="1" value="0" required></label><label>最大输出 tokens（可选）<input id="aiMaxTokens" type="number" min="1" step="1" placeholder="留空使用服务默认；Claude 为 16384"></label><p class="tai-hint">Claude 协议要求输出额度；填写模型支持的数值。超过服务商额度时，服务商可能拒绝请求。</p></details>');
   let token = '', settings = {}, allowed = false, loading = false, working = false;
   let conversationId = '', job = '', generation = 0, autoTimer, autoSession = '', autoCursor = -1, controller;
   let dialogTest = false, saving = false;
@@ -191,6 +192,8 @@
     await refresh();
     el('aiProtocol').value = settings.protocol || 'openai'; el('aiBaseUrl').value = settings.base_url || '';
     el('aiModel').value = settings.model || ''; el('aiKey').value = ''; el('aiClearKey').checked = false;
+    el('aiResponseTimeout').value = settings.response_timeout ?? 0;
+    el('aiMaxTokens').value = settings.max_tokens ?? '';
     el('aiKey').placeholder = settings.has_key ? '已保存密钥；留空保留，输入新密钥可替换' : '输入 API Key；无密钥的本机服务可留空';
     protocolHint();
     window.AppSelects?.syncAll();
@@ -198,7 +201,9 @@
     el('aiSettingsDialog').showModal(); controls();
   }
   const draft = () => ({protocol: el('aiProtocol').value, base_url: el('aiBaseUrl').value.trim(),
-    model: el('aiModel').value.trim(), api_key: el('aiKey').value, clear_key: el('aiClearKey').checked});
+    model: el('aiModel').value.trim(), api_key: el('aiKey').value, clear_key: el('aiClearKey').checked,
+    response_timeout: Number(el('aiResponseTimeout').value),
+    max_tokens: el('aiMaxTokens').value ? Number(el('aiMaxTokens').value) : null});
   function stopAuto() {
     clearTimeout(autoTimer); autoTimer = undefined; autoSession = ''; autoCursor = -1;
     el('aiAuto').checked = false; el('aiScopeLabel').textContent = '对话';
@@ -375,17 +380,20 @@
     target.append(fragment);
   }
   async function waitForJob(id, current, entry) {
-    const deadline = Date.now() + 660000;
-    while (current === generation && Date.now() < deadline) {
+    while (current === generation) {
       const result = await api(`/terminal-ai/jobs?id=${encodeURIComponent(id)}`);
       if (current !== generation) return null;
       renderProgress(entry, result, id);
-      if (result.status === 'failed') throw new Error(result.detail);
+      if (result.partial_text && entry.streamed !== result.partial_text) {
+        const messages = el('aiMessages'), follow = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80;
+        renderAnswer(entry.answer, result.partial_text); entry.streamed = result.partial_text;
+        if (follow) messages.scrollTop = messages.scrollHeight;
+      }
+      if (result.status === 'failed') throw new Error([result.partial_text, result.detail].filter(Boolean).join('\n\n'));
       if (result.status === 'cancelled') throw new Error(result.detail || '任务已停止。');
       if (result.status === 'done') return result;
       await new Promise(resolve => setTimeout(resolve, 700));
     }
-    if (current === generation) { cancelJob(id); throw new Error('本轮排查超时，已请求停止。'); }
     return null;
   }
   async function ask(asked, automatic = false) {
@@ -419,7 +427,7 @@
       const usage = result.usage || {}; const tokens = usage.total_tokens ?? ((usage.input_tokens || 0) + (usage.output_tokens || 0));
       const scope = result.context?.lines ? `最近输出 ${result.context.lines} 行` : '未附带终端输出';
       entry.meta.textContent = `${result.model} · ${scope}${result.events?.length ? ` · ${result.events.length} 项检查` : ''}${tokens ? ` · ${tokens} tokens` : ''}`;
-      message(result.history_error || '可继续追问', !!result.history_error);
+      message(result.history_error || result.notice || '可继续追问', !!result.history_error);
       el('aiMessages').scrollTop = el('aiMessages').scrollHeight;
     } catch (error) {
       if (current === generation) {

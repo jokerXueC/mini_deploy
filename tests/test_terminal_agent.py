@@ -319,14 +319,14 @@ def test_pending_approval_stops_on_cancel_revocation_disconnect_model_or_expiry(
         ai_manager.approve('owner', job['id'], pending['approval']['id'], True)
 
 
-def test_tool_loop_bounded_and_repeat_modifications_not_retried(ai_manager, model_server):
+def test_repeat_modifications_not_retried(ai_manager, model_server):
     ai_manager.save(ai_tests.config(model_server))
     model_server.content = lambda body, n: tool_response('openai', 'restart_service', {'service': 'nginx'}, f'call_{n}')
     executed = []
     job = submit(ai_manager, mode='auto', execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 1, 'output': 'failed'})
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
-    assert result['status'] == 'failed' and len(model_server.calls) == ai.MAX_ROUNDS and len(executed) == 1
-    assert len(result['events']) == ai.MAX_ROUNDS and all(e['status'] == 'blocked' for e in result['events'][1:])
+    assert result['status'] == 'failed' and len(model_server.calls) == 2 and len(executed) == 1
+    assert '重复请求' in result['detail'] and len(result['events']) == 2
     model_server.content = answer('openai')
     followup = submit(ai_manager, mode='auto', conversation_id=job['conversation_id'])
     assert wait_status(ai_manager, 'owner', followup['id'], {'done'})['status'] == 'done'
@@ -361,9 +361,11 @@ def test_permission_mismatch_and_expired_auto_do_not_silently_execute(ai_manager
 
 
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
-def test_multiple_tool_results_match_ids_and_stop_at_call_limit(ai_manager, model_server, protocol):
+def test_multiple_tool_results_match_ids_beyond_old_call_and_round_limits(ai_manager, model_server, protocol):
     ai_manager.save(ai_tests.config(model_server, protocol))
     def respond(body, n):
+        if n > 17:
+            return answer(protocol)
         result = tool_response(protocol, 'list_containers', {}, f'call_{n}_0')
         for i in range(1, 4):
             extra = tool_response(protocol, 'get_listening_ports', {}, f'call_{n}_{i}')
@@ -376,7 +378,7 @@ def test_multiple_tool_results_match_ids_and_stop_at_call_limit(ai_manager, mode
     executed = []
     job = submit(ai_manager, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0, 'output': 'ok'})
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
-    assert result['status'] == 'failed' and len(executed) == ai.MAX_CALLS and len(result['events']) == ai.MAX_CALLS
+    assert result['status'] == 'done' and len(executed) == 68 and len(result['events']) == 68
     messages = model_server.calls[1][2]['messages']
     if protocol == 'anthropic':
         assert len(messages[-1]['content']) == 4

@@ -131,8 +131,6 @@ class Store:
                               "ORDER BY id DESC LIMIT 6", (key,)).fetchall()
             messages = []
             for row in reversed(rows):
-                messages.extend([{"role": "user", "content": row["context"][:18000]},
-                                 {"role": "assistant", "content": row["answer"][:12000]}])
-            while sum(len(m["content"]) for m in messages) > 32000:
-                del messages[:2]
+                messages.extend([{"role": "user", "content": row["context"]},
+                                 {"role": "assistant", "content": row["answer"]}])
             return messages

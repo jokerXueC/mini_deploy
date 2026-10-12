@@ -59,7 +59,9 @@ def test_history_paginates_full_turns_without_expiring_or_deleting_old_records(t
     older = store.detail('chat', page['next_before'])
     assert len(older['turns']) == 10 and older['next_before'] is None
     assert set(t['id'] for t in older['turns']).isdisjoint(t['id'] for t in page['turns'])
-    assert sum(len(m['content']) for m in store.context('chat', '')) <= 32000
+    context = store.context('chat', '')
+    assert len(context) == 12 and context[-1]['content'] == 'answer' * 8000
+    assert context[-2]['content'] == 'context' * 4000
     for i in range(45):
         store.begin(f'other-{i}', f'other-job-{i}', str(i), '', 'model', 'question')
     recent = store.list()

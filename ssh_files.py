@@ -202,10 +202,11 @@ def execute(client, plan, check):
         return result
     if name == 'read_text_file':
         info = _regular(client, path)
-        offset = args['offset']
+        amount = args.get('bytes', 65536)
+        offset = max(0, info.st_size - amount) if args.get('position') == 'tail' else args['offset']
         with client.open(path, 'rb') as stream:
             stream.seek(offset)
-            content = stream.read(PAGE_BYTES)
+            content = stream.read(amount)
         if b'\0' in content:
             raise FileError("文件片段含二进制内容，未发送给模型。")
         return {'path': path, 'size': info.st_size, 'offset': offset, 'bytes_read': len(content),

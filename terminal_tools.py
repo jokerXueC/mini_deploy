@@ -42,9 +42,11 @@ TOOLS = {
                    "description": "head 查看开头，tail 查看末尾（默认）；排查近期日志用 tail"}}, ["path"], False),
     "inspect_file": ("查看普通文件的大小、权限、更新时间及版本摘要；不超过 1 MiB 时返回 SHA-256，用于编辑前校验",
                      {"path": FILE}, ['path'], False),
-    "read_text_file": ("通过 SFTP 按字节分页读取文本文件，每页至多 8 KiB；用 next_offset 继续读取，不执行文件",
+    "read_text_file": ("通过 SFTP 分页读取文本；默认每页 64 KiB，可调至 1 MiB；近期日志优先 position=tail，完整读取用 next_offset 继续",
                        {"path": FILE, "offset": {"type": "integer", "minimum": 0,
-                        "maximum": 1099511627776, "description": "起始字节，默认 0"}}, ['path'], False),
+                        "maximum": 1099511627776, "description": "起始字节，默认 0"},
+                        'bytes': {'type': 'integer', 'minimum': 1, 'maximum': 1048576},
+                        'position': {'type': 'string', 'enum': ['head', 'tail']}}, ['path'], False),
     "search_files": ("在指定目录内按文件名通配符搜索，最多扫描 2000 项，不跟随符号链接",
                      {"path": DIRECTORY, "pattern": {"type": "string", "description": "文件名通配符，如 *.log、nginx.conf"},
                       "depth": {"type": "integer", "minimum": 0, "maximum": 5}, 'limit': LIMIT}, ['path', 'pattern'], False),
@@ -116,11 +118,18 @@ def plan(name, arguments):
                            ('action', ('start', 'stop', 'pause', 'unpause') if name == 'manage_container' else ('start', 'stop'))]:
         if field in properties and field in args and args[field] not in choices:
             raise ToolError(f"{field} 参数无效。")
-    for field, default, low, high in [('offset', 0, 0, 1099511627776), ('depth', 3, 0, 5), ('limit', 50, 1, 100)]:
+    for field, default, low, high in [('offset', 0, 0, 1099511627776), ('depth', 3, 0, 5), ('limit', 50, 1, 100),
+                                    ('bytes', 65536, 1, 1048576)]:
         if field in properties:
             value = args.setdefault(field, default)
             if type(value) is not int or not low <= value <= high:
                 raise ToolError(f"{field} 须为 {low} 到 {high} 的整数。")
+    if name == 'read_text_file':
+        args.setdefault('position', 'head')
+        if args.get('position', 'head') not in {'head', 'tail'}:
+            raise ToolError('读取位置须为 head 或 tail')
+        if args.get('position') == 'tail' and args['offset']:
+            raise ToolError('tail 与 offset 不能同时指定，请使用 next_offset 继续读取')
     for field in ('content', 'old_text', 'new_text', 'query', 'pattern'):
         if field in args:
             value = args[field]

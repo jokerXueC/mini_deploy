@@ -143,7 +143,7 @@ def test_real_model_request_uses_correct_protocol(manager, model_server, protoco
     assert 'hidden-value' not in json.dumps(body) and 'test-key-only' not in json.dumps(body)
     if protocol == 'anthropic':
         assert path == '/v1/messages' and headers['X-Api-Key'] == 'test-key-only'
-        assert headers['Anthropic-Version'] == '2023-06-01' and body['max_tokens'] == 2048
+        assert headers['Anthropic-Version'] == '2023-06-01' and body['max_tokens'] == 16384
         assert body['system'] and all(m['role'] != 'system' for m in body['messages'])
         assert 'Authorization' not in headers
     else:
@@ -306,7 +306,7 @@ def test_chat_failures_and_logout_never_enter_history(manager, model_server):
 def test_chat_memory_bounds_eviction_and_expiry(manager, model_server, monkeypatch):
     manager.save(config(model_server))
     seen = []
-    monkeypatch.setattr(ai, 'complete', lambda config, messages: seen.append(messages) or {'text': '回答' * 4000, 'usage': {}})
+    monkeypatch.setattr(ai, 'complete', lambda config, messages, tools=None, **kwargs: seen.append(messages) or {'text': '回答' * 4000, 'usage': {}})
     conversation = ''
     for i in range(66):
         result = manager.submit('owner', action='chat', output='日志\n' * 8000,
@@ -315,7 +315,7 @@ def test_chat_memory_bounds_eviction_and_expiry(manager, model_server, monkeypat
         assert finished(manager, 'owner', result['id'])['status'] == 'done'
     history = manager.conversations[conversation]
     assert len(history['messages']) % 2 == 0 and len(history['messages']) <= 12
-    assert sum(len(m['content']) for m in history['messages']) <= 32000
+    assert all(len(m['content']) >= 8000 for m in history['messages'])
     assert len(manager.jobs) <= 64
     assert all(len(m['content']) < 18100 for m in seen[-1])
     for i in range(25):

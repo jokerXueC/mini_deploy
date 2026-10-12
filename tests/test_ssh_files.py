@@ -33,8 +33,8 @@ def test_real_sftp_inspection_pagination_search_and_backup_edit(file_session):
     original = path.read_bytes()
     info = run(session, 'inspect_file', path='/app.conf')
     assert info['sha256'] == hashlib.sha256(original).hexdigest()
-    first = run(session, 'read_text_file', path='/app.conf')
-    second = run(session, 'read_text_file', path='/app.conf', offset=first['next_offset'])
+    first = run(session, 'read_text_file', path='/app.conf', bytes=8192)
+    second = run(session, 'read_text_file', path='/app.conf', bytes=8192, offset=first['next_offset'])
     assert first['bytes_read'] == 8192 and not first['eof'] and second['eof']
     assert (first['output'] + second['output']).encode() == original
     files = run(session, 'search_files', path='/', pattern='*.conf')
@@ -81,7 +81,7 @@ def test_large_and_binary_files_are_bounded_and_not_edited(file_session):
     session, root = file_session
     (root / 'large').write_bytes(b'x' * (ssh_files.MAX_FILE + 1))
     assert 'sha256' not in run(session, 'inspect_file', path='/large')
-    assert len(run(session, 'read_text_file', path='/large')['output']) == 8192
+    assert len(run(session, 'read_text_file', path='/large')['output']) == 65536
     with pytest.raises(ssh_files.FileError, match='1 MiB'):
         run(session, 'search_text', path='/large', query='x')
     (root / 'binary').write_bytes(b'abc\0def')

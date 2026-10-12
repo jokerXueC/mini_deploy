@@ -128,6 +128,8 @@ html[data-theme=light] .tai-verification[data-state=failed] { color: #b42335; }
 .tai-check { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; line-height: 1.8; margin: 12px 0; }
 .tai-check input { margin-top: 5px; accent-color: var(--green); }
 .tai-dialog-actions { justify-content: flex-end; margin-top: 20px; flex-wrap: wrap; }
+.tai-model-options { font-size: 12px; margin-top: 14px; }
+.tai-model-options summary { color: var(--muted); cursor: pointer; padding-bottom: 12px; }
 .tai-relogin { display: block; margin: 0 14px 10px; color: var(--green); font-size: 12px; }
 .tai-error { color: #f17f8c !important; }
 html[data-theme=light] .tai-error { color: #b42335 !important; }
