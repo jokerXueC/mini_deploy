@@ -638,7 +638,12 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleAuto(); });
   matchMedia('(max-width:1000px)').addEventListener('change', syncPanel);
   window.addEventListener('pagehide', () => { cancelJob(job); stopAuto(); if (!submitting) controller?.abort(); el('aiKey').value = ''; });
-  window.TerminalAI = {viewChanged(view) {
+  window.TerminalAI = {prepareAnalysis(text) {
+    panel(true);
+    const question = el('aiQuestion');
+    question.value = question.value.trim() ? `${question.value}\n\n${text}` : text;
+    question.focus();
+  }, viewChanged(view) {
     if (view === 'terminal') { refresh(); controls(); }
     else { stopAuto(); panel(false); if (working) stopWaiting(); }
   }};

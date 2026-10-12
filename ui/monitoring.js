@@ -100,7 +100,7 @@
       ${item.command ? `<code>${text(item.command)}</code>` : ''}
       <p class="incident-guidance">${text(guidance(item))}</p>
       ${current && item.stale ? '<p>采样待更新，当前异常尚未恢复。</p>' : ''}
-      <div class="certificate-actions">${container ? `<button type="button" class="ghost-button compact-action" data-incident-log="${text(container)}">查看容器日志</button>` : ''}
+      <div class="certificate-actions">${item.id ? `<button type="button" class="ghost-button compact-action" data-incident-diagnose="${text(item.id)}">排查异常</button>` : ''}${container ? `<button type="button" class="ghost-button compact-action" data-incident-log="${text(container)}">查看容器日志</button>` : ''}
       ${item.source === 'certificate' ? '<a class="ghost-button compact-action" href="?view=certificates" data-incident-certificate>查看证书</a>' : ''}</div></div>`;
   }
 
@@ -375,6 +375,8 @@
     if (ack && !ack.disabled && ack.dataset.incidentId) change({action: 'acknowledge', key: ack.dataset.incidentAck, incident_id: ack.dataset.incidentId}, '异常已标为已知晓；恢复前仍保留显示');
     const log = event.target.closest('[data-incident-log]');
     if (log) showContainerLogs(log.dataset.incidentLog);
+    const diagnose = event.target.closest('[data-incident-diagnose]');
+    if (diagnose) window.ServerOperations.open('incident', diagnose.dataset.incidentDiagnose);
     if (event.target.closest('[data-incident-certificate]')) { event.preventDefault(); setView('certificates'); }
   });
   document.addEventListener('visibilitychange', () => {

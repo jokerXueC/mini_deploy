@@ -17,6 +17,8 @@
   </script>
   <link rel="stylesheet" href="ui/style.css">
   <link rel="stylesheet" href="ui/terminal-ai.css">
+  <link rel="stylesheet" href="ui/operations.css">
+  <link rel="stylesheet" href="ui/ssh-file-manager.css">
   <link rel="stylesheet" href="ui/vendor/xterm.css">
 </head>
 <body>
@@ -89,6 +91,7 @@
         </aside>
         <section class="ssh-workspace" aria-label="远程终端">
           <div class="ssh-terminal-toolbar"><div><span id="sshState" class="ssh-state">未连接</span><span id="sshTarget" class="muted"></span></div><div class="ssh-terminal-actions">
+            <button id="sshFilesOpen" class="ghost-button compact-action" type="button" disabled><img class="sf-icon" src="ui/previews/ssh-ai/icons/folder.svg" alt="">文件</button>
             <button id="aiChatOpen" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="aiPanel"><i class="tai-icon" data-ai-icon="sparkles"></i>AI 对话</button>
             <button id="sshCopy" class="toolbar-icon" type="button" title="复制选中内容" aria-label="复制选中内容" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
             <button id="sshPaste" class="toolbar-icon" type="button" title="粘贴" aria-label="粘贴" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3"/></svg></button>
@@ -366,6 +369,11 @@
     </div>
 
     <div id="serverView" class="dashboard-view active">
+      <div class="ops-entry-actions" aria-label="服务器排查工具">
+        <button id="panelMaintenanceOpen" class="ghost-button compact-action" type="button">面板维护</button>
+        <button class="ghost-button compact-action" type="button" data-operations-open="processes">进程与端口</button>
+        <button class="ghost-button compact-action" type="button" data-operations-open="logs">查看日志</button>
+      </div>
       <section class="summary-grid status-grid server-status-grid">
         <article class="status-stat-card resource-card">
           <div class="status-card-main">
@@ -412,6 +420,8 @@
           </div>
         </article>
       </section>
+
+      <details id="performancePanel" class="performance-panel"><summary>更多性能指标 <span id="performanceBrief"></span></summary><div id="performanceValues" class="performance-values"></div></details>
 
       <section id="cpuCorePanel" class="cpu-core-panel" aria-labelledby="cpuCoreHeading" hidden>
         <div class="cpu-core-head">
@@ -571,9 +581,57 @@
     </div>
   </main>
 
+  <dialog id="operationsDialog" class="ops-dialog" aria-labelledby="opsTitle">
+    <header class="ops-head">
+      <div><h2 id="opsTitle">服务器排查</h2><p id="opsHost"></p></div>
+      <button id="opsClose" class="toolbar-icon" type="button" title="关闭排查窗口" aria-label="关闭排查窗口"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button>
+    </header>
+    <nav class="ops-tabs" role="tablist" aria-label="排查内容">
+      <button id="opsTabIncident" role="tab" aria-controls="opsPaneIncident" aria-selected="false" data-ops-tab="incident" hidden>异常详情</button>
+      <button id="opsTabProcesses" role="tab" aria-controls="opsPaneProcesses" aria-selected="false" data-ops-tab="processes">进程</button>
+      <button id="opsTabPorts" role="tab" aria-controls="opsPanePorts" aria-selected="false" data-ops-tab="ports">端口</button>
+      <button id="opsTabLogs" role="tab" aria-controls="opsPaneLogs" aria-selected="false" data-ops-tab="logs">日志</button>
+      <div class="ops-tab-actions"><button id="opsRefresh" class="toolbar-icon" type="button" title="刷新当前内容" aria-label="刷新当前内容"><img src="ui/previews/ssh-ai/icons/refresh-cw.svg" alt=""></button></div>
+    </nav>
+    <p id="opsFeedback" class="ops-feedback" role="status" aria-live="polite"></p>
+    <section id="opsPaneIncident" class="ops-pane" role="tabpanel" aria-labelledby="opsTabIncident" hidden>
+      <div id="opsIncident"></div>
+      <div class="ops-incident-actions">
+        <button id="opsIncidentLogs" class="ghost-button compact-action" type="button">查看异常前后日志</button>
+        <button id="opsIncidentRequests" class="ghost-button compact-action" type="button">查看请求记录</button>
+        <button id="opsAnalyze" class="ghost-button compact-action" type="button">准备 AI 分析</button>
+      </div>
+      <div id="opsTimeline" class="ops-timeline"></div>
+    </section>
+    <section id="opsPaneProcesses" class="ops-pane" role="tabpanel" aria-labelledby="opsTabProcesses" hidden>
+      <div class="ops-filters"><input id="opsProcessSearch" type="search" placeholder="搜索进程名称或 PID" aria-label="搜索进程"><label>排序<select id="opsProcessSort"><option value="cpu">CPU</option><option value="memory">内存</option></select></label></div>
+      <p id="opsProcessHint" class="ops-caption"></p><div id="opsProcesses" class="ops-table-scroll"></div>
+    </section>
+    <section id="opsPanePorts" class="ops-pane" role="tabpanel" aria-labelledby="opsTabPorts" hidden>
+      <div class="ops-filters"><input id="opsPortSearch" type="search" placeholder="搜索端口、进程名称或 PID" aria-label="搜索监听端口"></div>
+      <div id="opsPorts" class="ops-table-scroll"></div>
+    </section>
+    <section id="opsPaneLogs" class="ops-pane ops-log-pane" role="tabpanel" aria-labelledby="opsTabLogs" hidden>
+      <div class="ops-filters ops-log-filters">
+        <label class="ops-source-field">来源<select id="opsLogSource" aria-label="日志来源"><option value="">选择日志来源</option></select></label>
+        <label>时间<select id="opsLogRange"><option value="latest">最新日志</option><option value="15m">最近 15 分钟</option><option value="1h">最近 1 小时</option><option value="24h">最近 24 小时</option><option value="incident" disabled>异常前后 5 分钟</option></select></label>
+        <label>级别<select id="opsLogLevel"><option value="all">全部</option><option value="error">错误</option><option value="warning">警告</option></select></label>
+        <label>行数<select id="opsLogLimit"><option value="300">300</option><option value="1000">1000</option></select></label>
+      </div>
+      <div class="ops-log-tools"><input id="opsLogKeyword" type="search" placeholder="搜索日志内容" aria-label="日志关键字" maxlength="160">
+        <button id="opsLogPause" class="toolbar-icon" type="button" title="开始自动刷新" aria-label="开始自动刷新" aria-pressed="false"><img src="ui/previews/ssh-ai/icons/play.svg" alt=""></button>
+        <button id="opsLogDownload" class="toolbar-icon" type="button" title="下载当前筛选日志" aria-label="下载当前筛选日志" disabled><img src="ui/previews/ssh-ai/icons/download.svg" alt=""></button>
+      </div>
+      <p id="opsLogNotice" class="ops-caption"></p><pre id="opsLogLines" class="ops-log-lines" tabindex="0" aria-label="日志内容">选择来源后读取日志</pre>
+    </section>
+  </dialog>
+
   <script src="ui/motion.js"></script>
   <script src="ui/selects.js"></script>
   <script src="ui/app.js"></script>
+  <script src="ui/operations.js"></script>
+  <script src="ui/performance.js"></script>
+  <script src="ui/maintenance.js"></script>
   <script src="ui/certificates.js"></script>
   <script src="ui/certificate-discovery.js"></script>
   <script src="ui/monitoring.js"></script>
@@ -585,6 +643,7 @@
   <script src="ui/vendor/xterm.js"></script>
   <script src="ui/vendor/addon-fit.js"></script>
   <script src="ui/ssh-terminal.js"></script>
+  <script src="ui/ssh-file-manager.js"></script>
   <script src="ui/vendor/marked.js"></script>
   <script src="ui/vendor/purify.js"></script>
   <script src="ui/terminal-ai.js"></script>

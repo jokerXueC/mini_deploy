@@ -34,6 +34,16 @@ test('different methods, hosts and literal paths stay separate', () => {
     record({host: 'other.test'}), record({path: '/api/1'}), record({path: '/api/2'})]).length, 5);
 });
 
+test('leaf latency percentiles use nearest rank and parents never average percentiles', () => {
+  const [group] = context.groupRequests(Array.from({length: 100}, (_, i) => record({duration_ms: i + 1})));
+  assert.equal(group.p95, 95);
+  assert.equal(group.p99, 99);
+  const [empty] = context.groupRequests([record({duration_ms: null})]);
+  assert.equal(empty.p95, null);
+  const [parent] = context.requestTree(context.groupRequests([record({path: '/api/a'}), record({path: '/api/b', duration_ms: 900})]));
+  assert.equal(parent.p95, undefined);
+});
+
 test('missing and invalid timings are not zeroes, real zero is included', () => {
   const [missing] = context.groupRequests([record({duration_ms: -1, upstream_ms: NaN}),
     record({duration_ms: Infinity, upstream_ms: null})]);

@@ -390,6 +390,10 @@
     updateAccess,
     context() { return {session_id: session, selection: terminal?.getSelection() || '', cursor,
                        target: session ? el('sshTarget').textContent : ''}; },
+    fileRequest(body, options) {
+      if (!session || !allowed) return Promise.reject(new Error('请先连接远程 SSH 服务器'));
+      return api('/ssh/files', {...body, id:session}, options);
+    },
     insertCommand(command) {
       if (!session || !terminal || /[\x00-\x1f\x7f]/.test(command) || command.length > 3000) return false;
       if (!confirm(`将以下命令填入当前终端，不自动按回车。检查后自行执行：\n\n${command}`)) return false;

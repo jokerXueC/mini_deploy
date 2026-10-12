@@ -468,7 +468,7 @@ function setResourceBar(id, value) {
 function animateNumberText(id, value, formatter) {
   const el = $(id);
   if (!el) return;
-  if (id === 'cpuValue') {
+  if (id === 'cpuValue' || id === 'networkValue') {
     el.dataset.value = value ?? '';
     DashboardMotion.reading(el, value, formatter);
     return;
@@ -817,7 +817,7 @@ function renderContainerCard(container) {
       <div class="container-meters">
         ${renderMeter('CPU', container.cpu_percent)}
         ${renderMeter('MEM', container.memory_percent)}
-        <div class="container-actions">${containerActions(container)}</div>
+        <div class="container-actions">${containerActions(container)}${/^[a-f0-9]{64}$/.test(container.id || '') ? `<button class="ghost-button container-action" type="button" data-performance-container="${escapeHtml(container.id)}" data-performance-name="${escapeHtml(title)}">资源历史</button>` : ''}</div>
       </div>
     </article>
   `;
@@ -1260,6 +1260,7 @@ function renderSystemStatus(system = {}) {
   const load = server.load || {};
   const docker = system.docker || {};
   const containers = docker.containers || [];
+  window.ServerPerformance?.update(server);
 
   animateNumberText('cpuValue', server.cpu_percent, formatPercent);
   const cpu = server.cpu || {};
@@ -1278,8 +1279,10 @@ function renderSystemStatus(system = {}) {
   $('diskSub').textContent = `${formatNumber(disk.used_gb, 'GB')} / ${formatNumber(disk.total_gb, 'GB')} · ${disk.path || '/'}`;
   setResourceBar('diskBar', disk.percent);
 
-  animateNumberText('networkValue', network.total_kbps ?? (network.rx_kbps == null || network.tx_kbps == null ? null : network.rx_kbps + network.tx_kbps), value => value >= 1024 ? `${(value / 1024).toFixed(1)} MiB/s` : `${value.toFixed(1)} KiB/s`);
-  $('networkSub').textContent = `RX ${formatNumber(network.rx_kbps, 'KiB/s')} / TX ${formatNumber(network.tx_kbps, 'KiB/s')}`;
+  const networkTotal = network.total_kbps ?? (network.rx_kbps == null || network.tx_kbps == null ? null : network.rx_kbps + network.tx_kbps);
+  animateNumberText('networkValue', networkTotal, value => value >= 1024 ? `${(value / 1024).toFixed(1)} MiB/s` : `${value.toFixed(1)} KiB/s`);
+  DashboardMotion.reading($('networkSub'), networkTotal,
+    () => `RX ${formatNumber(network.rx_kbps, 'KiB/s')} / TX ${formatNumber(network.tx_kbps, 'KiB/s')}`);
   setResourceBar('networkBar', network.percent);
   renderCpuCores(cpu);
   renderSystemTrend(system);

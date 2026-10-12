@@ -34,7 +34,10 @@ window.NginxRequests = (() => {
       if (Number.isFinite(item.duration_ms) && item.duration_ms >= 0) { durationSum += item.duration_ms; durationCount++; }
       if (Number.isFinite(item.upstream_ms) && item.upstream_ms >= 0) { upstreamSum += item.upstream_ms; upstreamCount++; }
     }
+    const latencies = items.map(item => item.duration_ms).filter(value => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
+    const percentile = ratio => latencies.length ? latencies[Math.ceil(latencies.length * ratio) - 1] : null;
     return {items, count: items.length, successes, errors, slowCount, durationSum, durationCount, upstreamSum, upstreamCount,
+      p95: percentile(.95), p99: percentile(.99),
       average: durationCount ? durationSum / durationCount : null,
       upstreamAverage: upstreamCount ? upstreamSum / upstreamCount : null,
       successRate: items.length ? successes / items.length * 100 : 0};
@@ -152,7 +155,7 @@ window.NginxRequests = (() => {
       const meta = [!depth ? group.host || '-' : '', group.children ? `${group.leaves} 类请求` : pathCount > 1 ? `${pathCount} 个原始地址` : '', group.slowCount ? `慢 ${group.slowCount} 次` : ''].filter(Boolean).join(' · ');
       const summary = `<span class="request-route"><span class="request-route-top"><i class="request-expand" aria-hidden="true"></i>${group.children ? '' : `<b>${escapeHtml(group.method)}</b>`}<code title="${escapeHtml(group.path)}">${escapeHtml(label || '/')}${group.children && label && !label.endsWith('/') ? '/' : ''}</code></span>${meta ? `<span class="request-route-host">${escapeHtml(meta)}</span>` : ''}</span>
         <span class="request-metric" data-label="次数">${group.count}</span>
-        <span class="request-metric" data-label="平均耗时" title="${group.durationCount} 条有效耗时样本">${formatDuration(group.average)}</span>
+        <span class="request-metric" data-label="平均耗时" title="${group.durationCount} 条有效耗时样本${group.children ? '' : ` · P95 ${formatDuration(group.p95)} · P99 ${formatDuration(group.p99)}`}">${formatDuration(group.average)}</span>
         <span class="request-metric" data-label="平均上游" title="${group.upstreamCount} 条有效上游样本">${formatDuration(group.upstreamAverage, '-')}</span>
         <span class="request-reliability"><span class="request-spark" role="img" aria-label="最近 ${samples.length} 次${sampleKind}，由旧到新">${bars}</span><strong class="${group.errors ? 'has-errors' : ''}" title="${group.successes} / ${group.count} 次成功">${group.successRate.toFixed(1)}%</strong></span>`;
       const summaryNode = element.querySelector('summary');
@@ -164,6 +167,9 @@ window.NginxRequests = (() => {
         const detailNode = element.querySelector('.request-detail-list');
         const samples = group.items.filter(item => matchesSearch(item, term) && ($('requestStatus').value !== 'slow' || Number.isFinite(item.duration_ms) && item.duration_ms >= slowThreshold()));
         drawSamples(detailNode, samples, showOriginal);
+        let latency = detailNode.querySelector('.request-latency-stats');
+        if (!latency) { latency = document.createElement('p'); latency.className = 'ops-caption request-latency-stats'; detailNode.append(latency); }
+        latency.textContent = `P95 ${formatDuration(group.p95)} · P99 ${formatDuration(group.p99)} · ${group.durationCount} 条有效耗时 · ${historyResult ? '所选时段内已保存请求' : '当前采集样本'}，不是仅按下方明细计算`;
       }
       const position = index + (parent === rows ? 1 : 0);
       if (parent.children[position] !== element) parent.insertBefore(element, parent.children[position] || null);

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import stat
@@ -23,6 +24,21 @@ MAX_ROWS = 100_000
 MAX_BYTES = 96 * 1024 * 1024  # Conservative row/index budget below the SQLite file limit.
 MAX_LINES = 5000
 PERIODS = {"1h": 3600, "24h": 86400, "7d": RETENTION}
+
+
+class LatencyStats:
+    """Nearest-rank percentiles over every valid latency in a selected group."""
+    def __init__(self):
+        self.values = []
+
+    def step(self, value):
+        if value is not None and math.isfinite(value) and value >= 0:
+            self.values.append(value)
+
+    def finalize(self):
+        values = sorted(self.values)
+        return json.dumps({'p95': values[math.ceil(len(values) * .95) - 1] if values else None,
+                           'p99': values[math.ceil(len(values) * .99) - 1] if values else None})
 
 
 def normalize_path(path):
@@ -60,6 +76,7 @@ class History:
             try:
                 self.path.chmod(0o600)
                 db.row_factory = sqlite3.Row
+                db.create_aggregate('latency_stats', 1, LatencyStats)
                 db.execute("PRAGMA max_page_count=65536")  # 256 MiB with the default 4 KiB pages.
                 if not self.initialized:
                     db.executescript("""
@@ -176,7 +193,7 @@ class History:
             SUM(status>=200 AND status<400) AS successes,SUM(status>=400) AS errors,
             COALESCE(SUM(duration),0) AS durationSum,COUNT(duration) AS durationCount,
             COALESCE(SUM(upstream),0) AS upstreamSum,COUNT(upstream) AS upstreamCount,
-            COUNT(DISTINCT path) AS pathCount,SUM(duration >= ?) AS slowCount
+            COUNT(DISTINCT path) AS pathCount,SUM(duration >= ?) AS slowCount,latency_stats(duration) AS latency
             FROM requests WHERE source=? AND ts>=? AND ts<=? GROUP BY host,method,{column}
             HAVING {' AND '.join(having)}"""
         params = (slow_ms, key, since, now, *search_params, *((slow_ms,) if status == "slow" else ()))
@@ -188,6 +205,7 @@ class History:
                 f"SELECT COUNT(*),COALESCE(SUM(count),0) FROM ({grouped})", params).fetchone()
             # At most 100 groups per page and 30 individual examples per group.
             for group in groups:
+                group.update(json.loads(group.pop('latency') or '{"p95":null,"p99":null}'))
                 samples = db.execute(f"""SELECT id,data FROM requests INDEXED BY request_{column}
                     WHERE source=? AND ts>=? AND ts<=?
                     AND host=? AND method=? AND {column}=?

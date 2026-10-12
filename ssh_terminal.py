@@ -17,6 +17,7 @@ import threading
 import time
 
 import ssh_files
+import ssh_file_manager
 
 try:
     import paramiko
@@ -94,6 +95,8 @@ class Session:
         self.chunks, self.size, self.sequence = deque(), 0, 0
         self.closed, self.reason, self.closed_at = False, "", 0
         self.activity = self.last_poll = time.monotonic()
+        self.files = ssh_file_manager.Files(self)
+        self.file_slots = threading.BoundedSemaphore(2)
 
     def start(self):
         threading.Thread(target=self._read, name="ssh-pty-reader", daemon=True).start()
@@ -121,6 +124,7 @@ class Session:
             self.close("远程会话已结束。")
 
     def close(self, reason):
+        self.files.close()
         with self.condition:
             if self.closed:
                 return
@@ -204,6 +208,11 @@ class Session:
     def execute_plan(self, plan, cancel, *, timeout=20):
         if plan.get('transport') != 'sftp':
             return self.execute_tool(plan['command'], cancel, timeout=timeout)
+        return self.execute_sftp(lambda client, check: ssh_files.execute(client, plan, check), cancel, timeout=timeout)
+
+    def execute_sftp(self, operation, cancel, *, timeout=20):
+        if not self.file_slots.acquire(blocking=False):
+            raise SSHError('已有两个文件通道正在使用，请稍后重试', 409)
         channel, client, finished = None, None, threading.Event()
         deadline = time.monotonic() + timeout
         def check():
@@ -226,7 +235,7 @@ class Session:
             channel.settimeout(min(5, timeout))
             channel.invoke_subsystem('sftp')
             client = paramiko.SFTPClient(channel)
-            result = ssh_files.execute(client, plan, check)
+            result = operation(client, check)
             check()
             self.activity = time.monotonic()
             return {'exit_code': 0, **result}
@@ -238,10 +247,15 @@ class Session:
                            "未自动重试。若已提交修改，请检查原文件及保留的备份/候选文件。", 502) from None
         finally:
             finished.set()
-            if client is not None:
-                client.close()
-            if channel is not None:
-                channel.close()
+            try:
+                if client is not None:
+                    client.close()
+            finally:
+                try:
+                    if channel is not None:
+                        channel.close()
+                finally:
+                    self.file_slots.release()
 
     def execute_tool(self, command, cancel, *, timeout=20, max_bytes=24000):
         """Run a backend-built command on a separate channel, never in the PTY."""
@@ -570,6 +584,9 @@ class Manager:
         while not self.stop.wait(5):
             with self.lock:
                 self._cleanup()
+                for session in self.sessions.values():
+                    with session.files.lock:
+                        session.files.purge()
 
     def shutdown(self):
         self.stop.set()

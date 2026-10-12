@@ -57,6 +57,12 @@ import docker_mirrors
 import ssh_terminal
 import terminal_ai
 import terminal_history
+import server_operations
+import performance_metrics
+import panel_maintenance
+import ssh_files
+
+RUNNING_RELEASE = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 try:
     import fcntl
@@ -1670,11 +1676,15 @@ def _memory_status() -> dict[str, Any]:
     total = values.get("MemTotal", 0)
     available = values.get("MemAvailable", 0)
     used = max(0, total - available)
+    swap_total = values.get('SwapTotal', 0)
+    swap_used = max(0, swap_total - values.get('SwapFree', 0))
     return {
         "used_mb": round(used / 1024 / 1024, 1) if total else None,
         "total_mb": round(total / 1024 / 1024, 1) if total else None,
         "available_mb": round(available / 1024 / 1024, 1) if total else None,
         "percent": _percent(used / total * 100) if total else None,
+        "swap": {"total_mb": swap_total / 1024**2, "used_mb": swap_used / 1024**2,
+                 "percent": swap_used / swap_total * 100 if swap_total else None},
     }
 
 
@@ -1682,11 +1692,17 @@ def _disk_status(path: Path = Path("/")) -> dict[str, Any]:
     try:
         usage = shutil.disk_usage(path)
         used = usage.total - usage.free
+        inode = {}
+        if hasattr(os, 'statvfs'):
+            stats = os.statvfs(path)
+            inode = {"total": stats.f_files, "used": stats.f_files - stats.f_ffree,
+                     "percent": (stats.f_files - stats.f_ffree) / stats.f_files * 100 if stats.f_files else None}
         return {
             "path": str(path),
             "used_gb": round(used / 1024 / 1024 / 1024, 1),
             "total_gb": round(usage.total / 1024 / 1024 / 1024, 1),
             "percent": _percent(used / usage.total * 100) if usage.total else None,
+            "inode": inode,
         }
     except Exception:
         return {"path": str(path), "used_gb": None, "total_gb": None, "percent": None}
@@ -1826,7 +1842,11 @@ def _docker_status() -> dict[str, Any]:
                 target = next((c for c in containers if c.get("name") == name), None)
             if not target:
                 continue
-            target["cpu_percent"] = _percent(str(item.get("CPUPerc") or "").replace("%", ""))
+            try:
+                cpu = float(str(item.get("CPUPerc") or "").replace("%", ""))
+                target["cpu_percent"] = cpu if 0 <= cpu < float('inf') else None
+            except ValueError:
+                pass
             target["memory_percent"] = _percent(str(item.get("MemPerc") or "").replace("%", ""))
             target["memory_usage"] = str(item.get("MemUsage") or "")
             target["net_io"] = str(item.get("NetIO") or "")
@@ -2048,6 +2068,23 @@ def _docker_image_action(action: str, reference: str) -> str:
     return output[-4000:]
 
 
+_disk_sampler = performance_metrics.DiskSampler()
+_container_performance = None
+_container_performance_lock = threading.Lock()
+
+
+def _panel_maintenance():
+    return panel_maintenance.Maintenance(APP_HOME, STATE_FILE.parent, AGENT_ENV_FILE, LOG_FILE.parent, AGENT_SERVICE_NAME)
+
+
+def _performance_history():
+    global _container_performance
+    with _container_performance_lock:
+        if _container_performance is None or _container_performance.path.parent.parent != STATE_FILE.parent:
+            _container_performance = performance_metrics.ContainerHistory(STATE_FILE.parent, _maintenance_shared_lock)
+        return _container_performance
+
+
 def _system_status_payload() -> dict[str, Any]:
     now = time.time()
     with _system_status_lock:
@@ -2064,6 +2101,10 @@ def _system_status_payload() -> dict[str, Any]:
             "history_interval_seconds": SYSTEM_METRIC_INTERVAL_SECONDS,
             "history_max_points": SYSTEM_METRIC_MAX_POINTS,
         }
+        try:
+            _performance_history().record(payload['docker'].get('containers') or [], now)
+        except (OSError, ValueError, sqlite3.Error, _MaintenanceLockError) as exc:
+            _log(f'container performance history unavailable: {exc}')
         _system_status_cache["at"] = now
         _system_status_cache["payload"] = payload
         return json.loads(json.dumps(payload, ensure_ascii=False))
@@ -2077,6 +2118,7 @@ def _sample_realtime_metrics() -> None:
         "cpu_percent": _cpu_percent(), "load": _load_average(), "memory": _memory_status(),
         "cpu": _cpu_metrics.snapshot,
         "disk": _disk_status(Path("/")), "network": _network_status(),
+        "disk_io": _disk_sampler.sample(),
         "sampled_at": _now_text(), "sampled_ts": now, "cache_seconds": 1,
     }
     memory, network = server["memory"], server["network"]
@@ -2120,7 +2162,7 @@ def _system_metric_sampler() -> None:
             _system_status_payload()
         except Exception as exc:  # noqa: BLE001 - sampler must never stop the agent
             _log(f"system metric sample failed: {exc}")
-        time.sleep(max(60, SYSTEM_METRIC_INTERVAL_SECONDS))
+        time.sleep(30)
 
 
 
@@ -2299,6 +2341,62 @@ def _monitor() -> monitoring.Monitor:
         if _monitor_instance is None or _monitor_instance.path != path:
             _monitor_instance = monitoring.Monitor(path)
         return _monitor_instance
+
+
+_operations_instance = None
+_operations_lock = threading.Lock()
+
+
+def _operations() -> server_operations.Operations:
+    global _operations_instance
+    with _operations_lock:
+        if (_operations_instance is None or _operations_instance.log_file != LOG_FILE
+                or _operations_instance.service != AGENT_SERVICE_NAME):
+            _operations_instance = server_operations.Operations(log_file=LOG_FILE, service=AGENT_SERVICE_NAME)
+        return _operations_instance
+
+
+def _operations_inventory(sort="cpu", pid=None) -> dict[str, Any]:
+    # Reuse worker-populated Docker state; opening diagnostics never performs docker stats/inspect.
+    with _system_status_lock:
+        docker = json.loads(json.dumps((_system_status_cache.get("payload") or {}).get("docker") or {}))
+    return _operations().inventory(docker, sort, pid)
+
+
+def _incident_diagnostics(key: str, sort="cpu", pid=None) -> dict[str, Any]:
+    snapshot = _monitor().snapshot()
+    item = next((row for row in snapshot["alerts"] + snapshot["events"] if row.get("id") == key), None)
+    if item is None:
+        raise ValueError("异常已变化或不在保留范围内，请刷新异常列表")
+    now = time.time()
+    at = item.get("first_seen") or item.get("at_ts") or now
+    inventory = _operations_inventory(sort, pid)
+    meta = item.get("metadata") or {}
+    identifier = meta.get("container_id") or meta.get("id")
+    name = meta.get("container") or meta.get("name")
+    source = next((s["id"] for s in inventory["sources"] if s["kind"] == "container"
+                   and (s["id"] == "container:" + str(identifier) if identifier else s["name"] == name)), "")
+    if item.get("source") not in {"docker", "container", "docker_events"}:
+        source = "service:" + AGENT_SERVICE_NAME + ".service" if item.get("source") == "monitoring" else ""
+    related = [event for event in snapshot["events"] if item.get("incident_id")
+               and event.get("incident_id") == item["incident_id"]][:30]
+    realtime = _realtime_metrics_payload()
+    samples = {point["ts"]: point for point in _system_metric_history() + realtime["realtime_history"]
+               if at - 300 <= (point.get("ts") or 0) <= at + 300}
+    def scrub(value):
+        if isinstance(value, dict):
+            return {key: "[已隐藏]" if re.search(r"password|secret|token|authorization|cookie|api.?key", key, re.I)
+                    else scrub(content) for key, content in value.items()}
+        if isinstance(value, list):
+            return [scrub(content) for content in value]
+        return terminal_ai.redact(value) if isinstance(value, str) else value
+
+    item, related = scrub(item), scrub(related)
+    return {"incident": item, "timeline": related, "inventory": inventory,
+            "server_now": realtime["server"], "resource_samples": sorted(samples.values(), key=lambda p: p["ts"]),
+            "window": {"since": max(now - 7 * 86400, at - 300), "until": min(now, at + 300)},
+            "window_available": now - 7 * 86400 <= at <= now,
+            "log_source": source, "checked_at": now}
 
 
 @_maintenance_shared_operation
@@ -2567,6 +2665,12 @@ def _normal_path(path: str) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "performance.js": "application/javascript; charset=utf-8",
+    "maintenance.js": "application/javascript; charset=utf-8",
+    "ssh-file-manager.js": "application/javascript; charset=utf-8",
+    "ssh-file-manager.css": "text/css; charset=utf-8",
+    "operations.js": "application/javascript; charset=utf-8",
+    "operations.css": "text/css; charset=utf-8",
     "terminal-ai.js": "application/javascript; charset=utf-8",
     "terminal-ai.css": "text/css; charset=utf-8",
     "previews/ssh-ai/index.html": "text/html; charset=utf-8",
@@ -2600,7 +2704,8 @@ UI_ASSET_TYPES.update({
         "eraser", "unplug", "terminal", "scan-text", "panel-right-close", "panel-right-open",
         "lock-keyhole", "circle-alert", "arrow-right", "sparkles", "chevron-down",
         "message-square", "layers-2", "chevron-right", "corner-up-left", "play", "text-select",
-        "arrow-up", "x", "loader-circle", "maximize-2", "minimize-2",
+        "arrow-up", "x", "loader-circle", "maximize-2", "minimize-2", "refresh-cw", "download", "pause",
+        "folder", "file", "folder-plus", "file-plus", "upload", "house", "save", "eye", "search",
     )
 })
 
@@ -2669,7 +2774,8 @@ def _ssh_manager():
         if _ssh_manager_instance is None:
             _ssh_manager_instance = ssh_terminal.Manager(STATE_FILE.parent / "ssh",
                 audit=lambda kind, spec: _audit_event(kind, target=spec.get("host", ""),
-                    success=kind != "ssh_connect_failed", detail={k: spec[k] for k in ("port", "username") if k in spec}))
+                    success=kind != "ssh_connect_failed" and spec.get('state') not in {'failed', 'cancelled'},
+                    detail={k: spec[k] for k in ("port", "username", "path", "action", "state", "size") if k in spec}))
         return _ssh_manager_instance
 
 
@@ -2853,10 +2959,19 @@ class Handler(BaseHTTPRequestHandler):
             origin = urlparse(self.headers.get("Origin", ""))
             if origin.scheme not in {"http", "https"} or origin.netloc != self.headers.get("Host", ""):
                 raise ssh_terminal.SSHError("终端请求来源无效，请刷新面板重试。", 403)
-            data = _read_json_body(self, max_bytes=48 * 1024)
+            data = _read_json_body(self, max_bytes=2 * 1024**2 if path == '/ssh/files' else 48 * 1024)
             manager, owner = _ssh_manager(), self._ssh_owner()
             manager.check_owner(owner)
-            if path == "/ssh/profiles":
+            if path == '/ssh/files':
+                session = manager.session(owner, data.get('id'))
+                action = str(data.get('action', ''))
+                if session.closed or time.time() >= session.expires:
+                    raise ssh_terminal.SSHError('连接已断开，请重新连接远程服务器', 410)
+                result = session.files.operate(data)
+                if action in {'save', 'new_file', 'mkdir', 'upload_commit', 'cancel', 'download_begin'}:
+                    _audit_event('ssh_files_' + action, actor=self.client_address[0], success=True,
+                                 target=session.spec['host'], detail={'path': str(data.get('path', ''))[:4096]})
+            elif path == "/ssh/profiles":
                 result = manager.profile(data)
                 _audit_event("ssh_profile", actor=self.client_address[0], success=True,
                     detail={"action": "delete" if data.get("action") == "delete" else "save"})
@@ -2880,7 +2995,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ssh_terminal.SSHError("不支持的终端操作。", 404)
             self._write_json(200, result)
         except (ssh_terminal.SSHError, ValueError, OSError) as exc:
-            detail = str(exc) if isinstance(exc, ssh_terminal.SSHError) else "终端操作失败，请检查配置和文件权限后重试。"
+            detail = str(exc) if isinstance(exc, (ssh_terminal.SSHError, ssh_files.FileError)) else "终端操作失败，请检查配置和文件权限后重试。"
             self._write_json(getattr(exc, "status", 400), {"error": "ssh_failed", "detail": detail})
 
     def _write_ssh_stream(self, session, cursor):
@@ -3109,7 +3224,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._write_json(200, {"notifications": _notification_config_payload(include_secret=True)})
             return
         if path == "/health":
-            self._write_json(200, {"status": "ok"})
+            self._write_json(200, {"status": "ok", "release": RUNNING_RELEASE})
             return
         if path in {"/", "/ui", "/ui/"}:
             if self._authenticated():
@@ -3129,6 +3244,48 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/system-metrics":
             if self._require_auth_json():
                 self._write_json(200, _realtime_metrics_payload())
+            return
+        if path == '/panel-maintenance':
+            if self._require_auth_json():
+                try:
+                    payload = _panel_maintenance().status()
+                    payload['csrf_token'] = self._csrf_token_for_request()
+                    self._write_json(200, payload)
+                except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                    self._write_json(503, {'error': 'maintenance_unavailable', 'detail': str(exc)})
+            return
+        if path == '/performance/containers':
+            if self._require_auth_json():
+                query = parse_qs(parsed.query)
+                try:
+                    self._write_json(200, _performance_history().query(query.get('id', [''])[0], query.get('period', ['24h'])[0]))
+                except (ValueError, OSError, sqlite3.Error, _MaintenanceLockError) as exc:
+                    self._write_json(400 if isinstance(exc, ValueError) else 503,
+                                     {'error': 'performance_unavailable', 'detail': str(exc)})
+            return
+        if path in {"/operations/inventory", "/operations/logs", "/operations/incident"}:
+            if not self._require_auth_json():
+                return
+            query = parse_qs(parsed.query)
+            try:
+                if path == "/operations/inventory":
+                    payload = _operations_inventory(query.get("sort", ["cpu"])[0],
+                                                    int(query["pid"][0]) if "pid" in query else None)
+                elif path == "/operations/incident":
+                    payload = _incident_diagnostics(query.get("id", [""])[0], query.get("sort", ["cpu"])[0],
+                                                   int(query["pid"][0]) if "pid" in query else None)
+                else:
+                    _operations_inventory()
+                    payload = _operations().logs(query.get("source", [""])[0],
+                        since=float(query["since"][0]) if "since" in query else None,
+                        until=float(query["until"][0]) if "until" in query else None,
+                        limit=int(query.get("limit", ["300"])[0]),
+                        keyword=query.get("keyword", [""])[0], level=query.get("level", ["all"])[0])
+                self._write_json(200, payload)
+            except (ValueError, TypeError, OverflowError) as exc:
+                self._write_json(400, {"error": "invalid_diagnostics", "detail": str(exc)})
+            except (OSError, RuntimeError) as exc:
+                self._write_json(503, {"error": "diagnostics_unavailable", "detail": str(exc)})
             return
         if path == "/logs":
             if self._require_auth_json():
@@ -3255,6 +3412,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path in {'/panel-maintenance', '/panel-maintenance/check'}:
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=4096)
+                    _audit_event('panel_maintenance_requested', actor=self.client_address[0], success=True,
+                                 detail={'action': 'check' if path.endswith('/check') else str(data.get('action', ''))[:32]})
+                    result = (_panel_maintenance().check(data.get('channel', 'gitee')) if path.endswith('/check')
+                              else _panel_maintenance().start(data))
+                    self._write_json(200 if path.endswith('/check') else 202, result)
+                except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                    _audit_event('panel_maintenance_failed', actor=self.client_address[0], success=False)
+                    self._write_json(400, {'error': 'maintenance_failed', 'detail': str(exc)})
+            return
         if path.startswith("/terminal-ai/"):
             self._handle_terminal_ai(path, parsed)
             return

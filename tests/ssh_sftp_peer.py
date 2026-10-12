@@ -78,6 +78,22 @@ class LocalFiles(paramiko.SFTPServerInterface):
         except OSError as exc:
             return paramiko.SFTPServer.convert_errno(exc.errno)
 
+    def rename(self, old, new):
+        try:
+            if self.path(new).exists():
+                return paramiko.SFTP_FAILURE
+            self.path(old).rename(self.path(new))
+            return paramiko.SFTP_OK
+        except OSError as exc:
+            return paramiko.SFTPServer.convert_errno(exc.errno)
+
+    def mkdir(self, path, attr):
+        try:
+            self.path(path).mkdir(mode=attr.st_mode or 0o755)
+            return paramiko.SFTP_OK
+        except OSError as exc:
+            return paramiko.SFTPServer.convert_errno(exc.errno)
+
 
 def enable_sftp(peer, root):
     root.mkdir(exist_ok=True)

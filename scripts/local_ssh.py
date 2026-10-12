@@ -29,7 +29,7 @@ class Handler(agent.Handler):
             else:
                 page = agent._render_ui().replace('<body>', '<body><div role="status" '
                     'style="padding:8px 24px;font-size:12px;color:#059669">'
-                    '本地 SSH 实测 · 连接真实服务器；本入口仅提供远程终端。</div>')
+                    '本地 SSH 实测 · 连接真实服务器，支持远程终端与文件管理。</div>')
                 self._write_html(200, page)
             return
         if path.startswith(("/ui/", "/terminal-ai/")) or path in {"/ssh", "/ssh/output", "/ssh/stream", "/logout", "/health"}:

@@ -44,8 +44,8 @@ UPGRADE_SERVICE_FAILSAFE_ARMED="false"
 # Only these program entries are updated. Never prune an installed tree:
 # retired deployment scripts and user-owned business resources must survive.
 RELEASE_ENTRIES=(
-  agent.py cpu_metrics.py certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
-  caddy_requests.py request_gateway.py request_history.py gateway_connections.py monitoring.py container_monitoring.py docker_events.py docker_mirrors.py ssh_terminal.py ssh_files.py terminal_ai.py terminal_tools.py terminal_history.py requirements-ssh.txt
+  agent.py cpu_metrics.py server_operations.py performance_metrics.py panel_maintenance.py release.json certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
+  caddy_requests.py request_gateway.py request_history.py gateway_connections.py monitoring.py container_monitoring.py docker_events.py docker_mirrors.py ssh_terminal.py ssh_files.py ssh_file_manager.py terminal_ai.py terminal_tools.py terminal_history.py requirements-ssh.txt
   install.sh env.example server.env.example LICENSE THIRD_PARTY_NOTICES.md ui
   examples/nginx.compose.yml
   systemd/mini-deploy-agent.service
@@ -1986,6 +1986,12 @@ install -m 644 /dev/null "$marker"
   printf 'installed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   printf 'app_home=%s\n' "$APP_HOME"
   printf 'release_fingerprint=sha256:%s\n' "$(sha256sum "$APP_HOME/agent.py" | awk '{print $1}')"
+  if command -v git >/dev/null 2>&1 && [[ -z "$(git -C "$SOURCE_DIR" status --porcelain 2>/dev/null)" ]]; then
+    source_revision="$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]]; then
+      printf 'revision=%s\n' "$source_revision"
+    fi
+  fi
 } >"$marker"
 chown root:root "$marker"
 chmod 644 "$marker"
