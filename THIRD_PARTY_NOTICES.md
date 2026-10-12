@@ -17,6 +17,18 @@ SSH transport uses Paramiko (LGPL-2.1-or-later), installed separately by the
 Linux package manager, or using requirements-ssh.txt for development.
 https://www.paramiko.org/
 
+## Markdown Rendering
+
+AI replies bundle Marked 18.1.0 (MIT) and DOMPurify 3.4.16
+(Apache-2.0 OR MPL-2.0) from npm. Full notices are preserved in
+ui/vendor/marked.LICENSE, ui/vendor/purify.LICENSE and ui/vendor/purify.LICENSE-MPL.
+Both are served locally; no external CDN is used at runtime.
+
+Registry SHA-512 integrity values verified when vendoring:
+
+- marked: PamYXWWWg2nboG3oX5Ffzpy3EFZROqZJK9hSlMmUnekp7TxPs5DcT95vwd46m73/exfKCRVMtgXoPMI4FEJL6w==
+- dompurify: sqo+pNp3qRhCIpbgRi1y8Tgk27Bo2Ry7w0dC1NBeNTdZChWjz9Xb/KOoZbRP/R6pQZ80Qw8YhXw13hWWBbMRnQ==
+
 ## Lucide Icons
 
 The refresh-cw and ellipsis SVG icons in ui/index.html are from lucide-static

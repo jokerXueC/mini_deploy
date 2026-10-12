@@ -2575,6 +2575,8 @@ UI_ASSET_TYPES = {
     "ssh-terminal.js": "application/javascript; charset=utf-8",
     "vendor/xterm.js": "application/javascript; charset=utf-8",
     "vendor/addon-fit.js": "application/javascript; charset=utf-8",
+    "vendor/marked.js": "application/javascript; charset=utf-8",
+    "vendor/purify.js": "application/javascript; charset=utf-8",
     "vendor/xterm.css": "text/css; charset=utf-8",
     "sites.js": "application/javascript; charset=utf-8",
     "monitoring.js": "application/javascript; charset=utf-8",
@@ -2598,7 +2600,7 @@ UI_ASSET_TYPES.update({
         "eraser", "unplug", "terminal", "scan-text", "panel-right-close", "panel-right-open",
         "lock-keyhole", "circle-alert", "arrow-right", "sparkles", "chevron-down",
         "message-square", "layers-2", "chevron-right", "corner-up-left", "play", "text-select",
-        "arrow-up", "x", "loader-circle",
+        "arrow-up", "x", "loader-circle", "maximize-2", "minimize-2",
     )
 })
 
@@ -2741,7 +2743,7 @@ class Handler(BaseHTTPRequestHandler):
                 _audit_event("ai_settings_saved", actor=self.client_address[0], success=True)
             elif path == "/terminal-ai/test":
                 result = manager.submit(owner, action="test", data=data)
-            elif path == "/terminal-ai/chat":
+            elif path in {"/terminal-ai/chat", "/terminal-ai/restore", "/terminal-ai/health"}:
                 session_id = str(data.get("session_id") or "")
                 output = ""
                 executor, validate, target = None, None, ""
@@ -2768,7 +2770,7 @@ class Handler(BaseHTTPRequestHandler):
                             output = b"".join(chunk for _, chunk in session.chunks).decode("utf-8", errors="replace")
                 elif data.get("include_terminal") is True:
                     raise terminal_ai.AIError("请先连接 SSH，或关闭附带终端输出。")
-                result = manager.submit(owner, action="chat", data=data, session_id=session_id, output=output,
+                result = manager.submit(owner, action=path.rsplit('/', 1)[-1], data=data, session_id=session_id, output=output,
                                         executor=executor, validate=validate, target=target)
             elif path == "/terminal-ai/access":
                 session_id = str(data.get("session_id") or "")

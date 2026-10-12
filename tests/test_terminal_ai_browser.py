@@ -68,12 +68,201 @@ def settings_form(page, http_server, model_server, protocol='openai'):
     page.locator('#aiKey').fill('test-key-only')
 
 
+def test_expanded_chat_preserves_task_draft_focus_and_mobile_layout(
+        page, http_server, ai_manager, model_server, tmp_path):
+    ai_manager.save(ai_tests.config(model_server))
+    model_server.gate = threading.Event()
+    model_server.content = {'choices': [{'message': {'content': '## 检查结果\n\n**资源正常**。\n\n'
+        '| 服务 | 状态 | 建议 |\n| --- | --- | --- |\n| API | 正常 | 保持观察 |\n'}}]}
+    page.goto(http_server.origin + '/ui?view=terminal')
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiQuestion').fill('检查一下服务器的状态')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('.tai-loading')).to_be_visible()
+    page.locator('#aiQuestion').fill('下一轮问题草稿')
+    page.get_by_role('button', name='放大 AI 对话', exact=True).click()
+    dialog = page.locator('#aiExpandedDialog')
+    playwright.expect(dialog).to_be_visible()
+    playwright.expect(dialog.locator('#aiPanel')).to_be_visible()
+    playwright.expect(page.locator('#aiResizeHandle')).not_to_be_visible()
+    playwright.expect(page.locator('#aiBackdrop')).not_to_be_visible()
+    playwright.expect(page.locator('#aiQuestion')).to_have_value('下一轮问题草稿')
+    box = dialog.bounding_box()
+    assert box['width'] >= 950 and abs(box['x'] + box['width'] / 2 - 720) <= 1
+    assert abs(box['y'] + box['height'] / 2 - 500) <= 1
+    model_server.gate.set()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    playwright.expect(dialog.locator('.tai-answer table')).to_be_visible()
+    assert len(model_server.calls) == 1 and dialog.locator('.tai-entry').count() == 1
+    page.screenshot(path=str(tmp_path / 'ai-expanded-desktop.png'), full_page=True)
+    page.locator('#aiPanelModel').click()
+    playwright.expect(page.locator('#aiSettingsDialog')).to_be_visible()
+    page.keyboard.press('Escape')
+    playwright.expect(page.locator('#aiSettingsDialog')).not_to_be_visible()
+    playwright.expect(dialog).to_be_visible()
+    page.get_by_role('button', name='恢复侧栏', exact=True).click()
+    playwright.expect(dialog).not_to_be_visible()
+    playwright.expect(page.locator('#sshLayout > #aiPanel')).to_be_visible()
+    playwright.expect(page.locator('#aiResizeHandle')).to_be_visible()
+    playwright.expect(page.locator('#aiQuestion')).to_have_value('下一轮问题草稿')
+    playwright.expect(page.get_by_role('button', name='放大 AI 对话', exact=True)).to_be_focused()
+    page.get_by_role('button', name='放大 AI 对话', exact=True).click()
+    page.keyboard.press('Escape')
+    playwright.expect(dialog).not_to_be_visible()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.get_by_role('button', name='放大 AI 对话', exact=True).click()
+    playwright.expect(dialog).to_be_visible()
+    box = dialog.bounding_box()
+    assert box['x'] >= 9 and box['y'] >= 11 and box['x'] + box['width'] <= 381
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / 'ai-expanded-mobile.png'))
+    page.mouse.click(3, 3)
+    playwright.expect(dialog).to_be_visible()
+    page.get_by_role('button', name='收起 AI 对话', exact=True).click()
+    playwright.expect(dialog).not_to_be_visible()
+    playwright.expect(page.locator('#aiPanel')).not_to_be_visible()
+    assert not page.locator('body').evaluate("el => el.classList.contains('tai-expanded')")
+    page.locator('#aiChatOpen').click()
+    playwright.expect(page.locator('#aiQuestion')).to_have_value('下一轮问题草稿')
+    for icon in ('maximize-2', 'minimize-2'):
+        assert page.request.get(http_server.origin + '/ui/previews/ssh-ai/icons/' + icon + '.svg').status == 200
+
+
+def test_markdown_answers_tables_code_history_and_untrusted_html(
+        page, http_server, ai_manager, model_server, tmp_path):
+    reply = '''## 容器状态
+
+当前有 **8 个运行中的容器**，`web` 正常，~~旧端口~~已弃用。
+
+| 容器名称 | 运行状态 | 端口 |
+| --- | --- | --- |
+| `mini-gateway-web-zhunkeda-top-2` | **运行中** | 127.0.0.1:18081 → 10000 |
+| `zhunkeda-caddy-1` | 运行中 | 80 / 443 |
+
+1. 查看近期日志。
+2. 核对转发配置。
+
+> 配置修改前需要确认。
+
+```sh
+docker ps
+```
+
+[安全链接](https://example.com/docs)
+[危险链接](javascript:alert(1))
+[面板操作](/logout)
+<img src="https://example.com/tracker.png" onerror="window.aiInjected=true">
+<script>window.aiInjected=true</script>
+<svg onload="window.aiInjected=true"></svg>
+<iframe src="https://example.com"></iframe>
+<form id="sshForm"><input name="secret"></form>
+<a href="data:text/html,unsafe">data 链接</a>
+'''
+    ai_manager.save(ai_tests.config(model_server))
+    model_server.content = {'choices': [{'message': {'content': reply}}]}
+    external = []
+    page.on('request', lambda request: external.append(request.url) if request.url.startswith('https://example.com') else None)
+    page.goto(http_server.origin + '/ui?view=terminal')
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiQuestion').fill('整理一下容器状态')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    answer = page.locator('.tai-answer')
+    playwright.expect(answer.locator('strong').first).to_have_text('8 个运行中的容器')
+    playwright.expect(answer.locator('table tbody tr')).to_have_count(2)
+    playwright.expect(answer.locator('ol li')).to_have_count(2)
+    playwright.expect(answer.locator('blockquote')).to_contain_text('配置修改前需要确认')
+    playwright.expect(answer.locator('h2')).to_have_text('容器状态')
+    playwright.expect(answer.locator('.tai-command pre')).to_have_text('docker ps')
+    playwright.expect(answer.get_by_role('button', name='复制', exact=True)).to_be_visible()
+    playwright.expect(answer.get_by_role('button', name='填入终端', exact=True)).to_be_visible()
+    assert answer.locator('img,script,svg,iframe,form,input,[onerror],[onload],a[href^="javascript:"],a[href^="data:"]').count() == 0
+    assert answer.locator('a').count() == 1
+    assert answer.locator('a').get_attribute('rel') == 'noopener noreferrer'
+    assert page.evaluate('window.aiInjected === undefined') and not external
+    assert '**8' not in answer.inner_text() and '| ---' not in answer.inner_text()
+    page.locator('#sshConnectionToggle').click()
+    page.locator('#aiResizeHandle').focus()
+    for _ in range(8):
+        page.locator('#aiResizeHandle').press('ArrowLeft')
+    page.locator('#aiMessages').evaluate('el => el.scrollTop = 0')
+    page.screenshot(path=str(tmp_path / 'ai-markdown-desktop.png'), full_page=True)
+    page.reload()
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiHistoryOpen').click()
+    page.locator('.tai-history-row').click()
+    playwright.expect(page.locator('.tai-answer table tbody tr')).to_have_count(2)
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    scroll = page.locator('.tai-table-scroll')
+    assert scroll.evaluate('el => el.scrollWidth > el.clientWidth')
+    scroll.evaluate('el => el.scrollLeft = 120')
+    assert scroll.evaluate('el => el.scrollLeft > 0')
+    page.locator('#aiMessages').evaluate('el => el.scrollTop = 0')
+    page.screenshot(path=str(tmp_path / 'ai-markdown-mobile.png'))
+    playwright.expect(page.locator('#aiResizeHandle')).not_to_be_visible()
+
+
+def test_ai_splitter_drag_keyboard_persistence_and_terminal_fit(
+        page, http_server, manager, peer, ai_manager, model_server, tmp_path):
+    ai_manager.save(ai_tests.config(model_server))
+    page.goto(http_server.origin + '/ui?view=terminal')
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    page.locator('#sshConnectionToggle').click()
+    page.locator('#aiChatOpen').click()
+    handle = page.locator('#aiResizeHandle')
+    playwright.expect(handle).to_be_visible()
+    page.wait_for_function("document.querySelector('#aiResizeHandle').getAttribute('aria-valuenow') !== null")
+    initial_terminal = page.locator('#sshTerminal').bounding_box()['width']
+    initial_cols = peer['sizes'][-1][0]
+    initial_ai = page.locator('#aiPanel').bounding_box()['width']
+    box = handle.bounding_box()
+    page.mouse.move(box['x'] + box['width'] / 2, box['y'] + 180)
+    page.mouse.down()
+    page.mouse.move(box['x'] - 165, box['y'] + 180, steps=12)
+    page.mouse.up()
+    page.wait_for_function("Number(document.querySelector('#aiResizeHandle').getAttribute('aria-valuenow')) > 480")
+    assert page.locator('#aiPanel').bounding_box()['width'] > initial_ai + 150
+    assert page.locator('#sshTerminal').bounding_box()['width'] < initial_terminal - 150
+    page.wait_for_timeout(250)
+    assert peer['sizes'][-1][0] < initial_cols
+    saved = page.evaluate("localStorage.getItem('mini-deploy-ai-width')")
+    assert not page.locator('body').evaluate("el => el.classList.contains('tai-resizing')")
+    page.screenshot(path=str(tmp_path / 'ai-splitter-wide-desktop.png'), full_page=True)
+    page.reload()
+    page.locator('#aiChatOpen').click()
+    playwright.expect(handle).to_have_attribute('aria-valuenow', saved)
+    handle.focus()
+    handle.press('ArrowLeft')
+    playwright.expect(handle).to_have_attribute('aria-valuenow', str(int(saved) + 24))
+    handle.press('Home')
+    playwright.expect(handle).to_have_attribute('aria-valuenow', '280')
+    handle.press('End')
+    maximum = handle.get_attribute('aria-valuemax')
+    playwright.expect(handle).to_have_attribute('aria-valuenow', maximum)
+    assert page.locator('.ssh-workspace').bounding_box()['width'] >= 359
+    handle.dblclick()
+    playwright.expect(handle).to_have_attribute('aria-valuenow', '330')
+    page.set_viewport_size({'width': 1100, 'height': 900})
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.set_viewport_size({'width': 390, 'height': 844})
+    playwright.expect(handle).not_to_be_visible()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#aiPanelClose').click()
+    playwright.expect(handle).not_to_be_visible()
+
+
 def test_file_repair_read_approval_backup_validate_reload_workflow(
         page, http_server, manager, peer, ai_manager, model_server, tmp_path):
     root = tmp_path / 'remote'
     root.mkdir()
     path = root / 'app.conf'
     path.write_text('port=8080\n', encoding='utf-8')
+    peer['exec_output'] = b'LoadState=loaded\nActiveState=active\n'
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     sequence = [
         ('search_files', {'path': '/', 'pattern': '*.conf'}),
@@ -112,7 +301,7 @@ def test_file_repair_read_approval_backup_validate_reload_workflow(
     assert len(peer['exec']) == 1 and b'nginx -t' in peer['exec'][0]
     page.get_by_role('button', name='同意执行', exact=True).click()
     playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)
-    assert len(peer['exec']) == 3 and len(model_server.calls) == 8
+    assert len(peer['exec']) == 4 and len(model_server.calls) == 8
     assert digest in json.dumps(model_server.calls[3][2])
     assert 'port=8080' in json.dumps(model_server.calls[2][2])
     history_id = ai_manager.history.list()['conversations'][0]['id']
@@ -138,6 +327,63 @@ def test_claude_configuration_and_connection_test_without_ssh(page, http_server,
     page.set_viewport_size({'width': 390, 'height': 844})
     playwright.expect(page.get_by_role('button', name='保存设置', exact=True)).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+def test_real_file_preview_history_restore_and_health_without_model_calls(
+        page, http_server, manager, peer, ai_manager, model_server, tmp_path):
+    root = tmp_path / 'remote'
+    root.mkdir()
+    path = root / 'app.conf'
+    path.write_text('port=8080\n', encoding='utf-8')
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    ai_manager.save(ai_tests.config(model_server))
+    model_server.content = lambda body, n: (agent_tests.tool_response('openai', 'edit_file', {
+        'path': '/app.conf', 'old_text': '8080', 'new_text': '8081', 'expected_sha256': digest,
+        'reason': '更正业务监听端口'})
+        if n == 1 else agent_tests.answer('openai'))
+    page.goto(http_server.origin + '/ui?view=terminal')
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    enable_sftp(peer, root)
+    page.locator('#sshConnectionToggle').click()
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiResizeHandle').focus()
+    for _ in range(6):
+        page.locator('#aiResizeHandle').press('ArrowLeft')
+    page.locator('#aiQuestion').fill('把配置端口从 8080 改成 8081')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('.tai-diff')).to_contain_text('-port=8080')
+    playwright.expect(page.locator('.tai-diff')).to_contain_text('+port=8081')
+    playwright.expect(page.locator('.tai-approval')).to_contain_text('更正业务监听端口')
+    assert path.read_text() == 'port=8080\n'
+    page.screenshot(path=str(tmp_path / 'operations-preview-desktop.png'), full_page=True)
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / 'operations-preview-mobile.png'))
+    page.get_by_role('button', name='同意执行', exact=True).click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
+    assert path.read_text() == 'port=8081\n'
+    page.locator('#aiNewChat').click()
+    page.locator('#aiHistoryOpen').click()
+    page.locator('.tai-history-row').click()
+    page.locator('.tai-step summary').click()
+    playwright.expect(page.locator('.tai-verification')).to_contain_text('验证通过')
+    page.get_by_role('button', name='恢复备份', exact=True).click()
+    playwright.expect(page.locator('.tai-approval:not([hidden]) .tai-diff')).to_contain_text('+port=8080')
+    assert path.read_text() == 'port=8081\n'
+    page.get_by_role('button', name='同意执行', exact=True).click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('操作完成，可继续提问')
+    assert path.read_text() == 'port=8080\n'
+    assert len(list(root.glob('*.mini-deploy-backup.*'))) == 2 and len(model_server.calls) == 2
+    page.locator('#aiHealthCheck').click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('操作完成，可继续提问')
+    playwright.expect(page.locator('.tai-answer table').last).to_contain_text('采集结果')
+    assert len(peer['exec']) == 4 and len(model_server.calls) == 2
+    page.locator('#aiPanelClose').click()
+    page.locator('#sshDisconnect').click()
 
 
 def test_ssh_chat_opens_without_sending_then_followup_and_optional_output(page, http_server, manager, peer, ai_manager, model_server, tmp_path):
@@ -264,7 +510,7 @@ def test_agent_permission_dialog_progress_and_actual_operation_approval(page, ht
     page.set_viewport_size({'width': 390, 'height': 844})
     page.get_by_role('button', name='同意执行' if approve else '拒绝', exact=True).click()
     playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)
-    assert len(peer['exec']) == (2 if approve else 1)
+    assert len(peer['exec']) == (3 if approve else 1)
     playwright.expect(page.locator('.tai-steps')).to_contain_text('已完成' if approve else '未执行')
     assert len(model_server.calls) == 3
     assert not peer['input']

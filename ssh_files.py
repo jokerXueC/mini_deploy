@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import difflib
 import errno
 import fnmatch
 import hashlib
@@ -69,7 +70,7 @@ def _write_exclusive(client, path, content, mode=0o600):
     client.chmod(path, mode)
 
 
-def _update(client, name, args, check):
+def _prepare_update(client, name, args):
     path = args['path']
     _guard_write(client, path)
     info, old = None, None
@@ -79,25 +80,62 @@ def _update(client, name, args, check):
         if exc.errno != errno.ENOENT:
             raise
     expected = args.get('expected_sha256', '')
+    if old is not None:
+        _text(old)
     if info is None:
         if name != 'write_file' or expected:
             raise FileError("原文件不存在，未编辑；创建新文件请使用 write_file 并省略版本摘要。")
         content = args['content'].encode('utf-8')
-        check()
-        _write_exclusive(client, path, content)
-        return {'path': path, 'created': True, 'sha256': hashlib.sha256(content).hexdigest()}
-    _text(old)
-    if not expected or hashlib.sha256(old).hexdigest() != expected:
+    elif not expected or hashlib.sha256(old).hexdigest() != expected:
         raise FileError("文件版本与预期不符，未修改；先 inspect_file 获取最新摘要并重新核对内容。")
-    if name == 'edit_file':
+    elif name == 'edit_file':
         original = _text(old)
         if original.count(args['old_text']) != 1:
             raise FileError("待替换片段必须恰好匹配一次，未修改；请提供唯一的完整上下文。")
         content = original.replace(args['old_text'], args['new_text'], 1).encode('utf-8')
+    elif name == 'restore_file':
+        _guard_write(client, args['backup_path'])
+        _, content = _read(client, args['backup_path'])
+        _text(content)
+        if hashlib.sha256(content).hexdigest() != args['backup_sha256']:
+            raise FileError('备份版本已改变，未恢复；请重新核对备份摘要。')
     else:
+        _text(old)
         content = args['content'].encode('utf-8')
     if len(content) > MAX_FILE:
         raise FileError("修改后的文件超过 1 MiB，未写入。")
+    return info, old, content
+
+
+def _preview(client, plan):
+    args = plan['arguments']
+    info, old, content = _prepare_update(client, plan['operation'], args)
+    diff = ''.join(difflib.unified_diff([line + '\n' for line in _text(old or b'').splitlines()],
+                                     [line + '\n' for line in _text(content).splitlines()],
+                                     fromfile=args['path'] + ' (当前)', tofile=args['path'] + ' (修改后)'))
+    return {'preview': {'path': args['path'], 'created': info is None, 'changed': old != content,
+                        'before_sha256': hashlib.sha256(old).hexdigest() if old is not None else '',
+                        'after_sha256': hashlib.sha256(content).hexdigest(),
+                        'diff': diff[:12000], 'truncated': len(diff) > 12000,
+                        'notice': '只预览，不写入；确认后重新校验版本。' +
+                                  (' 新文件不提供删除式回退。' if info is None else ' 原文件将保留备份。')}}
+
+
+def _update(client, name, args, check, preview=None):
+    path = args['path']
+    info, old, content = _prepare_update(client, name, args)
+    expected = args.get('expected_sha256', '')
+    digest = hashlib.sha256(content).hexdigest()
+    if preview and (preview['before_sha256'] != (hashlib.sha256(old).hexdigest() if old is not None else '')
+                    or preview['after_sha256'] != digest):
+        raise FileError('文件与已确认的预览不一致，未修改；请重新预览。')
+    if info is None:
+        check()
+        _write_exclusive(client, path, content)
+        _, saved = _read(client, path)
+        valid = hashlib.sha256(saved).hexdigest() == digest
+        return {'path': path, 'created': True, 'sha256': digest, 'exit_code': 0 if valid else 1,
+                'verification': {'status': 'passed' if valid else 'failed', 'detail': '新文件回读摘要校验'}}
     if content == old:
         return {'path': path, 'changed': False, 'sha256': expected}
     suffix = f"{int(time.time())}.{secrets.token_hex(8)}"
@@ -105,6 +143,9 @@ def _update(client, name, args, check):
     check()
     try:
         _write_exclusive(client, backup, old)
+        _, saved_backup = _read(client, backup)
+        if saved_backup != old:
+            raise FileError('备份回读内容不一致，原文件未替换。')
     except Exception as exc:
         raise FileError(f"原文件未替换；备份写入未确认成功，请核对 {backup} 和账号权限。") from exc
     try:
@@ -113,6 +154,9 @@ def _update(client, name, args, check):
         if info.st_uid is not None and info.st_gid is not None:
             client.chown(staged, info.st_uid, info.st_gid)
         client.chmod(staged, stat.S_IMODE(info.st_mode))
+        _, saved_staged = _read(client, staged)
+        if saved_staged != content:
+            raise FileError('候选文件回读内容不一致，原文件未替换。')
         # Recheck after staging: never overwrite a file changed since inspection.
         _guard_write(client, path)
         current_info, current = _read(client, path)
@@ -125,7 +169,18 @@ def _update(client, name, args, check):
     except Exception as exc:
         raise FileError(f"未确认文件替换成功，请核对原文件；备份 {backup}，候选文件 {staged} 已保留。"
                         "SFTP 服务须支持原子替换且账号有权限。") from exc
-    return {'path': path, 'changed': True, 'backup': backup, 'sha256': hashlib.sha256(content).hexdigest()}
+    recovery = {'path': path, 'backup_path': backup, 'expected_sha256': digest,
+                'backup_sha256': expected}
+    try:
+        _, saved = _read(client, path)
+        valid = hashlib.sha256(saved).hexdigest() == digest
+    except Exception:
+        valid = False
+    return {'path': path, 'changed': True, 'backup': backup, 'sha256': digest, 'recovery': recovery,
+            'exit_code': 0 if valid else 1,
+            'verification': {'status': 'passed' if valid else 'failed', 'detail':
+                '原文备份、候选文件与最终文件已回读校验；尚不代表业务已生效。' if valid else
+                '文件替换已提交，但最终内容未确认；保留备份，请先检查当前文件。'}}
 
 
 def execute(client, plan, check):
@@ -133,6 +188,8 @@ def execute(client, plan, check):
     check()
     name, args = plan['name'], plan['arguments']
     path = args['path']
+    if name == 'preview_file':
+        return _preview(client, plan)
     if name == 'inspect_file':
         info = _regular(client, path)
         result = {'path': path, 'size': info.st_size, 'mode': oct(stat.S_IMODE(info.st_mode)),
@@ -201,6 +258,6 @@ def execute(client, plan, check):
         return {'path': path, 'files': found, 'scanned': scanned, 'unreadable': errors,
                 'truncated': bounded or bool(queue) or scanned >= 2000 or len(found) >= args['limit'],
                 'notice': f"仅搜索指定目录至多 {args['depth']} 层，不跟随符号链接；不是全服务器扫描。"}
-    if name in {'write_file', 'edit_file'}:
-        return _update(client, name, args, check)
+    if name in {'write_file', 'edit_file', 'restore_file'}:
+        return _update(client, name, args, check, plan.get('preview'))
     raise FileError("不支持该 SFTP 操作。")

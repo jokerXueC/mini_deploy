@@ -2,7 +2,13 @@
 .terminal-status-hidden { display: none !important; }
 .tai-icon { display: inline-block; width: 16px; height: 16px; flex: 0 0 16px; background: currentColor; mask: var(--tai-icon) center / contain no-repeat; -webkit-mask: var(--tai-icon) center / contain no-repeat; }
 #terminalView .ghost-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
-.ssh-layout.ai-open { grid-template-columns: 220px minmax(280px, 1fr) 330px; gap: 20px; }
+.ssh-layout.ai-open { grid-template-columns: 220px minmax(360px, 1fr) 14px var(--tai-width, 330px); gap: 0; row-gap: 20px; }
+.ssh-layout.ai-open > .ssh-connections { margin-right: 20px; }
+.tai-resize-handle { align-self: stretch; position: relative; cursor: col-resize; touch-action: none; outline: none; }
+.tai-resize-handle::before { content: ''; position: absolute; top: 50%; left: 6px; width: 2px; height: 36px; margin-top: -18px; border-radius: 1px; background: var(--line); }
+.tai-resize-handle:hover::before, .tai-resize-handle:focus-visible::before, .tai-resizing .tai-resize-handle::before { background: var(--green); }
+.tai-resize-handle:focus-visible { box-shadow: inset 0 0 0 1px var(--green); }
+body.tai-resizing, body.tai-resizing * { cursor: col-resize !important; user-select: none !important; }
 .tai-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--card-strong); height: 634px; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 .tai-panel-head, .tai-watch, .tai-compose-bottom, .tai-compose-target, .tai-dialog-head, .tai-dialog-actions, .tai-command-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .tai-panel-head { padding: 14px; border-bottom: 1px solid var(--line); }
@@ -25,7 +31,8 @@
 .tai-history-bar > div { display: flex; gap: 12px; margin-top: 4px; }
 @keyframes tai-spin { to { transform: rotate(360deg); } }
 @media (min-width: 1001px) {
-  .ssh-layout.ai-open.connections-collapsed { grid-template-columns: 36px minmax(280px, 1fr) 330px; gap: 16px; }
+  .ssh-layout.ai-open.connections-collapsed { grid-template-columns: 52px minmax(360px, 1fr) 14px var(--tai-width, 330px); gap: 0; row-gap: 20px; }
+  .ssh-layout.ai-open.connections-collapsed > .ssh-connections { margin-right: 16px; }
   .ssh-layout.ai-open.connections-collapsed .ssh-connections { grid-column: auto; }
 }
 @media (min-width: 761px) and (max-width: 1000px) {
@@ -46,6 +53,18 @@ html[data-theme=light] .tai-step[data-state=blocked] summary, html[data-theme=li
 .tai-approval { padding: 10px 0; margin-bottom: 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-size: 12px; }
 .tai-approval p { color: var(--muted); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
 .tai-approval-actions { display: flex; gap: 14px; justify-content: flex-end; }
+.tai-diff span { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tai-diff-added { color: var(--green); background: color-mix(in srgb, var(--green) 7%, transparent); }
+.tai-diff-removed { color: #f17f8c; background: rgba(241, 127, 140, .07); }
+html[data-theme=light] .tai-diff-removed { color: #b42335; }
+.tai-preview details { font-size: 11px; color: var(--muted); }
+.tai-preview summary { cursor: pointer; }
+.tai-verification { font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.tai-verification[data-state=passed] { color: var(--green); }
+.tai-verification[data-state=failed] { color: #f17f8c; }
+html[data-theme=light] .tai-verification[data-state=failed] { color: #b42335; }
+.tai-restore { display: inline-flex; align-items: center; gap: 5px; }
+.tai-restore:disabled { color: var(--muted); cursor: default; opacity: .6; }
 .tai-context-check { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); margin: 0 0 8px; }
 .tai-context-check input { accent-color: var(--green); }
 .tai-send-context { font-size: 10px; line-height: 1.6; color: var(--muted); margin: 6px 0; overflow-wrap: anywhere; }
@@ -64,7 +83,27 @@ html[data-theme=light] .tai-step[data-state=blocked] summary, html[data-theme=li
 .tai-empty p { font-size: 12px; line-height: 1.8; margin: 0; }
 .tai-entry { font-size: 12px; line-height: 1.8; margin-bottom: 22px; }
 .tai-question { color: var(--muted); margin: 0 0 12px; overflow-wrap: anywhere; }
-.tai-answer { white-space: pre-wrap; overflow-wrap: anywhere; }
+.tai-answer { overflow-wrap: anywhere; }
+.tai-answer > :first-child { margin-top: 0; }
+.tai-answer > :last-child { margin-bottom: 0; }
+.tai-answer p { margin: 10px 0; }
+.tai-answer strong { font-weight: 650; color: var(--fg); }
+.tai-answer h1, .tai-answer h2, .tai-answer h3, .tai-answer h4, .tai-answer h5, .tai-answer h6 { margin: 16px 0 8px; font-size: 14px; line-height: 1.6; font-weight: 600; }
+.tai-answer ul, .tai-answer ol { padding-left: 20px; margin: 10px 0; }
+.tai-answer li { margin: 4px 0; }
+.tai-answer li > p { margin: 4px 0; }
+.tai-answer code { font: 11px/1.6 Consolas, monospace; background: var(--surface-muted); padding: 1px 4px; border-radius: 3px; }
+.tai-answer pre code { font: inherit; background: none; padding: 0; border: 0; }
+.tai-answer blockquote { margin: 12px 0; padding-left: 12px; border-left: 2px solid var(--green); color: var(--muted); }
+.tai-answer hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+.tai-answer a { color: var(--green); text-decoration: underline; text-underline-offset: 2px; }
+.tai-table-scroll { max-width: 100%; overflow-x: auto; margin: 12px 0; scrollbar-width: thin; }
+.tai-answer table { width: 100%; border-collapse: collapse; font-size: 11px; line-height: 1.7; }
+.tai-answer th, .tai-answer td { min-width: 90px; max-width: 300px; padding: 7px 9px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+.tai-answer th { color: var(--muted); font-weight: 600; background: var(--surface-muted); }
+.tai-answer td code { white-space: nowrap; }
+.tai-answer tbody tr:last-child td { border-bottom: 0; }
+.tai-answer .tai-command { overflow: hidden; }
 .tai-entry-meta { font-size: 10px; color: var(--muted); margin: 9px 0; }
 .tai-command { background: var(--surface-muted); border-radius: 4px; margin: 12px 0; padding: 10px; }
 .tai-command pre { font: 11px/1.8 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
@@ -94,13 +133,16 @@ html[data-theme=light] .tai-step[data-state=blocked] summary, html[data-theme=li
 html[data-theme=light] .tai-error { color: #b42335 !important; }
 .tai-page-tools [hidden], #terminalView .tai-panel[hidden], .tai-panel [hidden], .tai-dialog [hidden], .tai-compose [hidden], #sshRelogin[hidden] { display: none !important; }
 @media (max-width: 1150px) and (min-width: 1001px) {
-  .ssh-layout.ai-open { grid-template-columns: minmax(280px, 1fr) 330px; }
+  .ssh-layout.ai-open { grid-template-columns: minmax(360px, 1fr) 14px var(--tai-width, 330px); }
+  .ssh-layout.ai-open > .ssh-connections { margin-right: 0; }
   .ssh-layout.ai-open .ssh-connections { grid-column: 1 / -1; }
   .ssh-layout.ai-open .ssh-connections #sshForm { max-width: 650px; }
   .ssh-layout.ai-open .ssh-connections #sshFields { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
 }
 @media (max-width: 1000px) {
-  .ssh-layout.ai-open { grid-template-columns: 230px minmax(0, 1fr); }
+  .ssh-layout.ai-open { grid-template-columns: 230px minmax(0, 1fr); gap: 20px; }
+  .ssh-layout.ai-open > .ssh-connections { margin-right: 0; }
+  .tai-resize-handle { display: none; }
   .tai-panel { position: fixed; right: 0; top: 0; bottom: 0; height: 100dvh; width: min(420px, 100%); z-index: 51; border-radius: 0; background: var(--bg); }
   .tai-backdrop:not([hidden]) { position: fixed; inset: 0; background: rgba(0, 0, 0, .4); z-index: 50; }
 }
@@ -114,4 +156,19 @@ html[data-theme=light] .tai-error { color: #b42335 !important; }
 @media (prefers-reduced-motion: reduce) {
   .tai-switch::after { transition: none; }
   .tai-loading .tai-icon, .tai-step[data-state=running] summary::before, #aiTest.is-loading::before, .tai-send.is-loading .tai-icon { animation: none; }
+}
+body.tai-expanded { overflow: hidden; }
+.tai-expanded-dialog { position: fixed; inset: 0; margin: auto; padding: 0; width: min(960px, calc(100vw - 48px)); height: min(840px, calc(100dvh - 48px)); max-width: none; max-height: none; border: 1px solid var(--line); border-radius: 8px; background: var(--card-strong); color: var(--fg); overflow: hidden; box-shadow: 0 20px 70px rgba(0, 0, 0, .2); }
+.tai-expanded-dialog::backdrop { background: rgba(0, 0, 0, .4); }
+.tai-expanded-dialog > .tai-panel { position: static; width: 100%; height: 100%; border: 0; border-radius: 0; background: var(--card-strong); }
+.tai-expanded-dialog .tai-panel-head { padding: 16px 24px; }
+.tai-expanded-dialog .tai-access, .tai-expanded-dialog .tai-watch, .tai-expanded-dialog .tai-history-bar { padding-left: 24px; padding-right: 24px; }
+.tai-expanded-dialog .tai-messages { padding: 20px 24px; }
+.tai-expanded-dialog .tai-entry { font-size: 14px; }
+.tai-expanded-dialog .tai-answer table { font-size: 12px; }
+.tai-expanded-dialog .tai-compose { padding: 14px 24px; }
+.tai-expanded-dialog .tai-compose textarea { font-size: 14px; min-height: 65px; }
+@media (max-width: 760px) {
+  .tai-expanded-dialog { width: calc(100vw - 20px); height: calc(100dvh - 24px); }
+  .tai-expanded-dialog .tai-panel-head, .tai-expanded-dialog .tai-access, .tai-expanded-dialog .tai-watch, .tai-expanded-dialog .tai-history-bar, .tai-expanded-dialog .tai-messages, .tai-expanded-dialog .tai-compose { padding-left: 14px; padding-right: 14px; }
 }

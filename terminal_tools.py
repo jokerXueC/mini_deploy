@@ -18,7 +18,13 @@ FILE = {"type": "string", "description": "要读取的文本文件的 Linux 绝�
 HASH = {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "inspect_file 返回的原文件 SHA-256；已有文件必须提供，版本改变会拒绝写入"}
 TEXT = {"type": "string", "maxLength": 16000}
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 100, "description": "返回条数，默认 50"}
-SFTP_TOOLS = {'inspect_file', 'read_text_file', 'search_files', 'search_text', 'write_file', 'edit_file'}
+FILE_WRITES = {'write_file', 'edit_file', 'restore_file'}
+SFTP_TOOLS = {'inspect_file', 'read_text_file', 'search_files', 'search_text', *FILE_WRITES}
+VALIDATION = {'type': 'object', 'description': '修改后的只读配置校验；路径须为实际运行的主配置，容器内配置填写容器名',
+              'properties': {'runtime': {'type': 'string', 'enum': ['nginx', 'caddy']}, 'path': FILE,
+                             'container': CONTAINER, 'adapter': {'type': 'string', 'enum': ['caddyfile', 'json']}},
+              'required': ['runtime', 'path'], 'additionalProperties': False}
+REASON = {'type': 'string', 'maxLength': 500, 'description': '向用户解释本次修改解决什么问题，不能替代用户授权'}
 DIAGNOSTICS = {
     'processes': ['ps', 'aux'], 'disk_space': ['df', '-hPT'],
     'network_addresses': ['ip', 'address', 'show'], 'network_routes': ['ip', 'route', 'show'],
@@ -45,10 +51,13 @@ TOOLS = {
     "search_text": ("在不超过 1 MiB 的 UTF-8 文件中搜索字面文本，返回行号和匹配片段，不支持执行正则或脚本",
                     {'path': FILE, 'query': {"type": "string", "maxLength": 200}, 'limit': LIMIT}, ['path', 'query'], False),
     "write_file": ("创建新 UTF-8 文件，或完整替换已有文件；已有文件须先获取摘要，自动保留原文备份；不删除文件",
-                   {'path': FILE, 'content': TEXT, 'expected_sha256': HASH}, ['path', 'content'], True),
+                   {'path': FILE, 'content': TEXT, 'expected_sha256': HASH, 'validation': VALIDATION}, ['path', 'content'], True),
     "edit_file": ("精确替换 UTF-8 文件中唯一的一段文字，须提供原文件摘要，自动备份；不匹配或版本改变时拒绝修改",
-                  {'path': FILE, 'old_text': TEXT, 'new_text': TEXT, 'expected_sha256': HASH},
+                  {'path': FILE, 'old_text': TEXT, 'new_text': TEXT, 'expected_sha256': HASH, 'validation': VALIDATION},
                   ['path', 'old_text', 'new_text', 'expected_sha256'], True),
+    'restore_file': ('从 mini_deploy 原文备份恢复配置，先备份当前版本；须核对当前文件和备份摘要，不删除任何文件',
+                     {'path': FILE, 'backup_path': FILE, 'expected_sha256': HASH, 'backup_sha256': HASH,
+                      'validation': VALIDATION}, ['path', 'backup_path', 'expected_sha256', 'backup_sha256'], True),
     "run_diagnostic": ("执行受控系统诊断：进程、磁盘空间、网络地址/路由/连接、Docker 信息/即时资源/网络、服务清单",
                        {'check': {'type': 'string', 'enum': list(DIAGNOSTICS)}}, ['check'], False),
     "check_http": ("检查 HTTP/HTTPS 地址的响应头及正文片段，默认 HEAD，也可 GET；不下载到服务器文件，不跳转",
@@ -79,7 +88,8 @@ TOOLS = {
 
 def schemas(writes=False):
     return [{"type": "function", "function": {"name": name, "description": description, "parameters": {
-        "type": "object", "properties": properties, "required": required, "additionalProperties": False}}}
+        "type": "object", "properties": {**properties, **({'reason': REASON} if write else {})},
+        "required": required, "additionalProperties": False}}}
         for name, (description, properties, required, write) in TOOLS.items() if writes or not write]
 
 
@@ -87,9 +97,14 @@ def plan(name, arguments):
     if name not in TOOLS:
         raise ToolError("不支持该工具；不能执行任意命令或删除文件。")
     description, properties, required, write = TOOLS[name]
+    if write:
+        properties = {**properties, 'reason': REASON}
     if not isinstance(arguments, dict) or set(arguments) - set(properties) or set(required) - set(arguments):
         raise ToolError("工具参数不完整或包含未支持的参数。")
     args = dict(arguments)
+    reason = args.pop('reason', '')
+    if not isinstance(reason, str) or len(reason) > 500 or '\0' in reason:
+        raise ToolError('操作原因须为文本，最多 500 字。')
     if "path" in properties:
         path = args.setdefault("path", ".")
         if (not isinstance(path, str) or not path or len(path) > 4096
@@ -117,9 +132,15 @@ def plan(name, arguments):
                 raise ToolError("不能将脱敏占位符写回服务器；请仅编辑未脱敏的具体片段，保留凭据原文。")
     if 'pattern' in args and '/' in args['pattern']:
         raise ToolError("搜索通配符只填写文件名，不包含目录路径。")
-    if 'expected_sha256' in args and (not isinstance(args['expected_sha256'], str)
-                                     or not re.fullmatch(r'[a-f0-9]{64}', args['expected_sha256'])):
-        raise ToolError("原文件摘要须为 inspect_file 返回的完整 SHA-256。")
+    for field in ('expected_sha256', 'backup_sha256'):
+        if field in args and (not isinstance(args[field], str) or not re.fullmatch(r'[a-f0-9]{64}', args[field])):
+            raise ToolError("文件摘要须为完整 SHA-256。")
+    if name == 'restore_file':
+        backup = args['backup_path']
+        if (not isinstance(backup, str) or not re.fullmatch(re.escape(args['path']) +
+                r'\.mini-deploy-backup\.\d+\.[a-f0-9]{16}', backup)):
+            raise ToolError('只能恢复同一文件的 mini_deploy 备份，不支持任意文件复制。')
+    validation = plan('validate_config', args['validation']) if 'validation' in args else None
     if "position" in properties:
         if args.setdefault("position", "tail") not in ("head", "tail"):
             raise ToolError("读取位置须为 head（开头）或 tail（末尾）。")
@@ -145,7 +166,7 @@ def plan(name, arguments):
                             "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"],
         "get_container_status": ["docker", "inspect", "--format",
             '{{.Id}} {{.Name}} status={{.State.Status}} running={{.State.Running}} restarts={{.RestartCount}} '
-            'exit={{.State.ExitCode}} error={{.State.Error}} auto_remove={{.HostConfig.AutoRemove}} '
+            'paused={{.State.Paused}} exit={{.State.ExitCode}} error={{.State.Error}} auto_remove={{.HostConfig.AutoRemove}} '
             'mounts={{json .Mounts}} {{if .State.Health}}health={{.State.Health.Status}}{{end}}',
             "--", container],
         "get_container_logs": ["docker", "logs", "--timestamps", "--since", "30m", "--tail", str(args.get("lines", 100)), container],
@@ -159,12 +180,15 @@ def plan(name, arguments):
     }
     if name in SFTP_TOOLS:
         operation = {'inspect_file': '检查文件', 'read_text_file': '分页读取文件', 'search_files': '搜索文件',
-                     'search_text': '搜索文件内容', 'write_file': '写入文件', 'edit_file': '替换文件片段'}[name]
+                     'search_text': '搜索文件内容', 'write_file': '写入文件', 'edit_file': '替换文件片段',
+                     'restore_file': '恢复配置备份'}[name]
         command = operation + ' ' + args['path']
         if name == 'write_file':
             command += '\n新内容：\n' + args['content']
         elif name == 'edit_file':
             command += '\n原片段：\n' + args['old_text'] + '\n新片段：\n' + args['new_text']
+        elif name == 'restore_file':
+            command += '\n备份：' + args['backup_path']
     elif name == 'run_diagnostic':
         command = shlex.join(DIAGNOSTICS[args['check']])
     elif name == 'check_http':
@@ -212,10 +236,61 @@ def plan(name, arguments):
                    '[ "$auto_remove" = false ] || '
                    "{ printf '%s\\n' '容器启用了自动删除或无法确认，拒绝停止/重启以保留文件。' >&2; exit 1; }; " + command)
     return {"name": name, "arguments": args, "title": description.split('，')[0].split('；')[0],
-            "command": command, "write": write, 'transport': 'sftp' if name in SFTP_TOOLS else 'exec',
+            "command": command, "write": write, 'reason': reason, 'transport': 'sftp' if name in SFTP_TOOLS else 'exec',
+            'validation': validation,
             "impact": ("已有文件先保存原文备份并校验版本，可能改变业务配置；不删除文件、不自动重载服务。"
-                       if name in ('write_file', 'edit_file') else
+                       if name in FILE_WRITES else
                        "可能短暂中断业务；使用当前 SSH 账号权限，不自动提权。" if write else
                        "只列出目录及文件信息，不读取文件内容。" if name == "list_directory" else
                        "只读取指定文件片段，常见凭据脱敏后发送给模型，不修改或删除文件。" if name == "read_file" else
                        "只读取状态和近期日志。")}
+
+
+def verification(operation):
+    """Return a controlled status check and the state required by the requested action."""
+    name, args = operation['name'], operation['arguments']
+    if name in {'restart_service', 'reload_service', 'manage_service'}:
+        action = args.get('action', 'start')
+        return plan('get_service_status', {'service': args['service']}), ('inactive' if action == 'stop' else 'active')
+    if name in {'restart_container', 'manage_container'}:
+        action = args.get('action', 'start')
+        return plan('get_container_status', {'container': args['container']}), action
+    return None, None
+
+
+def verified(operation, result, expected):
+    if result.get('exit_code') != 0 or result.get('truncated'):
+        return False
+    text = result.get('output', '')
+    if operation['name'] == 'get_service_status':
+        fields = dict(re.findall(r'^(\w+)=(.*)$', text, re.M))
+        return fields.get('LoadState') == 'loaded' and fields.get('ActiveState') == expected
+    required = {'stop': ['running=false', 'status=exited'], 'pause': ['running=true', 'paused=true'],
+                'unpause': ['running=true', 'paused=false'], 'start': ['running=true', 'paused=false']}[expected]
+    tokens = text.split()
+    return all(field in tokens for field in required) and 'health=unhealthy' not in tokens
+
+
+def health_findings(operation, result):
+    """Flag only recognizable evidence; absent evidence never means a healthy server."""
+    text, name = result.get('output', ''), operation['name']
+    findings = []
+    if name == 'get_server_resources':
+        memory = re.search(r'^Mem:\s+(\d+)\s+(\d+)\s+\d+\s+\d+\s+\d+\s+(\d+)', text, re.M)
+        if memory and int(memory[1]) and int(memory[3]) / int(memory[1]) < .1:
+            findings.append('可用内存不足 10%')
+        for line in text.splitlines():
+            used = re.search(r'\s(\d+)%\s+(.+)$', line)
+            if used and int(used[1]) >= 90:
+                findings.append(f'磁盘 {used[2]} 已使用 {used[1]}%')
+    elif name == 'list_containers':
+        for line in text.splitlines():
+            fields = line.split('\t')
+            if len(fields) >= 3 and re.search(r'\b(Restarting|Dead|unhealthy)\b|Exited \([1-9]', fields[2]):
+                findings.append(f'容器 {fields[1]}：{fields[2]}')
+    elif name == 'list_services':
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) >= 4 and 'failed' in fields[1:4]:
+                findings.append('服务异常：' + fields[0])
+    return findings[:20]

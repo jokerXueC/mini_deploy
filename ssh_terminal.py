@@ -229,7 +229,7 @@ class Session:
             result = ssh_files.execute(client, plan, check)
             check()
             self.activity = time.monotonic()
-            return {**result, 'exit_code': 0}
+            return {'exit_code': 0, **result}
         except (SSHError, ssh_files.FileError):
             raise
         except Exception:

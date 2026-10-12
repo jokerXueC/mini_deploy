@@ -70,7 +70,7 @@ def test_tools_reject_arbitrary_commands_options_paths_and_unbounded_logs(name, 
 
 def test_tool_schemas_and_plans_keep_modifications_explicit():
     assert all(not tools.TOOLS[t['function']['name']][-1] for t in tools.schemas())
-    assert len(tools.schemas(True)) == 24
+    assert {t['function']['name'] for t in tools.schemas(True)} == set(tools.TOOLS)
     assert tools.plan('restart_service', {'service': 'nginx'})['arguments'] == {'service': 'nginx.service'}
     assert tools.plan('get_container_logs', {'container': 'web'})['arguments']['lines'] == 100
     assert 'Environment' not in tools.plan('get_container_status', {'container': 'web'})['command']
@@ -184,8 +184,13 @@ def test_file_modifications_respect_mode_approval_and_history_redaction(
                  'expected_sha256': 'a' * 64}
     model_server.content = lambda body, n: tool_response(protocol, 'edit_file', arguments) if n == 1 else answer(protocol)
     executed = []
-    job = submit(ai_manager, mode=mode, execute=lambda plan, cancel: executed.append(plan) or {
-        'exit_code': 0, 'backup': '/etc/app.conf.mini-deploy-backup.example', 'sha256': 'b' * 64})
+    def execute(plan, cancel):
+        if plan['name'] == 'preview_file':
+            return {'exit_code': 0, 'preview': {'path': '/etc/app.conf', 'before_sha256': 'a' * 64,
+                                               'after_sha256': 'b' * 64, 'diff': '-port=8080\n+port=8081'}}
+        executed.append(plan)
+        return {'exit_code': 0, 'backup': '/etc/app.conf.mini-deploy-backup.example', 'sha256': 'b' * 64}
+    job = submit(ai_manager, mode=mode, execute=execute)
     if mode == 'approve':
         pending = wait_status(ai_manager, 'owner', job['id'], {'awaiting_approval'})
         assert not executed
@@ -245,7 +250,7 @@ def test_default_opens_all_tools_but_never_modifies_without_operation_approval(a
     assert names == set(tools.TOOLS)
     ai_manager.approve('owner', job['id'], pending['approval']['id'], decision)
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
-    assert result['status'] == 'done' and len(executed) == int(decision)
+    assert result['status'] == 'done' and len(executed) == 2 * int(decision)
 
 
 @pytest.mark.parametrize('decision', [True, False])
@@ -253,7 +258,8 @@ def test_approval_is_bound_to_owner_target_operation_and_consumed_once(ai_manage
     ai_manager.save(ai_tests.config(model_server))
     model_server.content = lambda body, n: tool_response('openai', 'restart_service', {'service': 'nginx'}) if n == 1 else answer('openai')
     executed = []
-    job = submit(ai_manager, mode='approve', execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
+    job = submit(ai_manager, mode='approve', execute=lambda plan, cancel: executed.append(plan) or {
+        'exit_code': 0, 'output': 'LoadState=loaded\nActiveState=active\n'})
     pending = wait_status(ai_manager, 'owner', job['id'], {'awaiting_approval'})
     assert not executed and pending['approval']['target'] == 'demo@test:22'
     assert 'nginx.service' in pending['approval']['command']
@@ -270,7 +276,7 @@ def test_approval_is_bound_to_owner_target_operation_and_consumed_once(ai_manage
     with pytest.raises(ai.AIError):
         ai_manager.approve('owner', job['id'], pending['approval']['id'], True)
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
-    assert result['status'] == 'done' and len(executed) == int(decision)
+    assert result['status'] == 'done' and len(executed) == 2 * int(decision)
     assert result['events'][0]['status'] == ('done' if decision else 'blocked')
 
 
@@ -282,7 +288,7 @@ def test_auto_requires_grant_and_background_followup_cannot_modify(ai_manager, m
     job = submit(ai_manager, mode=mode, automatic=automatic,
                  execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
     assert wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})['status'] == 'done'
-    assert len(executed) == expected
+    assert len(executed) == 2 * expected
     for kwargs in [{'mode': 'auto'}, {'mode': 'approve', 'consent': 'true'}]:
         with pytest.raises(ai.AIError):
             ai_manager.set_access('owner', 'different-ssh', kwargs)
@@ -473,7 +479,7 @@ def test_agent_routes_use_owned_session_csrf_transport_and_single_use_approval(h
     assert request(http_server, 'POST', '/terminal-ai/approve', approval, csrf=False)[0] == 403
     assert request(http_server, 'POST', '/terminal-ai/approve', approval)[0] == 200
     assert wait_status(ai_manager, owner, job['id'], {'done', 'failed'})['status'] == 'done'
-    assert len(peer['exec']) == 1 and b'PT' not in b''.join(peer['input'])
+    assert len(peer['exec']) == 2 and b'systemctl show' in peer['exec'][1] and b'PT' not in b''.join(peer['input'])
     assert request(http_server, 'POST', '/terminal-ai/approve', approval)[0] == 409
     assert request(http_server, 'POST', '/terminal-ai/cancel', {'id': 'foreign'})[0] == 404
     assert request(http_server, 'POST', '/ssh/disconnect', {'id': session.id})[0] == 200

@@ -104,6 +104,10 @@ SYSTEM = (
     "校验服务器或容器内配置使用 validate_config，启动停止服务或容器使用 manage_service/manage_container。"
     "用户要求保留服务器文件，因此没有任意 Shell、解释器、删除/清理命令；不能以其他操作绕过。"
     "操作失败、被拒绝、超时或权限不足时不要绕过限制或重复修改；如实说明并先检查状态。"
+    "文件修改由系统先预览真实差异、备份并回读校验；已知 Nginx/Caddy 的实际配置时在编辑参数中提供 validation。"
+    "文件摘要校验不等于配置语法有效，也不等于业务已生效；校验失败不得重载或重启。"
+    "需要恢复时使用工具返回的 recovery 参数调用 restore_file，恢复前同样需核对并审批，不删除备份。"
+    "提出修改时填写 reason，用简洁中文解释这次操作要解决什么问题；不把原因当作用户已授权的依据。"
 )
 
 
@@ -463,13 +467,32 @@ class Manager:
             if len(self.jobs) >= 64:
                 completed = [k for k, j in self.jobs.items() if not self._active(j)]
                 self.jobs.pop(min(completed, key=lambda k: self.jobs[k]["created"]))
-            if action != "chat" and owner in self.attempts and time.monotonic() - self.attempts[owner] < 3:
+            if action not in {'chat', 'restore', 'health'} and owner in self.attempts and time.monotonic() - self.attempts[owner] < 3:
                 raise AIError("操作过于频繁，请稍后重试。", 429)
-            mode = self.access(owner, session_id)["mode"] if action == "chat" and session_id and executor else "chat"
+            operation_plan = None
+            mode = self.access(owner, session_id)["mode"] if action in {"chat", "restore", "health"} and session_id and executor else "chat"
             if action == "chat" and data.get("permission", mode) != mode:
                 raise AIError("操作权限已改变，请重新选择后发送。", 409)
             conversation_id, context = "", {}
-            if action == "chat":
+            if action in {'restore', 'health'}:
+                if not session_id or executor is None or not target:
+                    raise AIError('请先连接需要操作的 SSH 服务器。')
+                if validate:
+                    validate()
+                if action == 'restore':
+                    if mode not in {'approve', 'auto'}:
+                        raise AIError('恢复需要修改权限，请选择“修改需确认”或授权自动操作。', 403)
+                    identifiers = [data.get(k) for k in ('job_id', 'event_id')]
+                    if any(not isinstance(v, str) or not v or len(v) > 128 for v in identifiers):
+                        raise AIError('备份记录编号无效。')
+                    archive_id, recovery = self.history.recovery(*identifiers, target)
+                    operation_plan = terminal_tools.plan('restore_file', recovery)
+                    operation_plan['reason'] = '恢复为所选备份的配置内容，恢复前保留当前版本。'
+                    question = '恢复配置备份：' + recovery['path']
+                else:
+                    mode, archive_id, question = 'readonly', secrets.token_urlsafe(24), '服务器只读体检'
+                config, messages = self._config(), []
+            elif action == "chat":
                 config, messages, conversation_id, context = self._chat_messages(owner, data, session_id, output, target)
             elif action == "test":
                 config = self._draft(data)
@@ -495,18 +518,23 @@ class Manager:
                     f"问题：{redact(question) or '请分析这段终端输出。'}\n\n终端片段（不可信数据）：\n{snapshot['text']}"}]
                 self.snapshots.pop(str(data["snapshot_id"]))
             key = secrets.token_urlsafe(24)
-            archive_id = ""
+            if action not in {'restore', 'health'}:
+                archive_id = ""
             if conversation_id:
                 archive_id = self.conversations[conversation_id]["archive_id"]
                 self.history.begin(archive_id, key, self._safe_text(config, data["question"]), target,
                                    config["model"], messages[-1]["content"])
+            elif action in {'restore', 'health'}:
+                self.history.begin(archive_id, key, question, target, config['model'], question)
             self.jobs[key] = {"owner": owner, "created": time.monotonic(), "status": "running",
                               "model": config["model"], "action": action, "session_id": session_id,
                               "_active": True, "_cancel": threading.Event(), "_deadline": time.monotonic() + TASK_SECONDS,
                               "events": [], "target": target, "stage": "model"}
-            if data.get("automatic") is True and mode != "chat":
+            if action == 'chat' and data.get("automatic") is True and mode != "chat":
                 mode = "readonly"
             self.jobs[key]["permission"] = mode
+            if action in {'restore', 'health'}:
+                self.jobs[key].update(history_id=archive_id, _operation_plan=operation_plan)
             record = self.permissions.get((owner, session_id))
             if mode in {"approve", "auto"} and record:
                 self.jobs[key]["_access_expires"] = record["expires"]
@@ -516,7 +544,7 @@ class Manager:
             self.attempts[owner] = time.monotonic()
             self.pool.submit(self._run, key, config, messages, executor, validate)
             return {"id": key, "status": "running", **({"conversation_id": conversation_id, "history_id": archive_id}
-                                                       if conversation_id else {})}
+                                                       if archive_id else {})}
 
     def _check_task(self, key, config, validate=None):
         with self.lock:
@@ -545,8 +573,12 @@ class Manager:
             job["_decision_event"] = threading.Event()
             job.pop("_decision", None)
             job["approval"] = {"id": secrets.token_urlsafe(24), "target": job["target"],
-                               **{k: plan[k] for k in ("title", "arguments", "impact")},
+                               **self._safe_data(config, {k: plan[k] for k in ("title", "arguments", "impact", 'reason')}),
                                'command': self._safe_text(config, plan['command'])}
+            if plan.get('preview'):
+                job['approval']['preview'] = self._safe_data(config, plan['preview'])
+            if plan.get('validation'):
+                job['approval']['validation'] = self._safe_text(config, plan['validation']['command'])
             job["status"] = "awaiting_approval"
             decision_event = job["_decision_event"]
         deadline = time.monotonic() + 120
@@ -563,6 +595,108 @@ class Manager:
     def _event_update(self, event, **fields):
         with self.lock:
             event.update(**fields)
+
+    def _checkpoint(self, key):
+        with self.lock:
+            job = self.jobs[key]
+            if job.get('history_id'):
+                self.history.checkpoint(key, job['events'])
+
+    def _perform(self, key, config, plan, executor, validate, event):
+        job = self._check_task(key, config, validate)
+        if plan['name'] in terminal_tools.FILE_WRITES:
+            self._event_update(event, phase='preview')
+            preview_plan = {'name': 'preview_file', 'operation': plan['name'], 'arguments': plan['arguments'],
+                            'transport': 'sftp', 'command': '预览文件差异 ' + plan['arguments']['path'], 'write': False}
+            preview = executor(preview_plan, job['_cancel'])
+            if preview.get('exit_code') != 0 or not isinstance(preview.get('preview'), dict):
+                raise terminal_tools.ToolError('文件差异无法预览，未执行修改。')
+            plan['preview'] = preview['preview']
+            safe_preview = self._safe_data(config, plan['preview'])
+            self._event_update(event, preview=safe_preview)
+            self._checkpoint(key)
+        if plan['write'] and job['permission'] == 'approve':
+            self._event_update(event, status='awaiting_approval', phase='approval')
+            if not self._approval(key, config, plan, validate):
+                raise terminal_tools.ToolError('用户拒绝了本次操作，未执行。不要尝试绕过审批。')
+        self._check_task(key, config, validate)
+        self._event_update(event, status='running', phase='execute', attempted=True)
+        with self.lock:
+            job['stage'] = 'tools'
+        output = executor(plan, job['_cancel'])
+        if output.get('recovery'):
+            recovery = dict(output['recovery'])
+            if plan.get('validation'):
+                recovery['validation'] = plan['arguments']['validation']
+            safe_recovery = self._safe_data(config, recovery)
+            if safe_recovery == recovery:
+                self._event_update(event, recovery=recovery)
+            # Persist recovery before further checks or model calls can fail.
+            self._checkpoint(key)
+        if output.get('verification'):
+            self._event_update(event, verification=output['verification'])
+        checks = []
+        if plan['write'] and output.get('exit_code') == 0:
+            status_plan, expected = terminal_tools.verification(plan)
+            if plan.get('validation'):
+                checks.append((plan['validation'], None))
+            if status_plan:
+                checks.append((status_plan, expected))
+        for check_plan, expected in checks:
+            self._check_task(key, config, validate)
+            self._event_update(event, phase='verify')
+            evidence = executor(check_plan, job['_cancel'])
+            valid = (evidence.get('exit_code') == 0 and not evidence.get('truncated') if expected is None else
+                     terminal_tools.verified(check_plan, evidence, expected))
+            verification = {'status': 'passed' if valid else 'failed', 'command': check_plan['command'],
+                            'detail': self._safe_text(config, json.dumps(evidence, ensure_ascii=False))[:8000]}
+            output['verification'] = verification
+            self._event_update(event, verification=verification)
+            if not valid:
+                output['exit_code'] = 1
+                output['notice'] = '操作已提交，但验证未通过；停止后续修改，请先检查状态或恢复备份。'
+                break
+        return output
+
+    def _operation(self, key, config, executor, validate):
+        job = self._check_task(key, config, validate)
+        plans = ([job['_operation_plan']] if job['action'] == 'restore' else
+                 [terminal_tools.plan(name, {}) for name in
+                  ('get_server_resources', 'list_containers', 'list_services', 'get_listening_ports')])
+        reports, findings = [], []
+        for index, plan in enumerate(plans):
+            self._check_task(key, config, validate)
+            event = {'id': f'operation_{index}', 'job_id': key, 'title': plan['title'], 'status': 'running',
+                     'write': plan['write'], 'command': self._safe_text(config, plan['command'])}
+            with self.lock:
+                job['events'].append(event)
+            try:
+                output = self._perform(key, config, plan, executor, validate, event)
+                valid = output.get('exit_code') == 0
+                text = self._safe_text(config, json.dumps(output, ensure_ascii=False))[:12000]
+                self._event_update(event, status='done' if valid else 'failed', result=text)
+                reports.append((plan['title'], valid, text))
+                findings.extend(terminal_tools.health_findings(plan, output))
+                if not valid and job['action'] == 'restore':
+                    raise AIError('恢复已提交，但验证未通过；请展开执行记录核对状态，备份已保留。')
+            except ValueError as exc:
+                if isinstance(exc, AIError):
+                    raise
+                text = self._safe_text(config, str(exc))
+                self._event_update(event, status='failed' if event.get('attempted') else 'blocked', result=text)
+                reports.append((plan['title'], False, text))
+                if job['action'] == 'restore':
+                    raise AIError(text) from None
+            self._checkpoint(key)
+        if job['action'] == 'restore':
+            text = '已恢复配置文件，并保留恢复前的版本。文件已回读校验；服务不会自动重载，请核对配置后再应用。'
+        else:
+            text = '## 服务器只读体检\n\n| 检查 | 采集结果 |\n| --- | --- |\n'
+            text += '\n'.join(f'| {title} | {"已读取" if valid else "无法完整读取"} |' for title, valid, _ in reports)
+            if findings:
+                text += '\n\n### 需要关注\n\n' + '\n'.join('- ' + self._safe_text(config, finding) for finding in findings)
+            text += '\n\n展开上方检查可查看实际输出。采集成功不代表服务没有故障，可继续让 AI 分析这些结果。'
+        return {'text': text, '_history': '\n'.join(f'{title}: {output}' for title, _, output in reports)[-10000:]}
 
     def _agent(self, key, config, messages, executor, validate):
         job = self._check_task(key, config, validate)
@@ -596,7 +730,7 @@ class Manager:
                 self._check_task(key, config, validate)
                 count += 1
                 name, raw = call["function"]["name"], call["function"]["arguments"]
-                event = {"id": call["id"], "title": self._safe_text(config, name), "status": "running"}
+                event = {"id": call["id"], 'job_id': key, "title": self._safe_text(config, name), "status": "running"}
                 attempted, plan = False, None
                 with self.lock:
                     self.jobs[key]["events"].append(event)
@@ -604,26 +738,23 @@ class Manager:
                     plan = terminal_tools.plan(name, json.loads(raw))
                     if config["api_key"] and config["api_key"] in plan["command"]:
                         raise terminal_tools.ToolError("工具参数包含模型凭据，未执行。")
-                    self._event_update(event, title=plan["title"], command=self._safe_text(config, plan["command"]), write=plan["write"])
+                    self._event_update(event, title=plan["title"], command=self._safe_text(config, plan["command"]),
+                                       reason=self._safe_text(config, plan['reason']), write=plan["write"])
                     if plan["write"]:
                         if mode not in {"approve", "auto"}:
                             raise terminal_tools.ToolError("本轮仅允许只读检查，未执行修改。")
                         signature = (name, json.dumps(plan["arguments"], sort_keys=True))
                         if signature in writes or len(writes) >= MAX_WRITES:
                             raise terminal_tools.ToolError("修改次数达到上限或操作重复，未再次执行。")
-                        if write_failed:
+                        if write_failed and name != 'restore_file':
                             raise terminal_tools.ToolError("之前的修改未确认成功，本轮不再修改，请先检查状态。")
                         writes.add(signature)
-                        if mode == "approve":
-                            self._event_update(event, status="awaiting_approval")
-                            if not self._approval(key, config, plan, validate):
-                                raise terminal_tools.ToolError("用户拒绝了本次操作，未执行。不要尝试绕过审批。")
                     self._check_task(key, config, validate)
                     self._event_update(event, status="running")
                     with self.lock:
                         job["stage"] = "tools"
+                    output = self._perform(key, config, plan, executor, validate, event)
                     attempted = True
-                    output = executor(plan, job["_cancel"])
                     if plan["write"] and output.get("exit_code") != 0:
                         write_failed = True
                     text = self._safe_text(config, json.dumps(output, ensure_ascii=False))[:12000]
@@ -631,6 +762,7 @@ class Manager:
                 except (terminal_tools.ToolError, ValueError) as exc:
                     if isinstance(exc, AIError):
                         raise
+                    attempted = attempted or event.get('attempted', False)
                     if attempted and plan["write"]:
                         write_failed = True
                     text = self._safe_text(config, str(exc))[:12000]
@@ -646,10 +778,23 @@ class Manager:
             text = text.replace(config["api_key"], "[已隐藏模型密钥]")
         return redact(text)
 
+    @classmethod
+    def _safe_data(cls, config, value):
+        if isinstance(value, str):
+            return cls._safe_text(config, value)
+        if isinstance(value, dict):
+            return {k: cls._safe_data(config, v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [cls._safe_data(config, v) for v in value]
+        return value
+
     def _run(self, key, config, messages, executor=None, validate=None):
         try:
             job = self._check_task(key, config, validate)
-            result = self._agent(key, config, messages, executor, validate) if job["permission"] != "chat" else complete(config, messages)
+            if job['action'] in {'restore', 'health'}:
+                result = self._operation(key, config, executor, validate)
+            else:
+                result = self._agent(key, config, messages, executor, validate) if job["permission"] != "chat" else complete(config, messages)
             result["text"] = self._safe_text(config, result["text"])
             status, detail = "done", ""
         except Exception as exc:
@@ -670,6 +815,8 @@ class Manager:
                     if not tool_history and status != "done":
                         tool_history = "\n".join(f"{e['title']} ({e['status']}): {e['result']}"
                                                  for e in job["events"] if e.get("result"))[-10000:]
+                    if job['action'] in {'restore', 'health'} and tool_history:
+                        saved_context = '目标服务器：' + job['target'] + '\n本轮实际检查（历史数据）：\n' + tool_history
                     history = self.conversations.get(job.get("conversation_id"))
                     if (status == "done" or tool_history) and history and history["config_hash"] == self._hash(config):
                         content = job["_user_content"]

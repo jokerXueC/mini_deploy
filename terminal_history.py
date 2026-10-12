@@ -81,6 +81,22 @@ class Store:
             db.execute("UPDATE conversations SET updated=? WHERE id=(SELECT conversation FROM turns WHERE job=?)",
                        (time.time(), job))
 
+    def checkpoint(self, job, events):
+        with self._db() as db:
+            db.execute('UPDATE turns SET events=? WHERE job=?',
+                       (json.dumps(events, ensure_ascii=False), job))
+
+    def recovery(self, job, event_id, target):
+        with self._db() as db:
+            row = db.execute('SELECT turns.events, turns.conversation, conversations.target FROM turns '
+                             'JOIN conversations ON conversations.id=turns.conversation WHERE job=?', (job,)).fetchone()
+            if row is None or not target or row['target'] != target:
+                raise HistoryError('备份记录不属于当前服务器，请连接原服务器后恢复。')
+            event = next((e for e in json.loads(row['events']) if e['id'] == event_id), None)
+            if not event or not event.get('recovery'):
+                raise HistoryError('没有找到可恢复的备份记录；原文件未修改。')
+            return row['conversation'], event['recovery']
+
     def list(self, offset=0):
         if not self.path.exists() and not self.path.is_symlink():
             return {"conversations": [], "next_offset": None}

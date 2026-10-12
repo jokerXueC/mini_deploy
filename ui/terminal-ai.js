@@ -7,6 +7,63 @@
   let savedSession = '';
   let archiveId = '', historyTarget = '', historyOffset = 0, historyBefore = null, historyLoading = false, historyGeneration = 0;
   let permission = 'approve', accessLoading = false, accessDraft = '', accessSession = '', submitting = 0;
+  const layout = el('sshLayout'), resizeHandle = el('aiResizeHandle');
+  const aiPanel = el('aiPanel'), expandedDialog = el('aiExpandedDialog');
+  let expanded = false;
+  let preferredWidth = 330, resizeFrame = 0, drag;
+  try {
+    const savedWidth = Number(localStorage.getItem('mini-deploy-ai-width'));
+    if (Number.isFinite(savedWidth) && savedWidth >= 280) preferredWidth = Math.min(1600, savedWidth);
+  } catch { /* Use default width when storage is unavailable. */ }
+  function widthBounds() {
+    const sidebar = layout.classList.contains('connections-collapsed') ? 52 : innerWidth > 1150 ? 220 : 0;
+    return {min: 280, max: Math.max(280, Math.floor(layout.clientWidth - sidebar - 360 - 14))};
+  }
+  function setPanelWidth(value, persist = false) {
+    if (expanded || !matchMedia('(min-width:1001px)').matches || !layout.classList.contains('ai-open')) return;
+    const bounds = widthBounds(), width = Math.round(Math.max(bounds.min, Math.min(bounds.max, value)));
+    layout.style.setProperty('--tai-width', `${width}px`);
+    resizeHandle.setAttribute('aria-valuemin', bounds.min);
+    resizeHandle.setAttribute('aria-valuemax', bounds.max);
+    resizeHandle.setAttribute('aria-valuenow', width);
+    resizeHandle.setAttribute('aria-valuetext', `AI 对话宽度 ${width} 像素`);
+    if (persist) {
+      preferredWidth = width;
+      try { localStorage.setItem('mini-deploy-ai-width', String(width)); } catch { /* Width still applies. */ }
+    }
+  }
+  function endResize(event) {
+    if (!drag || event && event.pointerId !== drag.id) return;
+    setPanelWidth(drag.width + drag.x - drag.lastX, true);
+    const id = drag.id; drag = undefined;
+    document.body.classList.remove('tai-resizing');
+    if (resizeHandle.hasPointerCapture(id)) resizeHandle.releasePointerCapture(id);
+  }
+  resizeHandle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !matchMedia('(min-width:1001px)').matches) return;
+    event.preventDefault(); resizeHandle.focus(); resizeHandle.setPointerCapture(event.pointerId);
+    drag = {id: event.pointerId, x: event.clientX, lastX: event.clientX, width: el('aiPanel').getBoundingClientRect().width};
+    document.body.classList.add('tai-resizing');
+  });
+  resizeHandle.addEventListener('pointermove', event => {
+    if (!drag || drag.id !== event.pointerId) return;
+    drag.lastX = event.clientX;
+    if (!resizeFrame) resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      if (drag) setPanelWidth(drag.width + drag.x - drag.lastX);
+    });
+  });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type => resizeHandle.addEventListener(type, endResize));
+  resizeHandle.addEventListener('dblclick', () => setPanelWidth(330, true));
+  resizeHandle.addEventListener('keydown', event => {
+    const width = el('aiPanel').getBoundingClientRect().width, bounds = widthBounds();
+    const changes = {ArrowLeft: width + 24, ArrowRight: width - 24, Home: bounds.min, End: bounds.max};
+    if (event.key in changes) { event.preventDefault(); setPanelWidth(changes[event.key], true); }
+  });
+  new ResizeObserver(() => { if (!drag) setPanelWidth(preferredWidth); }).observe(layout);
+  new MutationObserver(() => { if (!drag) setPanelWidth(preferredWidth); }).observe(layout, {attributes: true, attributeFilter: ['class']});
+  window.addEventListener('resize', () => { if (drag) endResize(); setPanelWidth(preferredWidth); });
+  window.addEventListener('blur', () => endResize());
   const context = () => window.SSHTerminal?.context() || {session_id: '', selection: '', cursor: 0, target: ''};
   const message = (text, error = false, id = 'aiFeedback') => {
     el(id).textContent = text; el(id).classList.toggle('tai-error', error);
@@ -35,10 +92,35 @@
       throw error;
     } finally { clearTimeout(timer); if (controller === abort) controller = undefined; }
   }
-  function panel(open) {
-    el('aiPanel').hidden = !open; el('sshLayout').classList.toggle('ai-open', open);
+  function syncPanel() {
+    const open = !aiPanel.hidden;
+    layout.classList.toggle('ai-open', open && !expanded);
+    resizeHandle.hidden = !open || expanded;
+    if (open && !expanded) requestAnimationFrame(() => setPanelWidth(preferredWidth));
     el('aiChatOpen').setAttribute('aria-expanded', String(open));
-    el('aiBackdrop').hidden = !open || !matchMedia('(max-width:1000px)').matches;
+    el('aiBackdrop').hidden = !open || expanded || !matchMedia('(max-width:1000px)').matches;
+  }
+  function expandPanel(open, focus = true) {
+    if (expanded === open) return;
+    endResize();
+    const scroll = el('aiMessages').scrollTop;
+    expanded = open;
+    if (open) {
+      aiPanel.hidden = false; expandedDialog.append(aiPanel); expandedDialog.showModal();
+    } else {
+      expandedDialog.close(); resizeHandle.after(aiPanel);
+    }
+    document.body.classList.toggle('tai-expanded', open);
+    const button = el('aiPanelExpand'), icon = button.querySelector('[data-ai-icon]');
+    button.title = open ? '恢复侧栏' : '放大 AI 对话';
+    button.setAttribute('aria-label', button.title); button.setAttribute('aria-expanded', String(open));
+    icon.dataset.aiIcon = open ? 'minimize-2' : 'maximize-2'; icons(button);
+    syncPanel(); el('aiMessages').scrollTop = scroll;
+    if (focus) button.focus({preventScroll: true});
+  }
+  function panel(open) {
+    if (!open) { endResize(); expandPanel(false, false); }
+    aiPanel.hidden = !open; syncPanel();
   }
   function controls() {
     const connected = !!context().session_id;
@@ -52,6 +134,11 @@
     el('aiShareOutput').disabled = !connected || working;
     el('aiPermission').disabled = !connected || !allowed || accessLoading || saving;
     el('aiPermission').value = connected ? permission : 'chat';
+    el('aiHealthCheck').disabled = !connected || !allowed || working || saving || accessLoading || historyLoading;
+    document.querySelectorAll('.tai-restore').forEach(button => {
+      button.disabled = !connected || !allowed || working || saving || accessLoading || historyLoading
+        || !['approve', 'auto'].includes(permission) || button.dataset.target !== context().target;
+    });
     el('aiAuto').disabled = !connected || !el('aiShareOutput').checked || working && !autoSession;
     el('aiStop').hidden = !working;
     el('aiSave').disabled = el('aiTest').disabled = !allowed || working || saving;
@@ -156,8 +243,10 @@
     if (!entry) return;
     const running = (result.events || []).find(step => step.status === 'running');
     entry.loading.hidden = result.status === 'awaiting_approval' || ['done', 'failed', 'cancelled'].includes(result.status);
-    entry.label.textContent = result.stage === 'tools' && running ? `正在${running.title}`
+    const phases = {preview: '正在预览差异', approval: '等待操作确认', execute: '正在执行', verify: '正在验证结果'};
+    entry.label.textContent = result.stage === 'tools' && running ? `${phases[running.phase] || '正在检查'}：${running.title}`
       : result.events?.length ? '正在整理检查结果' : '等待模型回复';
+    if (result.status === 'cancelling') entry.label.textContent = '正在停止，后续操作不会继续';
     const elapsed = Math.floor((Date.now() - entry.started) / 1000);
     entry.elapsed.textContent = elapsed ? `${elapsed} 秒` : '';
     const labels = {running: '执行中', awaiting_approval: '等待确认', done: '已完成', failed: '未完成', blocked: '未执行', cancelled: '已停止'};
@@ -166,13 +255,29 @@
       if (!row) {
         const details = document.createElement('details'); details.className = 'tai-step';
         const summary = document.createElement('summary'); const pre = document.createElement('pre');
-        details.append(summary, pre); entry.tools.append(details); row = {details, summary, pre}; entry.steps.set(step.id, row);
+        const outcome = document.createElement('p'); outcome.className = 'tai-verification'; outcome.hidden = true;
+        const restore = document.createElement('button'); restore.type = 'button'; restore.className = 'tai-text-button tai-restore';
+        restore.hidden = true; restore.title = '预览原配置与当前配置的差异，恢复前保留当前版本';
+        const icon = document.createElement('i'); icon.className = 'tai-icon'; icon.dataset.aiIcon = 'corner-up-left';
+        restore.append(icon, document.createTextNode('恢复备份')); icons(restore);
+        restore.addEventListener('click', () => runOperation('restore', {job_id: step.job_id, event_id: step.id}, restore.dataset.target));
+        details.append(summary, pre, outcome, restore); entry.tools.append(details);
+        row = {details, summary, pre, outcome, restore}; entry.steps.set(step.id, row);
       }
       if (row.details.dataset.state !== step.status) row.details.dataset.state = step.status;
       const title = `${step.title} · ${labels[step.status] || step.status}`;
       if (row.summary.textContent !== title) row.summary.textContent = title;
-      const content = [step.command, step.result].filter(Boolean).join('\n\n');
+      const content = [step.command, step.preview?.diff, step.result].filter(Boolean).join('\n\n');
       if (row.pre.textContent !== content) row.pre.textContent = content;
+      if (step.verification) {
+        row.outcome.hidden = false; row.outcome.dataset.state = step.verification.status;
+        row.outcome.textContent = `${step.verification.status === 'passed' ? '验证通过' : '验证未通过'} · ${step.verification.command || step.verification.detail}`;
+      }
+      if (step.recovery && step.job_id) {
+        row.restore.hidden = false; row.restore.dataset.target = result.target || historyTarget;
+        row.restore.disabled = working || !context().session_id || !allowed
+          || !['approve', 'auto'].includes(permission) || row.restore.dataset.target !== context().target;
+      }
     }
     if (!result.approval) {
       entry.approval.hidden = true; entry.approvalId = '';
@@ -185,7 +290,25 @@
     entry.approval.replaceChildren(); entry.approval.hidden = false;
     const title = document.createElement('strong'); title.textContent = approval.title;
     const target = document.createElement('p'); target.textContent = `服务器：${approval.target}`;
+    const reason = document.createElement('p'); reason.textContent = approval.reason || ''; reason.hidden = !approval.reason;
     const command = document.createElement('pre'); command.textContent = approval.command;
+    const preview = document.createElement('div'); preview.className = 'tai-preview'; preview.hidden = !approval.preview;
+    if (approval.preview) {
+      const path = document.createElement('p'); path.textContent = `文件：${approval.preview.path}`;
+      const diff = document.createElement('pre'); diff.className = 'tai-diff';
+      for (const line of (approval.preview.diff || '内容相同，无需替换。').split('\n')) {
+        const span = document.createElement('span'); span.textContent = line;
+        if (line.startsWith('+')) span.className = 'tai-diff-added';
+        if (line.startsWith('-')) span.className = 'tai-diff-removed';
+        diff.append(span);
+      }
+      const notice = document.createElement('p'); notice.textContent = approval.preview.notice + (approval.preview.truncated ? ' 差异较长，仅显示前一部分。' : '');
+      preview.append(path, diff, notice); command.hidden = true;
+      const original = document.createElement('details'); const caption = document.createElement('summary'); caption.textContent = '查看完整操作参数';
+      original.append(caption, command); command.hidden = false; preview.append(original);
+    }
+    const verification = document.createElement('p'); verification.hidden = !approval.validation;
+    verification.textContent = approval.validation ? `执行后校验：${approval.validation}` : '';
     const impact = document.createElement('p'); impact.textContent = `${approval.impact} 请在 2 分钟内确认。`;
     const actions = document.createElement('div'); actions.className = 'tai-approval-actions';
     for (const [text, decision] of [['拒绝', false], ['同意执行', true]]) {
@@ -199,17 +322,40 @@
         } catch (error) { message(error.message, true); actions.querySelectorAll('button').forEach(b => { b.disabled = false; }); }
       }); actions.append(button);
     }
-    entry.approval.append(title, target, command, impact, actions);
-    el('aiMessages').scrollTop = el('aiMessages').scrollHeight;
+    entry.approval.append(title, target, reason);
+    if (!approval.preview) entry.approval.append(command);
+    entry.approval.append(preview, verification, impact, actions);
+    const messages = el('aiMessages');
+    messages.scrollTop += entry.approval.getBoundingClientRect().top - messages.getBoundingClientRect().top - 10;
   }
   function renderAnswer(target, text) {
     target.replaceChildren();
-    // Render model text as text nodes. Fenced snippets never become executable HTML.
-    const regex = /```[^\n]*\n([\s\S]*?)```/g; let offset = 0, match;
-    while ((match = regex.exec(text))) {
-      target.append(document.createTextNode(text.slice(offset, match.index)));
+    if (!window.marked || !window.DOMPurify) { target.textContent = text; return; }
+    // Parse Markdown, then retain only formatting elements; model HTML cannot create active UI.
+    const fragment = DOMPurify.sanitize(marked.parse(String(text), {gfm: true, breaks: true, async: false}), {
+      RETURN_DOM_FRAGMENT: true,
+      ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'ul', 'ol', 'li',
+        'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a'],
+      ALLOWED_ATTR: ['href', 'title', 'start'], ALLOW_DATA_ATTR: false, ALLOW_ARIA_ATTR: false
+    });
+    fragment.querySelectorAll('a').forEach(link => {
+      try {
+        if (!/^https?:\/\//i.test(link.getAttribute('href') || '')) throw new Error();
+        const url = new URL(link.getAttribute('href'));
+        if (!url.hostname || url.username || url.password) throw new Error();
+        link.target = '_blank'; link.rel = 'noopener noreferrer'; link.referrerPolicy = 'no-referrer';
+      } catch { link.replaceWith(document.createTextNode(link.textContent)); }
+    });
+    fragment.querySelectorAll('table').forEach(table => {
+      const scroll = document.createElement('div'); scroll.className = 'tai-table-scroll';
+      scroll.tabIndex = 0; scroll.setAttribute('role', 'region'); scroll.setAttribute('aria-label', 'AI 回复表格');
+      table.replaceWith(scroll); scroll.append(table);
+    });
+    fragment.querySelectorAll('pre').forEach(pre => {
       const block = document.createElement('div'); block.className = 'tai-command';
-      const pre = document.createElement('pre'); const command = match[1].trim(); pre.textContent = command;
+      const command = pre.textContent.trimEnd();
+      // Strip HTML formatting from fenced or raw code blocks before copying to the terminal.
+      pre.textContent = command; pre.replaceWith(block);
       const actions = document.createElement('div'); actions.className = 'tai-command-actions';
       const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'tai-text-button'; copy.textContent = '复制';
       copy.addEventListener('click', async () => {
@@ -224,9 +370,9 @@
         });
         actions.append(fill);
       }
-      block.append(pre, actions); target.append(block); offset = regex.lastIndex;
-    }
-    target.append(document.createTextNode(text.slice(offset)));
+      block.append(pre, actions);
+    });
+    target.append(fragment);
   }
   async function waitForJob(id, current, entry) {
     const deadline = Date.now() + 660000;
@@ -264,7 +410,7 @@
       if (current !== generation) { cancelJob(submitted.id); return; }
       conversationId = submitted.conversation_id;
       archiveId = submitted.history_id; historyTarget = context().target;
-      if (!automatic) el('aiQuestion').value = '';
+      if (!automatic && el('aiQuestion').value.trim() === asked) el('aiQuestion').value = '';
       job = submitted.id;
       const result = await waitForJob(job, current, entry);
       if (!result || current !== generation) return;
@@ -286,6 +432,38 @@
       if (current === generation) { working = false; job = ''; pendingEntry = undefined; controls(); await refreshAccess(); scheduleAuto(); }
     }
   }
+  async function runOperation(action, data = {}, target = context().target) {
+    if (working || saving || accessLoading || historyLoading || !allowed) return;
+    const sessionId = context().session_id;
+    if (!sessionId || !target || target !== context().target) { message('请先连接这条记录对应的服务器。', true); return; }
+    stopAuto(); panel(true); working = true; controls();
+    const current = ++generation;
+    const entry = appendEntry(action === 'health' ? '服务器只读体检' : '预览并恢复配置备份'); pendingEntry = entry;
+    message(action === 'health' ? '正在采集服务器状态…' : '正在读取备份并预览差异…');
+    try {
+      submitting = current;
+      const submitted = await api(`/terminal-ai/${action}`, {session_id: sessionId, ...data});
+      if (submitting === current) submitting = 0;
+      if (current !== generation) { cancelJob(submitted.id); return; }
+      conversationId = ''; archiveId = submitted.history_id; historyTarget = target;
+      el('aiHistoryBar').hidden = true;
+      job = submitted.id;
+      const result = await waitForJob(job, current, entry);
+      if (!result || current !== generation) return;
+      renderAnswer(entry.answer, result.text); finishEntry(entry);
+      entry.meta.textContent = `${target} · ${result.events.length} 项操作 · 已保存记录`;
+      message(result.history_error || '操作完成，可继续提问', !!result.history_error);
+    } catch (error) {
+      if (current === generation) {
+        entry.answer.textContent = error.message; entry.answer.classList.add('tai-error');
+        finishEntry(entry); message(error.message, true);
+      }
+    } finally {
+      if (submitting === current) submitting = 0;
+      if (current === generation) { working = false; job = ''; pendingEntry = undefined; controls(); await refreshAccess(); }
+    }
+  }
+  el('aiHealthCheck').addEventListener('click', () => runOperation('health'));
   function newChat() {
     conversationId = ''; archiveId = ''; historyTarget = ''; historyBefore = null; historyGeneration++; stopAuto();
     el('aiHistoryBar').hidden = true;
@@ -332,7 +510,7 @@
         const entry = appendEntry(turn.question, false);
         const events = turn.events.map(event => ['running', 'awaiting_approval'].includes(event.status)
           ? {...event, status: 'cancelled'} : event);
-        renderProgress(entry, {events, status: 'done'}, '');
+        renderProgress(entry, {events, status: 'done', target: historyTarget}, '');
         renderAnswer(entry.answer, turn.answer || status[turn.status] || '本轮没有回复'); finishEntry(entry);
         entry.meta.textContent = `${historyDate(turn.created)}${status[turn.status] ? ` · ${status[turn.status]}` : ''}`;
       }
@@ -374,6 +552,8 @@
   });
   el('aiChatOpen').addEventListener('click', () => { panel(true); el('aiQuestion').focus(); });
   el('aiPanelClose').addEventListener('click', () => panel(false));
+  el('aiPanelExpand').addEventListener('click', () => expandPanel(!expanded));
+  expandedDialog.addEventListener('cancel', event => { event.preventDefault(); expandPanel(false); });
   el('aiBackdrop').addEventListener('click', () => panel(false));
   el('aiNewChat').addEventListener('click', () => { if (!working) { newChat(); el('aiQuestion').focus(); } });
   el('aiAskForm').addEventListener('submit', event => { event.preventDefault(); ask(el('aiQuestion').value.trim()); });
@@ -456,7 +636,7 @@
     controls();
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleAuto(); });
-  matchMedia('(max-width:1000px)').addEventListener('change', () => panel(!el('aiPanel').hidden));
+  matchMedia('(max-width:1000px)').addEventListener('change', syncPanel);
   window.addEventListener('pagehide', () => { cancelJob(job); stopAuto(); if (!submitting) controller?.abort(); el('aiKey').value = ''; });
   window.TerminalAI = {viewChanged(view) {
     if (view === 'terminal') { refresh(); controls(); }
