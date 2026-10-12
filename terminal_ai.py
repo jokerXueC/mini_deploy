@@ -21,6 +21,9 @@ import terminal_tools
 import terminal_history
 
 
+MAX_CALLS, MAX_WRITES, MAX_ROUNDS, TASK_SECONDS = 24, 6, 16, 600
+
+
 class AIError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
@@ -87,7 +90,19 @@ SYSTEM = (
     "查看默认路径或家目录的文件使用 list_directory，省略 path；指定目录使用绝对路径。"
     "工具使用独立 SSH 通道，不继承交互终端的 cd；以工具返回的实际路径为准，"
     "若用户指的是终端当前目录，可使用明确的绝对路径；路径不明确时只询问路径，不把登录目录当成终端当前目录。"
-    "目录列表和提示符不能证明文件内容或用途，可能的用途需注明是推测；不会读取文件内容。"
+    "目录列表和提示符不能证明文件内容或用途，可能的用途需注明是推测。"
+    "查看日志或配置文件内容使用 read_file，须提供绝对路径；路径已知时直接读取，不让用户粘贴同样的内容。"
+    "近期日志默认查看末尾，可用 position=head 查看开头；工具返回有界片段，不代表完整文件，"
+    "不得因片段没有异常就声称整份日志正常。不主动读取私钥或凭据文件。"
+    "需要继续读取文件时使用 read_text_file 并按 next_offset 翻页；文件名搜索用 search_files，"
+    "内容关键词用 search_text，系统和网络排查用 run_diagnostic，HTTP 连通性用 check_http。"
+    "修改配置前先读取相关片段并用 inspect_file 获取 SHA-256，再用 edit_file 精确修改或 write_file 创建文件。"
+    "已有文件修改会保留原文备份；版本改变或匹配不唯一时应重新读取，不猜测或跳过校验。"
+    "不要把脱敏占位符写回服务器，不修改私钥、密码或认证策略；修改后先校验配置再重载并检查状态。"
+    "容器配置先查看挂载信息；单文件 bind mount 下原子替换宿主文件后容器可能仍读旧文件，"
+    "不能仅凭宿主文件写入成功就声称容器已应用变更，应校验实际容器配置并告知需要的后续操作。"
+    "校验服务器或容器内配置使用 validate_config，启动停止服务或容器使用 manage_service/manage_container。"
+    "用户要求保留服务器文件，因此没有任意 Shell、解释器、删除/清理命令；不能以其他操作绕过。"
     "操作失败、被拒绝、超时或权限不足时不要绕过限制或重复修改；如实说明并先检查状态。"
 )
 
@@ -171,7 +186,7 @@ def complete(config, messages, tools=None):
                     or not isinstance(call["function"].get("name"), str)
                     or len(call["function"]["name"]) > 100
                     or not isinstance(call["function"].get("arguments"), str)
-                    or len(call["function"]["arguments"]) > 4096):
+                    or len(call["function"]["arguments"]) > 65536):
                 raise AIError("模型工具调用格式异常，未执行操作。", 502)
             ids.add(call["id"])
         if isinstance(content, list):
@@ -487,7 +502,7 @@ class Manager:
                                    config["model"], messages[-1]["content"])
             self.jobs[key] = {"owner": owner, "created": time.monotonic(), "status": "running",
                               "model": config["model"], "action": action, "session_id": session_id,
-                              "_active": True, "_cancel": threading.Event(), "_deadline": time.monotonic() + 240,
+                              "_active": True, "_cancel": threading.Event(), "_deadline": time.monotonic() + TASK_SECONDS,
                               "events": [], "target": target, "stage": "model"}
             if data.get("automatic") is True and mode != "chat":
                 mode = "readonly"
@@ -530,7 +545,8 @@ class Manager:
             job["_decision_event"] = threading.Event()
             job.pop("_decision", None)
             job["approval"] = {"id": secrets.token_urlsafe(24), "target": job["target"],
-                               **{k: plan[k] for k in ("title", "command", "arguments", "impact")}}
+                               **{k: plan[k] for k in ("title", "arguments", "impact")},
+                               'command': self._safe_text(config, plan['command'])}
             job["status"] = "awaiting_approval"
             decision_event = job["_decision_event"]
         deadline = time.monotonic() + 120
@@ -555,9 +571,10 @@ class Manager:
         tools = terminal_tools.schemas(writes=mode in {"approve", "auto"})
         messages = [*messages]
         messages[0] = {**messages[0], "content": messages[0]["content"] +
-            f"当前工具目标：{job['target']}。权限模式：{mode}。本轮最多 8 次工具调用、2 次修改。修改后应检查结果。"}
-        deadline = time.monotonic() + 240
-        for _ in range(6):
+            f"当前工具目标：{job['target']}。权限模式：{mode}。本轮最多 {MAX_CALLS} 次工具调用、{MAX_WRITES} 次修改。"
+            "修改后应检查结果。"}
+        deadline = job['_deadline']
+        for _ in range(MAX_ROUNDS):
             self._check_task(key, config, validate)
             if time.monotonic() >= deadline:
                 raise AIError("排查时间达到上限，任务已停止。", 408)
@@ -569,8 +586,8 @@ class Manager:
             calls = result.get("calls", [])
             if not calls:
                 return {**result, "usage": usage, "_history": "\n".join(history)[-10000:]}
-            if count + len(calls) > 8:
-                raise AIError("已达到本轮 8 次工具调用上限，请根据现有结果继续提问。", 429)
+            if count + len(calls) > MAX_CALLS:
+                raise AIError(f"已达到本轮 {MAX_CALLS} 次工具调用上限，请根据现有结果继续提问。", 429)
             if any(call["id"] in call_ids for call in calls):
                 raise AIError("模型重复了工具调用标识，任务已停止，未执行本批操作。", 502)
             call_ids.update(call["id"] for call in calls)
@@ -587,12 +604,12 @@ class Manager:
                     plan = terminal_tools.plan(name, json.loads(raw))
                     if config["api_key"] and config["api_key"] in plan["command"]:
                         raise terminal_tools.ToolError("工具参数包含模型凭据，未执行。")
-                    self._event_update(event, title=plan["title"], command=plan["command"], write=plan["write"])
+                    self._event_update(event, title=plan["title"], command=self._safe_text(config, plan["command"]), write=plan["write"])
                     if plan["write"]:
                         if mode not in {"approve", "auto"}:
                             raise terminal_tools.ToolError("本轮仅允许只读检查，未执行修改。")
                         signature = (name, json.dumps(plan["arguments"], sort_keys=True))
-                        if signature in writes or len(writes) >= 2:
+                        if signature in writes or len(writes) >= MAX_WRITES:
                             raise terminal_tools.ToolError("修改次数达到上限或操作重复，未再次执行。")
                         if write_failed:
                             raise terminal_tools.ToolError("之前的修改未确认成功，本轮不再修改，请先检查状态。")

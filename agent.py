@@ -2757,7 +2757,7 @@ class Handler(BaseHTTPRequestHandler):
                     def executor(plan, cancel):
                         success = False
                         try:
-                            result = validate().execute_tool(plan["command"], cancel)
+                            result = validate().execute_plan(plan, cancel)
                             success = result.get("exit_code") == 0
                             return result
                         finally:

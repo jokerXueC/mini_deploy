@@ -43,6 +43,7 @@ def test_release_manifest_excludes_deployment_adapters_and_templates():
     assert "monitoring.py" in entries
     assert "docker_mirrors.py" in entries
     assert "terminal_history.py" in entries
+    assert "ssh_files.py" in entries
     assert "scripts/verify_backup.py" in entries
     assert "scripts/doctor.sh" in entries
     assert "examples/nginx.compose.yml" in entries

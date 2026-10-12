@@ -16,6 +16,8 @@ import tempfile
 import threading
 import time
 
+import ssh_files
+
 try:
     import paramiko
 except ImportError:
@@ -198,6 +200,48 @@ class Session:
                 self.channel.resize_pty(width=cols, height=rows)
             except Exception:
                 raise SSHError("调整终端尺寸失败，请检查连接。", 502) from None
+
+    def execute_plan(self, plan, cancel, *, timeout=20):
+        if plan.get('transport') != 'sftp':
+            return self.execute_tool(plan['command'], cancel, timeout=timeout)
+        channel, client, finished = None, None, threading.Event()
+        deadline = time.monotonic() + timeout
+        def check():
+            if self.closed or time.time() >= self.expires or cancel.is_set():
+                raise SSHError("连接已关闭、登录已过期或任务已停止。", 410)
+            if time.monotonic() >= deadline:
+                raise SSHError("文件操作超时；若已提交修改，请核对原文件和备份。", 504)
+        try:
+            check()
+            channel = self.transport.open_session(timeout=min(5, timeout))
+            def watch():
+                while not finished.wait(.05):
+                    try:
+                        check()
+                    except SSHError:
+                        channel.close()
+                        return
+            threading.Thread(target=watch, name='ssh-files-watch', daemon=True).start()
+            check()
+            channel.settimeout(min(5, timeout))
+            channel.invoke_subsystem('sftp')
+            client = paramiko.SFTPClient(channel)
+            result = ssh_files.execute(client, plan, check)
+            check()
+            self.activity = time.monotonic()
+            return {**result, 'exit_code': 0}
+        except (SSHError, ssh_files.FileError):
+            raise
+        except Exception:
+            check()
+            raise SSHError("SFTP 操作失败，请核对服务器是否启用 SFTP、路径和账号权限；"
+                           "未自动重试。若已提交修改，请检查原文件及保留的备份/候选文件。", 502) from None
+        finally:
+            finished.set()
+            if client is not None:
+                client.close()
+            if channel is not None:
+                channel.close()
 
     def execute_tool(self, command, cancel, *, timeout=20, max_bytes=24000):
         """Run a backend-built command on a separate channel, never in the PTY."""

@@ -1,5 +1,6 @@
 """Real panel -> model mock HTTP and optional SSH -> conversational diagnosis."""
 import json
+import hashlib
 import threading
 
 import pytest
@@ -9,6 +10,7 @@ import test_terminal_ai as ai_tests
 import test_terminal_agent as agent_tests
 from test_ssh_browser import page as page, fill
 from test_ssh_terminal import http_server as http_server, runtime as runtime, manager as manager, peer as peer
+from ssh_sftp_peer import enable_sftp
 ai_manager = ai_tests.manager
 model_server = ai_tests.model_server
 
@@ -64,6 +66,59 @@ def settings_form(page, http_server, model_server, protocol='openai'):
     page.locator('#aiBaseUrl').fill(model_server.origin + '/v1')
     page.locator('#aiModel').fill('test-model')
     page.locator('#aiKey').fill('test-key-only')
+
+
+def test_file_repair_read_approval_backup_validate_reload_workflow(
+        page, http_server, manager, peer, ai_manager, model_server, tmp_path):
+    root = tmp_path / 'remote'
+    root.mkdir()
+    path = root / 'app.conf'
+    path.write_text('port=8080\n', encoding='utf-8')
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    sequence = [
+        ('search_files', {'path': '/', 'pattern': '*.conf'}),
+        ('read_text_file', {'path': '/app.conf'}),
+        ('inspect_file', {'path': '/app.conf'}),
+        ('edit_file', {'path': '/app.conf', 'old_text': 'port=8080', 'new_text': 'port=8081', 'expected_sha256': digest}),
+        ('validate_config', {'runtime': 'nginx', 'path': '/app.conf'}),
+        ('reload_service', {'service': 'nginx'}),
+        ('get_service_status', {'service': 'nginx'}),
+    ]
+    model_server.content = lambda body, n: (agent_tests.tool_response('openai', *sequence[n - 1], f'call_{n}')
+                                           if n <= len(sequence) else agent_tests.answer('openai'))
+    ai_manager.save(ai_tests.config(model_server))
+    page.goto(http_server.origin + '/ui?view=terminal')
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    enable_sftp(peer, root)
+    page.locator('#aiChatOpen').click()
+    page.locator('#aiQuestion').fill('查找 app.conf，把端口改成 8081，校验后重载 nginx 并检查状态')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('.tai-approval')).to_be_visible(timeout=10000)
+    playwright.expect(page.locator('.tai-approval')).to_contain_text('原片段：')
+    playwright.expect(page.locator('.tai-approval')).to_contain_text('port=8081')
+    assert path.read_text() == 'port=8080\n' and not list(root.glob('*.mini-deploy-backup.*'))
+    page.screenshot(path=str(tmp_path / 'file-edit-approval-desktop.png'), full_page=True)
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / 'file-edit-approval-mobile.png'))
+    page.get_by_role('button', name='同意执行', exact=True).click()
+    playwright.expect(page.locator('.tai-approval')).to_contain_text('systemctl --no-ask-password reload', timeout=10000)
+    assert path.read_text() == 'port=8081\n'
+    assert next(root.glob('*.mini-deploy-backup.*')).read_text() == 'port=8080\n'
+    assert len(peer['exec']) == 1 and b'nginx -t' in peer['exec'][0]
+    page.get_by_role('button', name='同意执行', exact=True).click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)
+    assert len(peer['exec']) == 3 and len(model_server.calls) == 8
+    assert digest in json.dumps(model_server.calls[3][2])
+    assert 'port=8080' in json.dumps(model_server.calls[2][2])
+    history_id = ai_manager.history.list()['conversations'][0]['id']
+    assert 'mini-deploy-backup.' in json.dumps(ai_manager.history.detail(history_id))
+    page.locator('#aiPanelClose').click()
+    page.locator('#sshDisconnect').click()
 
 
 def test_claude_configuration_and_connection_test_without_ssh(page, http_server, ai_manager, model_server):

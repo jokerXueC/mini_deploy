@@ -229,7 +229,7 @@
     target.append(document.createTextNode(text.slice(offset)));
   }
   async function waitForJob(id, current, entry) {
-    const deadline = Date.now() + 300000;
+    const deadline = Date.now() + 660000;
     while (current === generation && Date.now() < deadline) {
       const result = await api(`/terminal-ai/jobs?id=${encodeURIComponent(id)}`);
       if (current !== generation) return null;
@@ -423,7 +423,7 @@
       accessDraft = mode; accessSession = context().session_id;
       el('aiAccessTitle').textContent = '授权自动操作';
       el('aiAccessTarget').textContent = `当前服务器：${context().target}`;
-      el('aiAccessDescription').textContent = 'AI 可以直接重启容器或重启、重载服务，不再逐次询问，可能短暂中断业务。';
+      el('aiAccessDescription').textContent = 'AI 可以创建或编辑文件、启停容器及服务，不再逐次询问。已有文件先备份并校验版本；配置变更和服务操作可能中断业务。';
       el('aiAccessConsent').checked = false; el('aiAccessConfirm').disabled = true;
       message('', false, 'aiAccessFeedback'); el('aiAccessDialog').showModal(); controls();
     } else {

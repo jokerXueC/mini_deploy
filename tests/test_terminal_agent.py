@@ -70,7 +70,7 @@ def test_tools_reject_arbitrary_commands_options_paths_and_unbounded_logs(name, 
 
 def test_tool_schemas_and_plans_keep_modifications_explicit():
     assert all(not tools.TOOLS[t['function']['name']][-1] for t in tools.schemas())
-    assert len(tools.schemas(True)) == 12
+    assert len(tools.schemas(True)) == 24
     assert tools.plan('restart_service', {'service': 'nginx'})['arguments'] == {'service': 'nginx.service'}
     assert tools.plan('get_container_logs', {'container': 'web'})['arguments']['lines'] == 100
     assert 'Environment' not in tools.plan('get_container_status', {'container': 'web'})['command']
@@ -105,6 +105,98 @@ def test_agent_directory_request_checks_before_answering(ai_manager, model_serve
     assert not executed[0]['write']
     assert '/root' in json.dumps(model_server.calls[1][2])
     assert 'mini_deploy' in json.dumps(model_server.calls[1][2])
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_agent_reads_file_content_before_answering_and_redacts_results(ai_manager, model_server, protocol):
+    ai_manager.save(ai_tests.config(model_server, protocol))
+    model_server.content = lambda body, n: tool_response(
+        protocol, 'read_file', {'path': '/var/log/app.log'}) if n == 1 else answer(protocol)
+    executed = []
+    def execute(plan, cancel):
+        executed.append(plan)
+        return {'exit_code': 0, 'output': 'ERROR upstream timed out\npassword=hidden-log-password\ntest-key-only'}
+    job = submit(ai_manager, mode='readonly', execute=execute, question='读取 /var/log/app.log，检查异常')
+    result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
+    assert result['status'] == 'done'
+    assert len(executed) == 1 and executed[0]['name'] == 'read_file'
+    assert executed[0]['arguments'] == {'path': '/var/log/app.log', 'position': 'tail', 'lines': 100}
+    assert not executed[0]['write'] and not result.get('approval')
+    model_input = json.dumps(model_server.calls[1][2])
+    assert 'ERROR upstream timed out' in model_input
+    for text in (model_input, json.dumps(result), json.dumps(ai_manager.history.detail(job['history_id']))):
+        assert 'hidden-log-password' not in text and 'test-key-only' not in text
+    first = model_server.calls[0][2]
+    names = [t['name'] if protocol == 'anthropic' else t['function']['name'] for t in first['tools']]
+    assert 'read_file' in names
+
+
+@pytest.mark.parametrize('name,args', [
+    ('execute_shell', {'command': 'id'}), ('delete_file', {'path': '/tmp/a'}),
+    ('run_diagnostic', {'check': 'processes', 'command': 'rm -rf /'}),
+    ('run_diagnostic', {'check': 'docker_prune'}),
+    ('manage_container', {'container': 'a' * 64, 'action': 'rm'}),
+    ('manage_container', {'container': 'web', 'action': 'stop'}),
+    ('manage_service', {'service': 'nginx', 'action': 'delete'}),
+    ('validate_config', {'runtime': 'nginx; rm', 'path': '/etc/nginx/nginx.conf'}),
+    ('validate_config', {'runtime': 'nginx', 'path': '/etc/nginx/nginx.conf', 'container': '-it'}),
+    ('validate_config', {'runtime': 'nginx', 'path': '/etc/nginx/nginx.conf', 'adapter': 'json'}),
+    ('edit_file', {'path': '/tmp/a', 'old_text': '', 'new_text': 'b', 'expected_sha256': 'a' * 64}),
+    ('write_file', {'path': '/tmp/a', 'content': 'password=[已隐藏]'}),
+    ('write_file', {'path': '/tmp/a', 'content': 'new', 'expected_sha256': 'invalid'}),
+    ('search_files', {'path': '/etc', 'pattern': '*.conf', 'depth': 6}),
+    ('search_files', {'path': '/etc', 'pattern': '../*.conf'}),
+    ('search_text', {'path': '/tmp/log', 'query': '', 'limit': 100}),
+    ('read_text_file', {'path': '/tmp/log', 'offset': -1}),
+    ('check_http', {'url': 'https://user:password@localhost'}),
+    ('check_http', {'url': 'file:///etc/shadow'}),
+    ('check_http', {'url': 'https://example.com', 'method': 'DELETE'}),
+])
+def test_extended_tools_do_not_allow_scripts_deletion_or_invalid_arguments(name, args):
+    with pytest.raises(tools.ToolError):
+        tools.plan(name, args)
+
+
+def test_extended_commands_quote_paths_and_have_fixed_executable_actions():
+    path = "/etc/a b'$(touch injected);`reboot`.conf"
+    plan = tools.plan('validate_config', {'runtime': 'nginx', 'path': path, 'container': 'web'})
+    assert shlex.split(plan['command']) == ['docker', 'exec', 'web', 'nginx', '-t', '-c', path]
+    assert not plan['write']
+    assert tools.plan('manage_container', {'container': 'a' * 64, 'action': 'pause'})['write']
+    for name, args in [('manage_container', {'container': 'a' * 64, 'action': 'stop'}),
+                       ('restart_container', {'container': 'a' * 64})]:
+        command = tools.plan(name, args)['command']
+        assert '{{.HostConfig.AutoRemove}}' in command and '[ "$auto_remove" = false ]' in command
+    plan = tools.plan('check_http', {'url': 'https://example.com/?a=$(reboot)'})
+    assert shlex.split(plan['command'])[-1] == 'https://example.com/?a=$(reboot)'
+    assert '--head' in shlex.split(plan['command'])
+    assert all(t['function']['name'] not in {'write_file', 'edit_file', 'manage_service', 'manage_container'}
+               for t in tools.schemas())
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+@pytest.mark.parametrize('mode,decision,expected', [('approve', True, 1), ('approve', False, 0),
+                                                  ('readonly', None, 0), ('auto', None, 1)])
+def test_file_modifications_respect_mode_approval_and_history_redaction(
+        ai_manager, model_server, protocol, mode, decision, expected):
+    ai_manager.save(ai_tests.config(model_server, protocol))
+    arguments = {'path': '/etc/app.conf', 'old_text': 'port=8080', 'new_text': 'port=8081',
+                 'expected_sha256': 'a' * 64}
+    model_server.content = lambda body, n: tool_response(protocol, 'edit_file', arguments) if n == 1 else answer(protocol)
+    executed = []
+    job = submit(ai_manager, mode=mode, execute=lambda plan, cancel: executed.append(plan) or {
+        'exit_code': 0, 'backup': '/etc/app.conf.mini-deploy-backup.example', 'sha256': 'b' * 64})
+    if mode == 'approve':
+        pending = wait_status(ai_manager, 'owner', job['id'], {'awaiting_approval'})
+        assert not executed
+        assert pending['approval']['arguments'] == arguments
+        assert '8080' in pending['approval']['command'] and '8081' in pending['approval']['command']
+        assert '备份' in pending['approval']['impact']
+        ai_manager.approve('owner', job['id'], pending['approval']['id'], decision)
+    result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
+    assert result['status'] == 'done' and len(executed) == expected
+    if expected:
+        assert 'mini-deploy-backup.example' in json.dumps(ai_manager.history.detail(job['history_id']))
 
 
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
@@ -227,8 +319,8 @@ def test_tool_loop_bounded_and_repeat_modifications_not_retried(ai_manager, mode
     executed = []
     job = submit(ai_manager, mode='auto', execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 1, 'output': 'failed'})
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
-    assert result['status'] == 'failed' and len(model_server.calls) == 6 and len(executed) == 1
-    assert len(result['events']) == 6 and all(e['status'] == 'blocked' for e in result['events'][1:])
+    assert result['status'] == 'failed' and len(model_server.calls) == ai.MAX_ROUNDS and len(executed) == 1
+    assert len(result['events']) == ai.MAX_ROUNDS and all(e['status'] == 'blocked' for e in result['events'][1:])
     model_server.content = answer('openai')
     followup = submit(ai_manager, mode='auto', conversation_id=job['conversation_id'])
     assert wait_status(ai_manager, 'owner', followup['id'], {'done'})['status'] == 'done'
@@ -263,7 +355,7 @@ def test_permission_mismatch_and_expired_auto_do_not_silently_execute(ai_manager
 
 
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
-def test_multiple_tool_results_match_ids_and_stop_at_eight_calls(ai_manager, model_server, protocol):
+def test_multiple_tool_results_match_ids_and_stop_at_call_limit(ai_manager, model_server, protocol):
     ai_manager.save(ai_tests.config(model_server, protocol))
     def respond(body, n):
         result = tool_response(protocol, 'list_containers', {}, f'call_{n}_0')
@@ -278,7 +370,7 @@ def test_multiple_tool_results_match_ids_and_stop_at_eight_calls(ai_manager, mod
     executed = []
     job = submit(ai_manager, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0, 'output': 'ok'})
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
-    assert result['status'] == 'failed' and len(executed) == 8 and len(result['events']) == 8
+    assert result['status'] == 'failed' and len(executed) == ai.MAX_CALLS and len(result['events']) == ai.MAX_CALLS
     messages = model_server.calls[1][2]['messages']
     if protocol == 'anthropic':
         assert len(messages[-1]['content']) == 4
