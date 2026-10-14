@@ -33,6 +33,24 @@ def seed(home, now=None, seconds=86400):
                  'write_kib_s': 360 + abs(math.sin(i / 400)) * 1600, 'iops': 30 + abs(math.sin(i / 400)) * 90,
                  'await_ms': 1.2 + abs(math.sin(i / 650)) * 3.5, 'busy_percent': 15 + abs(math.sin(i / 1800)) * 40}]}}
         history.observe(server, now - seconds + i)
+        if i % 30 == 0:
+            busy = 44000 < i < 45000
+            history.record_context({'at': now - seconds + i, 'available': True, 'scanned': 126, 'readable': 126,
+                'blocked_count': 2 if busy else 0, 'zombie_count': 0, 'new_baselines': 0, 'warnings': [],
+                'scan_ms': 3.6, 'processes': [
+                    {'pid': 2408, 'start_ticks': 4500, 'ppid': 1, 'name': 'python', 'uid': 1000, 'user': 'app',
+                     'state': 'R' if busy else 'S', 'threads': 12, 'cpu_percent': cpu * 6, 'host_cpu_percent': cpu * .75,
+                     'rss_mib': 1600 if busy else 850, 'memory_percent': 19.5 if busy else 10.4,
+                     'cpu_change': 36.2 if busy else .5, 'rss_change_mib': 128 if busy else 1.2,
+                     'read_kib_s': 220, 'write_kib_s': 2400 if busy else 120, 'interval_seconds': 5,
+                     'service': '', 'container': 'aimore-cloud', 'container_id': 'a' * 64,
+                     'container_state': 'running', 'container_health': 'healthy', 'executable': '/usr/local/bin/python3'},
+                    {'pid': 1832, 'start_ticks': 1300, 'ppid': 1, 'name': 'postgres', 'uid': 999, 'user': 'postgres',
+                     'state': 'D' if busy else 'S', 'threads': 1, 'cpu_percent': 22.5, 'host_cpu_percent': 2.81,
+                     'rss_mib': 520, 'memory_percent': 6.35, 'read_kib_s': 140, 'write_kib_s': 5600 if busy else 360,
+                     'cpu_change': 4.3 if busy else -.2, 'rss_change_mib': 12 if busy else 0,
+                     'interval_seconds': 5, 'service': 'postgresql.service', 'container': '',
+                     'container_id': '', 'executable': '/usr/lib/postgresql/17/bin/postgres'}]}, server)
     for bucket in history.pending.values():
         bucket['metadata']['hostname'] = 'debian-demo（模拟数据）'
     history.flush(now, force=True)
@@ -42,7 +60,7 @@ def seed(home, now=None, seconds=86400):
 class Handler(OperationsHandler):
     def do_GET(self):  # noqa: N802
         path = agent._normal_path(urlparse(self.path).path)
-        if path in {'/performance/server', '/performance/server/export'}:
+        if path in {'/performance/server', '/performance/server/export', '/performance/server/context'}:
             agent.Handler.do_GET(self)
         else:
             super().do_GET()

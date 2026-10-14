@@ -354,9 +354,30 @@
               <label class="field"><span>响应较慢（毫秒）</span><input id="monitorSlow" type="number" min="100" max="60000" value="3000" required></label>
               <label class="field"><span>证书提前提醒（天）</span><input id="monitorCertDays" type="number" min="1" max="90" value="14" required></label>
             </div>
+            <details class="resource-rule-settings"><summary>服务器资源阈值</summary>
+              <label><input id="monitorResourceEnabled" type="checkbox" checked> 开启资源告警</label>
+              <div class="monitor-settings-grid">
+                <label class="field"><span>CPU（%）</span><input id="monitorCpuThreshold" type="number" min="50" max="99" value="90" required></label>
+                <label class="field"><span>内存（%）</span><input id="monitorMemoryThreshold" type="number" min="50" max="99" value="90" required></label>
+                <label class="field"><span>根分区（%）</span><input id="monitorDiskThreshold" type="number" min="50" max="99" value="90" required></label>
+                <label class="field"><span>inode（%）</span><input id="monitorInodeThreshold" type="number" min="50" max="99" value="90" required></label>
+                <label class="field"><span>Swap（%）</span><input id="monitorSwapThreshold" type="number" min="50" max="99" value="90" required></label>
+                <label class="field"><span>I/O 等待（%）</span><input id="monitorIowaitThreshold" type="number" min="5" max="90" value="20" required></label>
+                <label class="field"><span>每核负载（%）</span><input id="monitorLoadThreshold" type="number" min="100" max="1000" value="150" required></label>
+                <label class="field"><span>内存增长（MiB/分钟）</span><input id="monitorMemoryGrowth" type="number" min="16" max="32768" value="256" required></label>
+                <label class="field"><span>恢复确认（秒）</span><input id="monitorResourceRecovery" type="number" min="5" max="600" value="30" required></label>
+              </div>
+              <p class="monitor-feedback">百分比资源需比阈值低至少 5 个百分点并稳定后确认恢复。每核负载 150% 表示负载 / 逻辑核数为 1.5；内存增长提醒仅在内存占用 ≥70% 时启用。</p>
+            </details>
             <div class="certificate-actions"><label><input id="monitorRecovery" type="checkbox" checked> 恢复后通知</label><button class="ghost-button compact-action" type="submit">保存规则</button></div>
           </form>
         </details>
+      <details id="prometheusPanel" class="website-monitor-panel incident-section"><summary>Prometheus 接入</summary>
+        <p id="prometheusStatus" class="monitor-feedback" role="status">读取接入状态…</p>
+        <div class="certificate-actions"><button id="prometheusEnable" class="ghost-button compact-action" type="button">开启采集</button><button id="prometheusRotate" class="ghost-button compact-action" type="button" hidden>重新生成密钥</button><button id="prometheusDisable" class="ghost-button compact-action" type="button" hidden>关闭采集</button></div>
+        <div id="prometheusCredentials" hidden><label class="field"><span>采集配置（包含只读密钥，仅本次显示）</span><textarea id="prometheusConfig" rows="10" readonly spellcheck="false"></textarea></label><div class="certificate-actions"><button id="prometheusCopy" class="toolbar-icon" type="button" title="复制配置" aria-label="复制配置"><img src="ui/previews/ssh-ai/icons/copy.svg" alt=""></button><button id="prometheusDownload" class="toolbar-icon" type="button" title="下载配置" aria-label="下载配置"><img src="ui/previews/ssh-ai/icons/download.svg" alt=""></button></div></div>
+        <p id="prometheusFeedback" class="monitor-feedback" role="status"></p>
+      </details>
       <section class="incident-section" aria-labelledby="incidentHistoryTitle">
         <div class="panel-head">
           <div><h2 id="incidentHistoryTitle">异常历史</h2><p id="incidentHistoryHint">异常、恢复与知晓记录</p></div>
@@ -640,6 +661,7 @@
   <script src="ui/certificates.js"></script>
   <script src="ui/certificate-discovery.js"></script>
   <script src="ui/monitoring.js"></script>
+  <script src="ui/prometheus.js"></script>
   <script src="ui/docker-images.js"></script>
   <script src="ui/docker-mirrors.js"></script>
   <script src="ui/request-gateway.js"></script>

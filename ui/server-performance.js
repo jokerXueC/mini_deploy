@@ -17,6 +17,7 @@
     $('serverPerformanceFeedback').textContent = format === 'html' ? '读取已保存的性能采样…' : '生成性能报告…';
     try {
       const parameters = new URLSearchParams({period, format, theme: format === 'html' ? document.documentElement.dataset.theme || 'light' : 'light'});
+      if (format === 'html') parameters.set('preview', '1');
       const response = await fetch(`performance/server/export?${parameters}`, {credentials:'same-origin', signal:controller.signal});
       if (!response.ok) { const data = await response.json(); throw new Error(data.detail || '性能报告读取失败'); }
       const blob = await response.blob(); if (run !== revision || !dialog.open) return;
@@ -36,6 +37,19 @@
   $('serverPerformanceRefresh').addEventListener('click', () => load());
   $('serverPerformanceExport').addEventListener('click', () => load('zip'));
   $('serverPerformanceCsv').addEventListener('click', () => load('csv'));
+  window.addEventListener('message', async event => {
+    const message = event.data, frame = $('serverPerformanceFrame');
+    if (!dialog.open || event.source !== frame.contentWindow || message?.type !== 'performance-context-request') return;
+    if (!/^[a-f0-9]{32}$/.test(message.run) || !Number.isSafeInteger(message.ts) || typeof message.token !== 'string' || message.token.length > 80) return;
+    const version = revision, source = event.source;
+    try {
+      const response = await fetch(`performance/server/context?${new URLSearchParams({run:message.run, ts:message.ts})}`, {credentials:'same-origin', signal:controller?.signal});
+      const body = await response.json();
+      if (dialog.open && version === revision) source.postMessage({type:'performance-context-response', token:message.token, scene:response.ok ? body : null, error:response.ok ? '' : body.detail || '现场读取失败'}, '*');
+    } catch (error) {
+      if (dialog.open && version === revision && error.name !== 'AbortError') source.postMessage({type:'performance-context-response', token:message.token, error:'现场读取失败，请重试。'}, '*');
+    }
+  });
   dialog.addEventListener('click', event => { const button = event.target.closest('[data-server-period]'); if (button) { period = button.dataset.serverPeriod; load(); } });
   dialog.addEventListener('close', () => { revision++; controller?.abort(); busy = false; clearFrame(); });
 })();

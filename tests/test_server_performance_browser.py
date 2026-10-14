@@ -18,6 +18,44 @@ def demo(runtime, monkeypatch):
     return history
 
 
+def test_process_scenes_lazy_details_chart_selection_and_offline_exports(page, http_server, demo, tmp_path):
+    page.goto(http_server.origin + '/ui?view=server')
+    page.locator('#serverPerformanceOpen').click()
+    frame = page.frame_locator('#serverPerformanceFrame')
+    playwright.expect(frame.locator('#sceneRows > tr:not(.scene-detail)')).to_have_count(20, timeout=15000)
+    frame.locator('#sceneRows button').first.click()
+    playwright.expect(frame.locator('.scene-detail:not([hidden])')).to_contain_text('aimore-cloud')
+    playwright.expect(frame.locator('.scene-detail:not([hidden])')).to_contain_text('变化')
+    frame.locator('.scene-detail:not([hidden]) summary').first.click()
+    playwright.expect(frame.locator('.scene-detail:not([hidden]) details[open]')).to_contain_text('可执行文件')
+    # Navigate beyond embedded recent details to exercise the authenticated parent bridge.
+    for _ in range(8):
+        frame.locator('#sceneNext').click()
+    frame.locator('#sceneRows button').first.click()
+    playwright.expect(frame.locator('.scene-detail:not([hidden])')).to_contain_text('postgresql.service', timeout=15000)
+    frame.locator('#sceneAbnormal').check()
+    playwright.expect(frame.locator('#sceneRows')).to_contain_text('CPU 高占用')
+    frame.locator('canvas').first.click(position={'x': 220, 'y': 90})
+    playwright.expect(frame.locator('.scene-detail:not([hidden])')).to_contain_text('python', timeout=15000)
+    frame.locator('.scene-detail:not([hidden])').scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / 'performance-process-desktop.png'))
+    page.set_viewport_size({'width': 390, 'height': 844})
+    frame.locator('.scene-detail:not([hidden])').scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / 'performance-process-mobile.png'))
+    assert frame.locator('body').evaluate('(el) => el.scrollWidth <= innerWidth + 1')
+    assert frame.locator('#sceneRows > tr:not(.scene-detail) button').first.evaluate('(el) => el.getBoundingClientRect().right <= innerWidth')
+    with page.expect_download() as download:
+        page.locator('#serverPerformanceExport').click()
+    with zipfile.ZipFile(download.value.path()) as archive:
+        rows = list(csv.DictReader(io.StringIO(archive.read('processes.csv').decode('utf-8-sig'))))
+        assert len(rows) > 5600 and any(row['容器'] == 'aimore-cloud' for row in rows)
+        path = tmp_path / 'process-report.html'
+        path.write_bytes(archive.read('report.html'))
+    page.goto(path.as_uri())
+    page.locator('#sceneRows button').first.click()
+    playwright.expect(page.locator('.scene-detail:not([hidden])')).to_contain_text('aimore-cloud')
+
+
 def test_server_report_preview_download_and_offline_charts(page, http_server, demo, tmp_path):
     page.goto(http_server.origin + '/ui?view=server')
     page.locator('#serverPerformanceOpen').click()

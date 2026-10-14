@@ -29,7 +29,8 @@
     monitoring_save: '保存监测地址', monitoring_remove: '移除监测', monitoring_toggle: '切换监测', monitoring_settings: '提醒规则', monitoring_mute: '通知静音', monitoring_check: '手动检查'};
   const reasonNames = {oom: '内存溢出', oom_killed: '内存溢出退出', restarts: '反复重启', restart_storm: '反复重启',
     health: '健康检查失败', unhealthy: '健康检查失败', exit: '异常退出', abnormal_exit: '异常退出',
-    configured_container_missing: '配置容器未找到', container_disappeared: '容器消失', missing: '容器未找到', not_running: '容器未运行'};
+    configured_container_missing: '配置容器未找到', container_disappeared: '容器消失', missing: '容器未找到', not_running: '容器未运行',
+    cpu:'CPU 持续超限', memory:'内存持续超限', disk:'根分区空间不足', inode:'inode 不足', swap:'Swap 占用高', iowait:'I/O 等待高', load:'系统负载高', memory_growth:'内存持续增长'};
   const metadata = item => {
     const meta = item.metadata || {};
     return {...meta, container: meta.container ?? meta.name, container_id: meta.container_id ?? meta.id,
@@ -90,7 +91,8 @@
     const fields = [['container', '容器'], ['container_id', '容器 ID'], ['project', '项目'], ['service', '服务'],
       ['exit_code', '退出码'], ['oom_killed', '内存溢出'], ['restart_count', '重启次数'], ['restart_delta_5m', '近 5 分钟重启增量'],
       ['restart_window_seconds', '重启统计窗口（秒）'], ['restart_policy', '重启策略'], ['started_at', '启动时间'], ['finished_at', '退出时间'],
-      ['health_exit_code', '健康检查退出码'], ['health_checked_at', '健康检查时间'], ['health_output', '健康检查输出'], ['action', '容器事件'], ['reason', '原因']];
+      ['health_exit_code', '健康检查退出码'], ['health_checked_at', '健康检查时间'], ['health_output', '健康检查输出'], ['action', '容器事件'], ['reason', '原因'],
+      ['value', '采样值'], ['threshold', '阈值'], ['unit', '单位'], ['recovering', '正在确认恢复']];
     const entries = fields.filter(([key]) => meta[key] !== undefined && meta[key] !== null && meta[key] !== '')
       .map(([key, label]) => `<div><dt>${label}</dt><dd>${text(key === 'reason' ? reasonNames[meta[key]] || meta[key] : typeof meta[key] === 'boolean' ? meta[key] ? '是' : '否' : meta[key])}</dd></div>`);
     if (item.incident_id) entries.push(`<div><dt>异常 ID</dt><dd>${text(item.incident_id)}</dd></div>`);
@@ -151,7 +153,7 @@
       const sample = coverage[key] || {};
       const fresh = Number(sample.checked_at) > 0 && Date.now() / 1000 - sample.checked_at <= 120;
       const available = !loadError && sample.status === 'healthy' && fresh;
-      return `<span class="incident-coverage-item ${available ? 'available' : ''}" title="${text(sample.detail || '服务未提供采样详情')}">${{server: '服务器', docker: '容器', docker_events: '容器生命周期'}[key]} · ${available ? '采样可用' : sample.status === 'not_installed' ? '未安装' : '采样未知'}</span>`;
+      return `<span class="incident-coverage-item ${available ? 'available' : ''}" title="${text(sample.detail || '服务未提供采样详情')}">${{server: '服务器', docker: '容器', docker_events: '容器生命周期'}[key]} · ${available ? '采样可用' : sample.status === 'disabled' ? '告警暂停' : sample.status === 'not_installed' ? '未安装' : '采样未知'}</span>`;
     }).join('') + (latestSample ? `<small>最近采样 ${text(time(latestSample))}</small>` : '');
     el('acknowledgeAllBtn').disabled = busy || !alerts.some(item => !item.acknowledged_at);
     const severity = el('incidentSeverity').value, source = el('incidentSource').value, state = el('incidentStatus').value;
@@ -249,6 +251,9 @@
       el('monitorSlow').value = data.settings.slow_ms;
       el('monitorCertDays').value = data.settings.certificate_days;
       el('monitorRecovery').checked = data.settings.recovery;
+      const inputs = {monitorCpuThreshold:'cpu_threshold', monitorMemoryThreshold:'memory_threshold', monitorDiskThreshold:'disk_threshold', monitorInodeThreshold:'inode_threshold', monitorSwapThreshold:'swap_threshold', monitorIowaitThreshold:'iowait_threshold', monitorLoadThreshold:'load_threshold_percent', monitorMemoryGrowth:'memory_growth_mb', monitorResourceRecovery:'resource_recovery_seconds'};
+      for (const [id, key] of Object.entries(inputs)) if (data.settings[key] != null) el(id).value = data.settings[key];
+      el('monitorResourceEnabled').checked = data.settings.resource_enabled !== false;
       settingsLoaded = true;
     }
     if (activeView === 'events') {
@@ -354,7 +359,12 @@
     event.preventDefault();
     change({action: 'settings', sustain_seconds: Number(el('monitorSustain').value),
       repeat_seconds: Number(el('monitorRepeat').value) * 60, slow_ms: Number(el('monitorSlow').value),
-      certificate_days: Number(el('monitorCertDays').value), recovery: el('monitorRecovery').checked}, '提醒规则已保存');
+      certificate_days: Number(el('monitorCertDays').value), recovery: el('monitorRecovery').checked,
+      resource_enabled: el('monitorResourceEnabled').checked, cpu_threshold:Number(el('monitorCpuThreshold').value),
+      memory_threshold:Number(el('monitorMemoryThreshold').value), disk_threshold:Number(el('monitorDiskThreshold').value),
+      inode_threshold:Number(el('monitorInodeThreshold').value), swap_threshold:Number(el('monitorSwapThreshold').value),
+      iowait_threshold:Number(el('monitorIowaitThreshold').value), load_threshold_percent:Number(el('monitorLoadThreshold').value),
+      memory_growth_mb:Number(el('monitorMemoryGrowth').value), resource_recovery_seconds:Number(el('monitorResourceRecovery').value)}, '提醒规则已保存');
   });
   const acknowledgeAll = () => change({action: 'acknowledge_all'}, '当前异常已标为已知晓；恢复前仍保留显示');
   el('acknowledgeAllBtn').addEventListener('click', acknowledgeAll);

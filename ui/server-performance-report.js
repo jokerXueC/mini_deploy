@@ -68,6 +68,7 @@
     if (!valid || rect.width < 1) return;
     const first = points[0].first, last = points.at(-1).first, left = 50, right = rect.width - 15, top = 10, bottom = rect.height - 32;
     const x = p => left + (right - left) * (last === first ? .5 : (p.first - first) / (last - first));
+    canvas.sceneRange = {first, last, left, right};
     const scale = unit === '%' ? maximum : maximum * 1.08;
     const y = value => bottom - (bottom - top) * value / scale;
     const style = getComputedStyle(document.body);
@@ -103,6 +104,21 @@
     for (const [, label, color] of series) { const span = document.createElement('span'); span.textContent = label; span.style.color = color; legend.append(span); }
     plot.className = 'plot'; canvas.setAttribute('role', 'img'); canvas.setAttribute('aria-label', title + '趋势');
     empty.className = 'plot-empty'; empty.textContent = '此范围没有已记录的有效数据'; plot.append(canvas, empty); section.append(h2, legend, plot); $('charts').append(section); plots.push([canvas, empty, unit, series]);
+    canvas.addEventListener('click', event => {
+      const range = canvas.sceneRange;
+      if (!range || !data.contexts?.length) return;
+      const position = Math.max(0, Math.min(1, (event.clientX - canvas.getBoundingClientRect().left - range.left) / (range.right - range.left)));
+      const at = range.first + position * (range.last - range.first);
+      const closest = data.contexts.reduce((a, b) => Math.abs(a.at - at) <= Math.abs(b.at - at) ? a : b);
+      if (Math.abs(closest.at - at) > 35) {
+        $('sceneEmpty').textContent = '该时间点附近没有保存进程现场，无法还原当时的进程。';
+        $('sceneSection').scrollIntoView({behavior:'smooth', block:'start'}); return;
+      }
+      $('sceneAbnormal').checked = false;
+      scenePage = Math.floor(data.contexts.indexOf(closest) / scenePageSize); renderScenes();
+      openScene(closest, sceneTargets.get(sceneKey(closest)));
+      $('sceneSection').scrollIntoView({behavior:'smooth', block:'start'});
+    });
   }
   const redraw = () => plots.forEach(args => draw(...args)); new ResizeObserver(redraw).observe($('charts')); redraw();
   for (const [key, label, unit] of data.metrics) {
@@ -112,5 +128,79 @@
   }
   $('hardware').textContent = `CPU：${meta.cpu_model || '未记录'}；内存 ${format(meta.memory_total_mb, 'MiB')}；Swap ${format(meta.swap_total_mb, 'MiB')}；磁盘 ${meta.disk_path || '/'} 共 ${format(meta.disk_total_gb, 'GiB')}。`;
   $('generated').textContent = '导出时间：' + data.generated_at + '；所有时间为 UTC。';
+  const sceneKey = scene => `${scene.run}:${scene.ts}`, scenePageSize = 20, sceneTargets = new Map(), waiting = new Map();
+  const cachedScenes = new Map((data.context_details || []).map(scene => [sceneKey(scene), scene]));
+  let scenePage = 0, sequence = 0;
+  $('contextNotice').textContent = data.context_notice || '之前的性能记录未包含进程现场，升级后开始积累。';
+  function cell(row, text) { const td = document.createElement('td'); td.textContent = text; row.append(td); return td; }
+  function sceneDetail(target, scene) {
+    target.replaceChildren();
+    const description = document.createElement('p');
+    description.textContent = `${scene.reasons.join('；')} · CPU ${format(scene.metrics.cpu_percent, '%')} · 内存 ${format(scene.metrics.memory_percent, '%')} · 负载 ${format(scene.metrics.load_one)} · I/O wait ${format(scene.metrics.iowait_percent, '%')} · 磁盘忙碌 ${format(scene.metrics.disk_busy_percent, '%')} · 接收 ${format(scene.metrics.network_rx_kib_s, 'KiB/s')} / 发送 ${format(scene.metrics.network_tx_kib_s, 'KiB/s')}`;
+    const coverage = document.createElement('p'); coverage.className = 'caption';
+    coverage.textContent = `实际现场 ${new Date(scene.at * 1000).toISOString()}${scene.server_sampled_at ? ' · 整机采样 ' + new Date(scene.server_sampled_at * 1000).toISOString() : ''} · 读取 ${scene.readable ?? 0}/${scene.scanned ?? 0} 个进程 · D 状态 ${scene.blocked_count ?? 0} · 僵尸 ${scene.zombie_count ?? 0} · 首次基线 ${scene.new_baselines ?? 0} 个 · 扫描 ${format(scene.scan_ms, 'ms')}${scene.container_sampled_at ? ' · 容器状态缓存时间 ' + new Date(scene.container_sampled_at * 1000).toISOString() : ' · 容器名称/状态缓存未提供，已识别的容器 ID 仍保留'}`;
+    target.append(description, coverage);
+    for (const warning of scene.warnings || []) { const p = document.createElement('p'); p.textContent = warning; target.append(p); }
+    if (!scene.processes.length) { const p = document.createElement('p'); p.textContent = '该现场未取得有效的进程排名。'; target.append(p); return; }
+    const scroll = document.createElement('div'), table = document.createElement('table'), head = document.createElement('thead'), header = document.createElement('tr'), body = document.createElement('tbody'); scroll.className = 'table-scroll';
+    for (const title of ['进程 / PID', 'CPU 单核 / 整机', 'RSS / 内存占比', '磁盘读取', '磁盘写入', '服务 / 容器']) { const th = document.createElement('th'); th.textContent = title; header.append(th); }
+    head.append(header);
+    const ordered = [...scene.processes].sort((a, b) => (b.cpu_percent || 0) - (a.cpu_percent || 0));
+    for (const p of ordered) {
+      const row = document.createElement('tr'), td = document.createElement('td'), details = document.createElement('details'), summary = document.createElement('summary'), note = document.createElement('p');
+      summary.textContent = `${p.name} · ${p.pid}`;
+      note.textContent = `用户 ${p.user} (UID ${p.uid ?? '未知'})；父进程 ${p.ppid}；状态 ${p.state}；线程 ${p.threads}；计数窗口 ${format(p.interval_seconds, 's')}；启动标识 ${p.start_ticks}；可执行文件 ${p.executable || '未读取'}${p.container_id ? '；容器 ID ' + p.container_id : ''}${p.container_state ? '；容器状态 ' + p.container_state : ''}${p.container_health ? '；健康 ' + p.container_health : ''}${p.metadata_unavailable ? '；进程已退出或部分元数据不可读' : ''}`;
+      details.append(summary, note); td.append(details); row.append(td);
+      cell(row, `${format(p.cpu_percent, '%')} / ${format(p.host_cpu_percent, '%')} · 变化 ${format(p.cpu_change, '百分点')}`);
+      cell(row, `${format(p.rss_mib, 'MiB')} / ${format(p.memory_percent, '%')} · 变化 ${format(p.rss_change_mib, 'MiB')}`);
+      cell(row, format(p.read_kib_s, 'KiB/s')); cell(row, format(p.write_kib_s, 'KiB/s'));
+      cell(row, p.container || p.service || (p.container_id ? '容器 ' + p.container_id.slice(0, 12) : '主机进程'));
+      body.append(row);
+    }
+    table.append(head, body); scroll.append(table); target.append(scroll);
+    const note = document.createElement('p'); note.className = 'caption'; note.textContent = '展示 CPU、RSS、读取、写入及 CPU/内存增加各前 5 名的并集；变化与该进程上次有效计数比较。进程名可展开查看用户、状态和路径。R 正在运行，S 休眠，D 不可中断等待，Z 僵尸。尚无上次计数时速率显示未记录。'; target.append(note);
+  }
+  function openScene(scene, target) {
+    if (!target) return;
+    target.row.hidden = false; target.button.textContent = '收起'; target.button.setAttribute('aria-expanded', 'true');
+    const cached = cachedScenes.get(sceneKey(scene));
+    if (cached) { sceneDetail(target.cell, cached); return; }
+    if (!data.live_detail || window.parent === window) { target.cell.textContent = '离线报告内嵌最近及高压力现场最多 240 组；该现场的完整进程信息请查看同目录 processes.csv。'; return; }
+    const token = 'scene-' + (++sequence); waiting.set(token, {target, key:sceneKey(scene)});
+    target.cell.textContent = '读取当时保存的进程现场…';
+    window.parent.postMessage({type:'performance-context-request', run:scene.run, ts:scene.ts, token}, '*');
+    setTimeout(() => { if (waiting.has(token)) { waiting.delete(token); target.cell.textContent = '现场读取超时，收起后可重新展开。'; } }, 15000);
+  }
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent || event.data?.type !== 'performance-context-response') return;
+    const pending = waiting.get(event.data.token); if (!pending) return; waiting.delete(event.data.token);
+    if (event.data.scene && sceneKey(event.data.scene) === pending.key) { cachedScenes.set(pending.key, event.data.scene); sceneDetail(pending.target.cell, event.data.scene); }
+    else pending.target.cell.textContent = event.data.error || '该时间点没有保存进程现场。';
+  });
+  function renderScenes() {
+    const scenes = (data.contexts || []).filter(scene => !$('sceneAbnormal').checked || scene.reasons.some(reason => reason !== '定时现场'));
+    const pages = Math.max(1, Math.ceil(scenes.length / scenePageSize)); scenePage = Math.min(scenePage, pages - 1);
+    $('sceneRows').replaceChildren(); sceneTargets.clear();
+    $('sceneEmpty').textContent = scenes.length ? `${scenes.length} 个已保留现场` : '当前范围没有进程现场。升级后自动积累；旧的性能采样无法补回当时的进程。';
+    $('scenePage').textContent = `${scenePage + 1} / ${pages}`;
+    $('scenePrevious').disabled = scenePage === 0; $('sceneNext').disabled = scenePage >= pages - 1;
+    for (const scene of scenes.slice(scenePage * scenePageSize, (scenePage + 1) * scenePageSize)) {
+      const row = document.createElement('tr'), detail = document.createElement('tr'), detailCell = document.createElement('td'), button = document.createElement('button');
+      const time = cell(row, scene.at_text.replace('T', ' ').replace('Z', ''));
+      const mobileReason = document.createElement('small'); mobileReason.className = 'scene-mobile-context'; mobileReason.textContent = scene.reasons.join('；'); time.append(mobileReason);
+      cell(row, scene.reasons.join('；'));
+      for (const [key, unit] of [['cpu', '%'], ['memory', 'MiB'], ['write', 'KiB/s']]) cell(row, scene[key + '_name'] ? `${scene[key + '_name']} (${scene[key + '_pid']}) · ${format(scene[key + '_value'], unit)}` : '未记录');
+      button.type = 'button'; button.textContent = '展开'; button.setAttribute('aria-expanded', 'false');
+      const command = document.createElement('td'); command.append(button); row.append(command);
+      detail.className = 'scene-detail'; detail.hidden = true; detailCell.colSpan = 6; detail.append(detailCell);
+      const target = {row:detail, cell:detailCell, button}; sceneTargets.set(sceneKey(scene), target);
+      button.addEventListener('click', () => { if (detail.hidden) openScene(scene, target); else { detail.hidden = true; button.textContent = '展开'; button.setAttribute('aria-expanded', 'false'); } });
+      $('sceneRows').append(row, detail);
+    }
+  }
+  $('sceneAbnormal').addEventListener('change', () => { scenePage = 0; renderScenes(); });
+  $('scenePrevious').addEventListener('click', () => { scenePage--; renderScenes(); });
+  $('sceneNext').addEventListener('click', () => { scenePage++; renderScenes(); });
+  renderScenes();
   $('print').addEventListener('click', () => window.print()); window.addEventListener('beforeprint', redraw);
 })();

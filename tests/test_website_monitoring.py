@@ -231,8 +231,9 @@ def test_actual_tls_valid_untrusted_and_wrong_hostname(tmp_path, monkeypatch):
 def test_resource_rules_ignore_absent_docker_and_dont_alert_on_manual_stop(monitor):
     system = {"server": {"cpu_percent": 95}, "docker": {"available": False, "error": "docker command not found"}}
     agent._evaluate_resource_alerts(monitor, system)
-    advance(monitor, 60)
-    agent._evaluate_resource_alerts(monitor, system)
+    for _ in range(6):
+        advance(monitor, 10)
+        agent._evaluate_resource_alerts(monitor, system)
     assert [a["id"] for a in monitor.snapshot()["alerts"]] == ["server:cpu"]
     system["docker"] = {"available": True, "containers": [{"name": "manual", "state": "exited"}]}
     agent._evaluate_resource_alerts(monitor, system)

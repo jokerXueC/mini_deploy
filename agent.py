@@ -61,10 +61,14 @@ import terminal_history
 import server_operations
 import performance_metrics
 import server_performance
+import server_processes
+import resource_alerts
+import prometheus_metrics
 import panel_maintenance
 import ssh_files
 
 RUNNING_RELEASE = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+AGENT_STARTED_AT = time.time()
 
 try:
     import fcntl
@@ -2098,7 +2102,38 @@ def _server_performance():
 
 
 def _server_performance_sampler(stop):
+    processes = server_processes.Sampler()
     while not stop.wait(5):
+        try:
+            with _realtime_metrics_lock:
+                server = dict(_realtime_server)
+            now = time.time()
+            if server.get('sampled_ts') is not None and 0 <= now - server['sampled_ts'] <= 10:
+                docker = {}
+                container_at = None
+                if _system_status_lock.acquire(blocking=False):
+                    try:
+                        cached = _system_status_cache
+                        if 0 <= now - float(cached.get('at') or 0) <= 65:
+                            docker = (cached.get('payload') or {}).get('docker') or {}
+                            container_at = cached.get('at')
+                    finally:
+                        _system_status_lock.release()
+                scene = processes.sample(server, docker, now)
+                if docker:
+                    scene['container_sampled_at'] = container_at
+                _server_performance().record_context(scene, server)
+        except (ValueError, OSError, RuntimeError) as exc:
+            _log(f'server process sample failed: {exc}')
+        try:
+            history = _server_performance()
+            with history.lock:
+                samples, scene = list(history.recent), history.latest_scene
+            monitor = _monitor()
+            after = getattr(monitor, 'resource_last', None)
+            resource_alerts.evaluate(monitor, [s for s in samples if after is None or s['sampled_ts'] > after or samples[-1]['sampled_ts'] < after], scene)
+        except (OSError, ValueError, RuntimeError) as exc:
+            _log(f'resource alert evaluation failed: {exc}')
         try:
             _server_performance().flush()
         except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
@@ -2390,7 +2425,8 @@ def _incident_diagnostics(key: str, sort="cpu", pid=None) -> dict[str, Any]:
     if item is None:
         raise ValueError("异常已变化或不在保留范围内，请刷新异常列表")
     now = time.time()
-    at = item.get("first_seen") or item.get("at_ts") or now
+    fault_scene_at = ((item.get('metadata') or {}).get('process_snapshot') or {}).get('at')
+    at = item.get('at_ts') or fault_scene_at or item.get('first_seen') or now
     inventory = _operations_inventory(sort, pid)
     meta = item.get("metadata") or {}
     identifier = meta.get("container_id") or meta.get("id")
@@ -2404,6 +2440,29 @@ def _incident_diagnostics(key: str, sort="cpu", pid=None) -> dict[str, Any]:
     realtime = _realtime_metrics_payload()
     samples = {point["ts"]: point for point in _system_metric_history() + realtime["realtime_history"]
                if at - 300 <= (point.get("ts") or 0) <= at + 300}
+    context_error, scenes = '', []
+    try:
+        historical = _server_performance().nearby(at)
+        for point in historical['points']:
+            point['network_total_kbps'] = sum(point.get(k) or 0 for k in ('network_rx_kib_s', 'network_tx_kib_s')) if any(point.get(k) is not None for k in ('network_rx_kib_s', 'network_tx_kib_s')) else None
+            samples.setdefault(point['ts'], point)
+        scenes = historical['scenes']
+    except (OSError, ValueError, sqlite3.Error, RuntimeError):
+        context_error = '持久化性能现场暂不可读，已保留其他异常证据。'
+    saved = meta.get('process_snapshot')
+    if saved and not any(s.get('at') == saved.get('at') for s in scenes):
+        scenes.append(saved)
+    related_events = [event for event in snapshot['events'] if at - 300 <= event.get('at_ts', 0) <= at + 300
+                      and event.get('source') in {'server', 'docker', 'container', 'docker_events', 'monitoring'}
+                      and event.get('incident_id') != item.get('incident_id')][:40]
+    if not source and scenes:
+        ordered = sorted(scenes, key=lambda s: abs(s.get('at', at) - at))
+        rank = 'rss_mib' if meta.get('reason') in {'memory', 'memory_growth', 'swap', 'oom_killed'} else 'write_kib_s' if meta.get('reason') in {'disk', 'inode', 'iowait'} else 'cpu_percent'
+        for p in sorted(ordered[0].get('processes', []), key=lambda p: p.get(rank) or 0, reverse=True):
+            candidates = ['container:' + str(p.get('container_id') or ''), 'service:' + str(p.get('service') or '')]
+            source = next((s['id'] for s in inventory['sources'] if s['id'] in candidates), '')
+            if source:
+                break
     def scrub(value):
         if isinstance(value, dict):
             return {key: "[已隐藏]" if re.search(r"password|secret|token|authorization|cookie|api.?key", key, re.I)
@@ -2417,7 +2476,8 @@ def _incident_diagnostics(key: str, sort="cpu", pid=None) -> dict[str, Any]:
             "server_now": realtime["server"], "resource_samples": sorted(samples.values(), key=lambda p: p["ts"]),
             "window": {"since": max(now - 7 * 86400, at - 300), "until": min(now, at + 300)},
             "window_available": now - 7 * 86400 <= at <= now,
-            "log_source": source, "checked_at": now}
+            "log_source": source, "checked_at": now, 'process_scenes': scrub(scenes),
+            'related_events': scrub(related_events), 'context_error': context_error}
 
 
 @_maintenance_shared_operation
@@ -2426,6 +2486,8 @@ def _monitoring_operation(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _evaluate_resource_alerts(monitor: monitoring.Monitor, system: dict[str, Any]) -> None:
+    with monitor.lock:
+        previously_active = {item.get('incident_id') for item in monitor.incidents.values() if item.get('active')}
     with _projects_lock:
         health_keys = {f"health:{s.key}" for s in PROJECTS.values() if s.enabled and s.health_url}
     with monitor.lock:
@@ -2434,28 +2496,28 @@ def _evaluate_resource_alerts(monitor: monitoring.Monitor, system: dict[str, Any
                 monitor.incidents.pop(key, None)
                 monitor.pending.pop(key, None)
     server = system.get("server") or {}
-    values = [("cpu", "CPU 使用率", server.get("cpu_percent"), 90),
-              ("memory", "内存使用率", (server.get("memory") or {}).get("percent"), 90),
-              ("disk", "磁盘使用率", (server.get("disk") or {}).get("percent"), 90)]
-    usable_resources = 0
-    sample_time = server.get("sampled_ts")
-    resource_fresh = not isinstance(sample_time, (int, float)) or monitor.clock() - sample_time <= 120
-    for key, title, value, threshold in values:
-        value = _percent(value) if resource_fresh else None
-        usable_resources += value is not None
-        monitor.observe(f"server:{key}", None if value is None else value >= threshold,
-                        title + "过高", f"当前 {value}% · 阈值 {threshold}%", "server",
-                        metadata={"reason": key, "value": value, "threshold": threshold})
-    with monitor.lock:
-        sampled_at = server.get("sampled_ts")
-        monitor.coverage["server"] = {"status": "healthy" if usable_resources == 3 else "unknown",
-                                     "detail": f"已读取 {usable_resources}/3 项资源",
-                                     "checked_at": sampled_at or monitor.clock()}
+    last = getattr(monitor, 'resource_last', None)
+    if last is None or server.get('sampled_ts', monitor.clock()) >= last:
+        resource_alerts.evaluate(monitor, [server])
     docker = system.get("docker") or {}
     installed = docker.get("error") != "docker command not found"
     monitor.observe("docker:daemon", not docker["available"] if "available" in docker and installed else None,
                     "Docker 无法连接", "请检查 Docker 服务是否正常运行", "docker")
     container_monitoring.evaluate_containers(monitor, docker)
+    with _server_performance().lock:
+        scene = _server_performance().latest_scene
+    if scene and 0 <= monitor.clock() - scene['at'] <= 15:
+        with monitor.lock:
+            for item in monitor.incidents.values():
+                meta = item.get('metadata') or {}
+                if not item.get('active') or item.get('incident_id') in previously_active or item.get('source') not in {'server', 'docker', 'container'} or meta.get('process_snapshot'):
+                    continue
+                evidence = resource_alerts.frozen_scene(scene, meta.get('reason'), meta.get('container_id'))
+                if evidence:
+                    item['metadata'] = {**meta, 'process_snapshot': evidence}
+                    for event in monitor.events:
+                        if event.get('kind') == 'alert' and event.get('incident_id') == item.get('incident_id'):
+                            event['metadata'] = {**(event.get('metadata') or {}), 'process_snapshot': evidence}
     with monitor.lock:
         coverage = monitor.coverage.get("docker_containers", {})
         complete = coverage.get("inspected", 0) == len(docker.get("containers") or [])
@@ -2721,7 +2783,8 @@ UI_ASSET_TYPES = {
 UI_ASSET_TYPES.update({'request-export.js': 'application/javascript; charset=utf-8',
                        'request-export.css': 'text/css; charset=utf-8'})
 UI_ASSET_TYPES.update({'server-performance.js': 'application/javascript; charset=utf-8',
-                       'server-performance-panel.css': 'text/css; charset=utf-8'})
+                       'server-performance-panel.css': 'text/css; charset=utf-8',
+                       'prometheus.js': 'application/javascript; charset=utf-8'})
 UI_ASSET_TYPES.update({
     f"previews/ssh-ai/icons/{name}.svg": "image/svg+xml"
     for name in (
@@ -3172,8 +3235,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             period, format = query.get('period', ['24h'])[0], query.get('format', ['zip'])[0]
             theme = query.get('theme', ['light'])[0]
-            data = _server_performance().query(period)
-            output, length, mime = server_performance.build(data, format, theme)
+            history = _server_performance()
+            data = history.query(period)
+            data['live_detail'] = format == 'html' and query.get('preview', ['0'])[0] == '1'
+            output, length, mime = server_performance.build(data, format, theme, history)
             _audit_event('server_performance_export', actor=self.client_address[0], success=True,
                          detail={'period': period, 'format': format, 'samples': data['sample_seconds']})
             ready = True
@@ -3332,6 +3397,40 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == '/metrics/access':
+            if self._require_auth_json():
+                try:
+                    self._write_json(200, prometheus_metrics.Access(STATE_FILE.parent).snapshot())
+                except (OSError, ValueError):
+                    self._write_json(503, {'detail': '监控接入配置暂不可读，原文件已保留。'})
+            return
+        if path == '/metrics':
+            try:
+                authorization = self.headers.get('Authorization', '')
+                token = authorization[7:] if authorization[:7].lower() == 'bearer ' else ''
+                if not self._authenticated() and not prometheus_metrics.Access(STATE_FILE.parent).verify(token):
+                    self._write_json(401, {'error': 'unauthorized'})
+                    return
+                server = _realtime_metrics_payload()['server']
+                docker, docker_at = {}, None
+                if _system_status_lock.acquire(blocking=False):
+                    try:
+                        docker = json.loads(json.dumps((_system_status_cache.get('payload') or {}).get('docker') or {}))
+                        docker_at = _system_status_cache.get('at')
+                    finally:
+                        _system_status_lock.release()
+                monitor = _monitor_instance if _monitor_instance and _monitor_instance.path == STATE_FILE.with_name('website-monitoring.json') else None
+                body = prometheus_metrics.render(server, docker, monitor, started=AGENT_STARTED_AT, docker_at=docker_at)
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (OSError, ValueError):
+                self._write_json(503, {'detail': '指标采集接口暂不可用。'})
+            return
         if path.startswith("/terminal-ai/"):
             self._handle_terminal_ai(path, parsed)
             return
@@ -3398,6 +3497,17 @@ class Handler(BaseHTTPRequestHandler):
                     self._write_json(400, {'detail': str(exc)})
                 except (OSError, sqlite3.Error, RuntimeError):
                     self._write_json(503, {'detail': '服务器性能历史暂不可用，请检查数据目录和采样日志；原历史保留。'})
+            return
+        if path == '/performance/server/context':
+            if self._require_auth_json():
+                try:
+                    query = parse_qs(parsed.query)
+                    scene = _server_performance().context(query.get('run', [''])[0], query.get('ts', [''])[0])
+                    self._write_json(200 if scene else 404, scene or {'detail': '该时间点的进程现场未保存或已到保留上限，性能统计仍保留。'})
+                except (ValueError, OverflowError):
+                    self._write_json(400, {'detail': '现场时间或批次无效'})
+                except (OSError, sqlite3.Error, RuntimeError):
+                    self._write_json(503, {'detail': '进程现场暂不可用，请检查数据目录和磁盘空间。'})
             return
         if path == '/performance/server/export':
             if self._require_auth_json():
@@ -3565,6 +3675,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == '/metrics/access':
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=4096)
+                    with _maintenance_shared_lock():
+                        result = prometheus_metrics.Access(STATE_FILE.parent).change(data.get('action'))
+                    _audit_event('metrics_access_' + str(data.get('action')), actor=self.client_address[0], success=True)
+                    self._write_json(200, result)
+                except ValueError as exc:
+                    self._write_json(400, {'detail': str(exc)})
+                except (OSError, RuntimeError):
+                    self._write_json(503, {'detail': '监控密钥保存失败，原配置已保留。'})
+            return
         if path in {'/panel-maintenance', '/panel-maintenance/check'}:
             if self._require_auth_json():
                 try:

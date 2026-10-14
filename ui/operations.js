@@ -64,7 +64,9 @@
       ${samples.length ? `<details><summary class="ops-caption">查看异常附近资源采样</summary><div class="ops-table-scroll"><table class="ops-table"><thead><tr><th>采样时间</th><th>CPU</th><th>内存</th><th>网络</th></tr></thead><tbody>${samples.slice(-30).map(p => `<tr><td>${text(date(p.ts))}</td><td>${numeric(p.cpu_percent, '%')}</td><td>${numeric(p.memory_percent, '%')}</td><td>${numeric(p.network_total_kbps, ' KiB/s')}</td></tr>`).join('')}</tbody></table></div></details>` : ''}`;
     el('opsIncidentLogs').disabled = !incident.window_available;
     el('opsLogRange').querySelector('[value=incident]').disabled = !incident.window_available;
-    el('opsTimeline').innerHTML = '<h3>同一次异常的记录</h3>' + ((incident.timeline || []).map(e => `<p><time>${text(date(e.at_ts))}</time>${text(e.title)}${e.detail ? ` · ${text(e.detail)}` : ''}</p>`).join('') || '<p class="ops-caption">暂无更多记录。</p>');
+    const scenes = incident.process_scenes || [];
+    el('opsIncident').insertAdjacentHTML('beforeend', `${incident.context_error ? `<p class="ops-caption">${text(incident.context_error)}</p>` : ''}${scenes.length ? `<details open><summary class="ops-caption">已保存的进程现场（${scenes.length} 组）</summary><div class="ops-table-scroll"><table class="ops-table"><thead><tr><th>现场时间</th><th>进程 / PID</th><th>CPU（单核）</th><th>常驻内存</th><th>读取 / 写入</th><th>服务 / 容器</th></tr></thead><tbody>${scenes.slice().sort((a,b) => Math.abs(a.at - (item.first_seen || item.at_ts)) - Math.abs(b.at - (item.first_seen || item.at_ts))).slice(0, 6).flatMap(scene => (scene.processes || []).slice(0, 5).map(p => `<tr><td>${text(date(scene.at))}</td><td>${text(p.name)} / ${text(p.pid)}</td><td>${numeric(p.cpu_percent, '%')}</td><td>${numeric(p.rss_mib, ' MiB')}</td><td>${numeric(p.read_kib_s)} / ${numeric(p.write_kib_s)} KiB/s</td><td>${text(p.container || p.service || p.container_id || '主机进程')}</td></tr>`)).join('')}</tbody></table></div><p class="ops-caption">进程为当时保存的计数现场，当前进程列表另列。时间接近仅说明相关，不表示已确认因果。</p></details>` : '<p class="ops-caption">异常附近尚无已保存的进程现场，当前进程列表无法补回过去。</p>'}`);
+    el('opsTimeline').innerHTML = '<h3>同一次异常的记录</h3>' + ((incident.timeline || []).map(e => `<p><time>${text(date(e.at_ts))}</time>${text(e.title)}${e.detail ? ` · ${text(e.detail)}` : ''}</p>`).join('') || '<p class="ops-caption">暂无更多记录。</p>') + '<h3>同一时段的其他异常与容器事件</h3>' + ((incident.related_events || []).map(e => `<p><time>${text(date(e.at_ts))}</time>${text(e.title)}${e.detail ? ` · ${text(e.detail)}` : ''}</p>`).join('') || '<p class="ops-caption">没有其他已保存的相关时间记录。</p>');
   }
   async function refresh() {
     const version = ++generation; controller?.abort(); controller = new AbortController();
@@ -168,6 +170,7 @@
     if (!incident || !window.TerminalAI) return;
     const server = incident.server_now || {};
     const evidence = {hostname: inventory.hostname, incident: incident.incident, timeline: incident.timeline,
+      process_scenes: (incident.process_scenes || []).slice(0, 3), related_events: incident.related_events || [],
       resources_near_incident: (incident.resource_samples || []).slice(-30),
       server_now: {sampled_ts: server.sampled_ts, cpu_percent: server.cpu_percent, memory: server.memory, load: server.load},
       logs: logResult?.lines.slice(-80) || [], logs_source: logResult?.name || '尚未读取'};

@@ -16,10 +16,11 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+import resource_alerts
 
 
 DEFAULTS = {"sustain_seconds": 60, "repeat_seconds": 3600, "recovery": True,
-            "slow_ms": 3000, "certificate_days": 14}
+            "slow_ms": 3000, "certificate_days": 14, **resource_alerts.DEFAULTS}
 MAX_TARGETS = 50
 MAX_EVENTS = 1000
 EVENT_RETENTION_SECONDS = 30 * 86400
@@ -267,9 +268,26 @@ class Monitor:
                     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                         raise ValueError(f"{field} 必须在 {low} 到 {high} 之间")
                     candidate[field] = value
-                if not isinstance(data.get("recovery", True), bool):
+                if not isinstance(data.get("recovery", candidate['recovery']), bool):
                     raise ValueError("恢复通知必须是开关值")
-                candidate["recovery"] = data.get("recovery", True)
+                candidate["recovery"] = data.get("recovery", candidate['recovery'])
+                for field, (low, high) in resource_alerts.RANGES.items():
+                    value = data.get(field, candidate[field])
+                    if type(value) is not int or not low <= value <= high:
+                        raise ValueError(f'{field} 必须在 {low} 到 {high} 之间')
+                    candidate[field] = value
+                enabled = data.get('resource_enabled', candidate['resource_enabled'])
+                if not isinstance(enabled, bool):
+                    raise ValueError('资源告警必须是开关值')
+                candidate['resource_enabled'] = enabled
+                if any(candidate.get(k) != self.settings.get(k) for k in resource_alerts.DEFAULTS):
+                    for key, item in list(self.incidents.items()):
+                        if key.startswith('server:') and not item.get('active'):
+                            self.incidents.pop(key, None)
+                            self.pending.pop(key, None)
+                    if hasattr(self, 'resource_state'):
+                        self.resource_state.clear()
+                        self.resource_memory.clear()
                 self.settings = candidate
             else:
                 raise ValueError("不支持的监测操作")
@@ -308,10 +326,10 @@ class Monitor:
                           metadata=item.get("metadata"),
                           duration_seconds=max(0, int(self.clock() - item["first_seen"])) if recovered else None)
 
-    def observe(self, key, bad, title, detail, source, level="critical", *, metadata=None, immediate=False):
+    def observe(self, key, bad, title, detail, source, level="critical", *, metadata=None, immediate=False, observed_at=None):
         """None means no usable sample; it must never resolve an incident."""
         with self.lock:
-            now = self.clock()
+            now = self.clock() if observed_at is None else observed_at
             item = self.incidents.get(key)
             if bad is None:
                 if item:
@@ -387,13 +405,15 @@ class Monitor:
             if not enabled or self.muted_until > now:
                 return None
             for key, message in list(self.pending.items()):
+                if key.startswith('server:') and not self.settings.get('resource_enabled', True):
+                    continue
                 if message["recovery"] and not self.settings["recovery"]:
                     self.pending.pop(key, None)
                     continue
                 if message["retry_at"] > now:
                     continue
                 item = self.incidents.get(key)
-                if not message["recovery"] and (not item or item.get("acknowledged_at") or item.get("sample_unknown")
+                if not message["recovery"] and (not item or item.get("acknowledged_at") or item.get("sample_unknown") or (item.get('metadata') or {}).get('recovering')
                                                 or now - item.get("last_sample", 0) > 120):
                     continue
                 message["retry_at"] = now + 300

@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import base64
+import csv
+from collections import deque
 from contextlib import closing, contextmanager, nullcontext
 import hashlib
+import io
 import json
 import math
 from pathlib import Path
@@ -15,11 +18,13 @@ import threading
 import time
 import uuid
 import zipfile
+import zlib
 
 from certificates import trusted_path
-from request_export import stamp, numeric, write_csv
+from request_export import stamp, numeric, write_csv, safe_cell
 
 INTERVAL = 30
+EVIDENCE_BUDGET = 32 * 1024 * 1024
 RETENTION = 7 * 86400
 PERIODS = {'1h': 3600, '24h': 86400, '7d': RETENTION}
 METRICS = [
@@ -85,6 +90,8 @@ class History:
         self.run = uuid.uuid4().hex
         self.pending, self.persisted = {}, {}
         self.last_second, self.last_flush, self.error = None, None, ''
+        self.contexts, self.previous_context = {}, {}
+        self.recent, self.latest_scene = deque(maxlen=120), None
 
     @contextmanager
     def connect(self):
@@ -103,8 +110,45 @@ class History:
                 db.executescript('''CREATE TABLE IF NOT EXISTS samples (
                     run TEXT NOT NULL, ts INTEGER NOT NULL, first REAL NOT NULL, last REAL NOT NULL,
                     observations INTEGER NOT NULL, data TEXT NOT NULL, metadata TEXT NOT NULL,
-                    PRIMARY KEY(run,ts)); CREATE INDEX IF NOT EXISTS server_age ON samples(ts);''')
+                    PRIMARY KEY(run,ts)); CREATE INDEX IF NOT EXISTS server_age ON samples(ts);
+                    CREATE TABLE IF NOT EXISTS process_context (
+                    run TEXT NOT NULL, ts INTEGER NOT NULL, at REAL NOT NULL, score REAL NOT NULL,
+                    summary TEXT NOT NULL, detail BLOB NOT NULL, PRIMARY KEY(run,ts));
+                    CREATE INDEX IF NOT EXISTS process_age ON process_context(at);''')
                 yield db
+
+    def record_context(self, snapshot, server):
+        """Retain the strongest observed scene per interval, independently of 1s sampling."""
+        at = snapshot['at']
+        metrics, reasons = values(server), []
+        cores = (server.get('cpu') or {}).get('logical_count') or 1
+        for key, threshold, label in [('cpu_percent', 85, 'CPU 高占用'), ('memory_percent', 90, '内存高占用'),
+                                     ('iowait_percent', 20, 'I/O 等待偏高'), ('disk_busy_percent', 85, '磁盘忙碌')]:
+            if metrics.get(key) is not None and metrics[key] >= threshold:
+                reasons.append(label)
+        if metrics.get('load_one') is not None and metrics['load_one'] > cores:
+            reasons.append('系统负载超过逻辑核数')
+        with self.lock:
+            previous = self.previous_context
+            if previous and 0 < at - previous['at'] <= 15:
+                for key, delta, label in [('cpu_percent', 20, 'CPU 突升'), ('memory_used_mb', 256, '已用内存增加 ≥256 MiB')]:
+                    if metrics.get(key) is not None and previous['metrics'].get(key) is not None and metrics[key] - previous['metrics'][key] >= delta:
+                        reasons.append(label)
+            self.previous_context = {'at': at, 'metrics': metrics}
+            score = max((metrics.get('cpu_percent') or 0) / 85,
+                        (metrics.get('memory_percent') or 0) / 90,
+                        (metrics.get('disk_busy_percent') or 0) / 85,
+                        (metrics.get('iowait_percent') or 0) / 20,
+                        (metrics.get('load_one') or 0) / cores) + len(reasons) * .25
+            ts = int(at // INTERVAL) * INTERVAL
+            key = (self.run, ts)
+            scene = {**snapshot, 'metrics': metrics, 'reasons': reasons or ['定时现场'],
+                     'run': self.run, 'ts': ts, 'score': score, 'server_sampled_at': server.get('sampled_ts')}
+            self.latest_scene = scene
+            if key not in self.contexts or score >= self.contexts[key]['score']:
+                self.contexts[key] = scene
+            for expired in [k for k in self.contexts if k[1] < at - RETENTION]:
+                self.contexts.pop(expired)
 
     def observe(self, server, now=None):
         """Only accumulate in memory; never block the 1-second sampler on disk."""
@@ -127,6 +171,7 @@ class History:
             bucket['observations'] += 1
             bucket['seconds'] |= 1 << (second - ts)
             bucket['metadata'] = capacity(server)
+            self.recent.append({'sampled_ts': now, 'metrics': metrics, 'logical_cores': bucket['metadata']['logical_cores']})
             for field, value in metrics.items():
                 weight = metrics.get('disk_iops') if field == 'disk_await_ms' else 1
                 if weight is not None and weight > 0:
@@ -145,10 +190,34 @@ class History:
             with self.lock:
                 batch = [json.loads(json.dumps(bucket)) for key, bucket in self.pending.items()
                          if self.persisted.get(key) != bucket['observations']]
-            if not batch:
+                contexts = list(self.contexts.values())
+            if not batch and not contexts:
                 return
             try:
                 with self.connect() as db:
+                    db.execute('DELETE FROM process_context WHERE at < ?', (now - RETENTION,))
+                    encoded = [(c['run'], c['ts'], c['at'], c['score'], json.dumps(context_summary(c), ensure_ascii=False),
+                                zlib.compress(json.dumps(c, ensure_ascii=False, allow_nan=False).encode())) for c in contexts]
+                    encoded.sort(key=lambda row: row[2], reverse=True)
+                    size, keep = 0, []
+                    for row in encoded:
+                        if size + len(row[-1]) <= EVIDENCE_BUDGET * .875:
+                            keep.append(row)
+                            size += len(row[-1])
+                    encoded = keep
+                    used = db.execute('SELECT COALESCE(SUM(length(detail)),0) FROM process_context').fetchone()[0]
+                    required = sum(len(row[-1]) for row in encoded)
+                    if used + required > EVIDENCE_BUDGET:
+                        victims = []
+                        for row in db.execute('SELECT rowid,length(detail) FROM process_context ORDER BY at'):
+                            victims.append((row[0],))
+                            used -= row[1]
+                            if used + required <= EVIDENCE_BUDGET * .875:
+                                break
+                        db.executemany('DELETE FROM process_context WHERE rowid=?', victims)
+                    db.executemany('''INSERT INTO process_context VALUES(?,?,?,?,?,?) ON CONFLICT(run,ts) DO UPDATE SET
+                        at=excluded.at,score=excluded.score,summary=excluded.summary,detail=excluded.detail
+                        WHERE excluded.score >= process_context.score''', encoded)
                     db.executemany('''INSERT INTO samples VALUES(?,?,?,?,?,?,?) ON CONFLICT(run,ts) DO UPDATE SET
                         first=excluded.first,last=excluded.last,observations=excluded.observations,
                         data=excluded.data,metadata=excluded.metadata''',
@@ -163,6 +232,10 @@ class History:
                 self.error = '性能历史写入失败，请检查数据目录、维护状态或磁盘空间；待写采样暂存于内存。'
                 raise
             with self.lock:
+                for scene in contexts:
+                    key = (scene['run'], scene['ts'])
+                    if self.contexts.get(key) is scene:
+                        self.contexts.pop(key)
                 for bucket in batch:
                     key = (bucket['run'], bucket['ts'])
                     self.persisted[key] = bucket['observations']
@@ -178,6 +251,14 @@ class History:
         since = now - PERIODS[period]
         with self.connect() as db:
             raw = [dict(row) for row in db.execute('SELECT * FROM samples WHERE ts>=? AND first<=? ORDER BY first,run', (since, now))]
+            contexts = [json.loads(row[0]) for row in db.execute(
+                'SELECT summary FROM process_context WHERE at>=? AND at<=? ORDER BY at DESC', (since, now))]
+            # Bound embedded details. The ZIP includes every retained process scene as CSV.
+            chosen = {(c['run'], c['ts']) for c in contexts[:120] + sorted(contexts, key=lambda c: c['score'], reverse=True)[:120]}
+            details = []
+            for run, ts in chosen:
+                row = db.execute('SELECT detail FROM process_context WHERE run=? AND ts=?', (run, ts)).fetchone()
+                details.append(json.loads(zlib.decompress(row[0])))
         summary = {key: {} for key, _, _ in METRICS}
         points, samples, sessions, covered = [], 0, set(), {}
         for row in raw:
@@ -217,8 +298,92 @@ class History:
             'first_at': stamp(min(row['first'] for row in raw)) if raw else '', 'latest_at': stamp(latest) if latest is not None else '',
             'stale': latest is not None and now - latest > 65, 'error': self.error,
             'metadata': metadata, 'points': points, 'summary': summary, 'metrics': METRICS,
+            'contexts': contexts, 'context_details': details,
+            'context_notice': '进程每约 5 秒读取计数差值，每 30 秒保留压力最明显的一次现场；进程速率为计数窗口平均，整机指标为最近的 1 秒采样，窗口不同可能产生差异。CPU 以单逻辑核为 100%，整机占比另列；常驻内存 RSS 可能包含共享页。磁盘 I/O 为内核记账的存储读写字节，不是网络流量；写入记账与设备落盘时刻可能不同。排名只覆盖采样时仍存在且有读取权限的进程，短暂进程和两次采样之间的尖峰可能遗漏。同一时刻占用高是排查线索，不等于已确认因果；不采集命令参数、环境变量或文件内容。现场最多保留 7 天，压缩明细达到 32 MiB 时较早现场会先淘汰；总体性能统计独立保留。',
             'notice': '每秒采集、每 30 秒持久保存平均值和峰值；无需打开网页。仅分析已保存采样，缺失不补零；峰值为实际 1 秒采样峰值。网络统计沿用所有非回环接口之和，可能包含虚拟接口流量。'}
 
+    def nearby(self, at, radius=300):
+        with self.connect() as db:
+            rows = list(db.execute('SELECT * FROM samples WHERE ts>=? AND first<=? ORDER BY first LIMIT 100', (at - radius - INTERVAL, at + radius)))
+            scenes = list(db.execute('SELECT detail FROM process_context WHERE at>=? AND at<=? ORDER BY at LIMIT 30', (at - radius, at + radius)))
+        points = []
+        for row in rows:
+            stats = json.loads(row['data'])
+            point = {'ts': row['first'], 'interval_seconds': INTERVAL}
+            for field, _, _ in METRICS:
+                s = stats.get(field) or {}
+                point[field] = s['sum'] / s['weight'] if s.get('weight') else None
+                point[field + '_peak'] = s.get('peak')
+            points.append(point)
+        return {'points': points, 'scenes': [json.loads(zlib.decompress(row[0])) for row in scenes]}
+
+    def context(self, run, ts):
+        if not isinstance(run, str) or len(run) != 32 or any(c not in '0123456789abcdef' for c in run):
+            raise ValueError('现场批次无效')
+        ts = int(ts)
+        with self.connect() as db:
+            row = db.execute('SELECT detail FROM process_context WHERE run=? AND ts=?', (run, ts)).fetchone()
+        return json.loads(zlib.decompress(row[0])) if row else None
+
+    def export_contexts(self, data, scenes, processes):
+        since, until = data['since'], data['until']
+        # Release the database lock between bounded pages; files use the existing private spool.
+        from datetime import datetime
+        start, end = (datetime.fromisoformat(t.replace('Z', '+00:00')).timestamp() for t in (since, until))
+        marker = None
+        while True:
+            with self.connect() as db:
+                rows = list(db.execute('''SELECT at,run,ts,detail FROM process_context WHERE at>=? AND at<=?
+                    AND (? IS NULL OR (at,run,ts) > (?,?,?)) ORDER BY at,run,ts LIMIT 128''',
+                    (start, end, None if marker is None else 1, *(marker or (0, '', 0)))))
+            if not rows:
+                break
+            for row in rows:
+                scene = json.loads(zlib.decompress(row['detail']))
+                append_csv(scenes, CONTEXT_FIELDS, [context_summary(scene)])
+                append_csv(processes, PROCESS_FIELDS, [{**p, 'at': stamp(scene['at']), 'run': scene['run'],
+                    'ts': scene['ts'], 'reasons': '；'.join(scene['reasons'])} for p in scene['processes']])
+            marker = (rows[-1]['at'], rows[-1]['run'], rows[-1]['ts'])
+
+
+def context_summary(scene):
+    rows = scene.get('processes') or []
+    result = {key: scene.get(key) for key in ('run', 'ts', 'at', 'score', 'available', 'scanned', 'readable',
+        'blocked_count', 'zombie_count', 'new_baselines', 'scan_ms', 'warnings', 'reasons')}
+    result['at_text'] = stamp(scene['at'])
+    result['reasons_text'] = '；'.join(scene.get('reasons', []))
+    result['metrics'] = scene.get('metrics', {})
+    for label, field in [('cpu', 'cpu_percent'), ('memory', 'rss_mib'), ('write', 'write_kib_s')]:
+        valid = [p for p in rows if p.get(field) is not None]
+        top = max(valid, key=lambda p: p[field], default={})
+        result[label + '_name'] = top.get('name', '')
+        result[label + '_pid'] = top.get('pid')
+        result[label + '_value'] = top.get(field)
+    return result
+
+
+CONTEXT_FIELDS = [('at_text', '现场时间 (UTC)'), ('run', '批次'), ('ts', '区间'), ('reasons_text', '现场提示'),
+    ('scanned', '读取进程数'), ('blocked_count', '不可中断等待进程数'), ('zombie_count', '僵尸进程数'),
+    ('cpu_name', 'CPU最高进程'), ('cpu_pid', 'CPU最高PID'), ('cpu_value', 'CPU单核占用 (%)'),
+    ('memory_name', '内存最高进程'), ('memory_pid', '内存最高PID'), ('memory_value', '常驻内存 (MiB)'),
+    ('write_name', '写入最高进程'), ('write_pid', '写入最高PID'), ('write_value', '磁盘写入 (KiB/s)')]
+PROCESS_FIELDS = [('at', '现场时间 (UTC)'), ('run', '批次'), ('ts', '区间'), ('reasons', '现场提示'),
+    ('pid', 'PID'), ('start_ticks', '进程启动标识'), ('ppid', '父PID'), ('name', '进程'), ('user', '用户'),
+    ('uid', 'UID'), ('state', '状态'), ('threads', '线程数'), ('interval_seconds', '计数间隔 (s)'),
+    ('cpu_percent', 'CPU单核占用 (%)'), ('host_cpu_percent', 'CPU整机占比 (%)'),
+    ('cpu_change', 'CPU较上次变化 (百分点)'), ('rss_mib', '常驻内存 (MiB)'),
+    ('rss_change_mib', '常驻内存较上次变化 (MiB)'), ('memory_percent', '整机内存占比 (%)'),
+    ('read_kib_s', '磁盘读取 (KiB/s)'), ('write_kib_s', '磁盘写入 (KiB/s)'),
+    ('service', '服务'), ('container', '容器'), ('container_id', '容器ID'),
+    ('container_state', '容器状态'), ('container_health', '容器健康'), ('executable', '可执行文件')]
+
+
+def append_csv(target, fields, rows):
+    text = io.StringIO(newline='')
+    writer = csv.writer(text)
+    for row in rows:
+        writer.writerow([safe_cell(row.get(key)) for key, _ in fields])
+    target.write(text.getvalue().encode('utf-8'))
 
 FIELDS = [('at', '区间起点 (UTC)'), ('first_at', '首次采样 (UTC)'), ('last_at', '最后采样 (UTC)'),
           ('observations', '采样秒数'), ('run', '采样批次')]
@@ -244,7 +409,7 @@ def report(data, theme='light'):
         .replace('__THEME__', 'dark' if theme == 'dark' else 'light').replace('__REPORT_JS__', javascript)).encode()
 
 
-def build(data, format='zip', theme='light'):
+def build(data, format='zip', theme='light', history=None):
     if format not in {'csv', 'html', 'zip'} or theme not in {'light', 'dark'}:
         raise ValueError('性能导出格式无效')
     output = tempfile.TemporaryFile()
@@ -262,8 +427,24 @@ def build(data, format='zip', theme='light'):
                 with archive.open('summary.csv', 'w') as target:
                     write_csv(target, [('metric', '指标'), ('unit', '单位'), ('average', '平均值'), ('minimum', '最低值'),
                         ('peak', '峰值'), ('latest', '最后值'), ('count', '有效采样秒数')], summary)
+                with tempfile.TemporaryFile() as scenes, tempfile.TemporaryFile() as processes:
+                    write_csv(scenes, CONTEXT_FIELDS, [])
+                    write_csv(processes, PROCESS_FIELDS, [])
+                    if history is not None:
+                        history.export_contexts(data, scenes, processes)
+                    else:
+                        for scene in data.get('context_details', []):
+                            append_csv(scenes, CONTEXT_FIELDS, [context_summary(scene)])
+                            append_csv(processes, PROCESS_FIELDS, [{**p, 'at': stamp(scene['at']), 'run': scene['run'],
+                                'ts': scene['ts'], 'reasons': '；'.join(scene['reasons'])} for p in scene['processes']])
+                    for name, source in [('scenes.csv', scenes), ('processes.csv', processes)]:
+                        source.seek(0)
+                        with archive.open(name, 'w') as target:
+                            while chunk := source.read(256 * 1024):
+                                target.write(chunk)
                 archive.writestr('report.html', report(packaged))
                 archive.writestr('说明.txt', (data['notice'] + '\nCSV 时间为 UTC；根分区容量使用 GiB，内存使用 MiB。\n'
+                    + data.get('context_notice', '') + '\nscenes.csv 为现场索引，processes.csv 为所有保留现场的进程明细；HTML 内嵌最近及高压力现场最多 240 组。导出期间继续采样，现场明细按实际读取时已保存的记录导出，并发更新可能与 HTML 索引略有差异；以各行实际时间为准。\n'
                     + '平均值按有效 1 秒采样加权；I/O 延迟按采样的 IOPS 加权，不是各设备延迟的简单平均。\n'
                     + '服务器或 Agent 停机期间无法采集；安装后从当前时刻开始，不能补回过去 24 小时。\n'
                     + f"导出范围：{data['since']} 至 {data['until']}；覆盖率：{data['coverage_percent']:.2f}%\n").encode())
