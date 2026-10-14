@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-__SCRIPT_HASH__'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+  <title>mini_deploy 请求分析</title>
+  <style>__REPORT_CSS__</style>
+</head>
+<body>
+  <main>
+    <header><div><p class="brand">mini_deploy</p><h1>请求分析</h1><p id="scope"></p></div><button id="print" type="button" title="打印或保存为 PDF">打印报告</button></header>
+    <p id="range" class="caption"></p>
+    <p id="notice" class="caption"></p><div id="warnings" role="status"></div>
+    <nav id="downloads" hidden><a href="requests.csv" download>请求明细 CSV</a><a href="routes.csv" download>地址统计 CSV</a><a href="timeline.csv" download>时间趋势 CSV</a></nav>
+    <section class="totals" aria-label="整体统计" id="totals"></section>
+    <section class="charts"><div><div class="section-head"><h2>请求量与失败趋势</h2><span id="bucket" class="caption"></span></div><p class="legend"><span class="teal">请求数</span><span class="red">失败数</span></p><div class="plot"><canvas id="volume" aria-label="按时间区间显示的请求数和失败数" role="img"></canvas><p class="plot-empty" id="volumeEmpty" hidden>没有可绘制的请求时间数据</p></div></div>
+      <div><h2>平均耗时趋势</h2><p class="legend"><span class="blue">请求耗时</span><span class="amber">上游耗时</span><span>单位 ms</span></p><div class="plot"><canvas id="latency" aria-label="请求与上游平均耗时趋势，单位毫秒" role="img"></canvas><p class="plot-empty" id="latencyEmpty" hidden>没有已记录的耗时数据</p></div></div></section>
+    <section class="distributions"><div><h2>状态码分布</h2><div id="statuses" class="bar-list"></div></div><div><h2>请求方法</h2><div id="methods" class="bar-list"></div></div><div><h2>来源 IP · 前 20</h2><p id="ipCount" class="caption"></p><div id="ips" class="bar-list"></div></div></section>
+    <section class="tables"><div class="section-head"><h2>统计明细</h2><span id="tableCount" class="caption"></span></div><div class="table-tools"><div role="tablist" aria-label="统计类型"><button id="routesTab" role="tab" aria-selected="true" type="button">请求地址</button><button id="timelineTab" role="tab" aria-selected="false" type="button">时间区间</button></div><input id="search" type="search" placeholder="筛选地址、域名或来源" aria-label="筛选地址、域名或来源"></div>
+      <div class="table-scroll"><table><thead id="columns"></thead><tbody id="table"></tbody></table></div>
+      <div class="pages"><span id="pageCount" class="caption"></span><div><button id="previous" type="button">上一页</button><button id="next" type="button">下一页</button></div></div>
+    </section>
+    <footer><p>成功 = 2xx / 3xx，失败 = 4xx / 5xx。慢请求阈值：<span id="threshold"></span>。平均耗时、P95 / P99 仅使用有效耗时；P95 / P99 按最近秩法计算。缺失值显示为“未记录”。</p><p>时间统一为 UTC；区间起点包含、终点不包含。原始路径保存在明细 CSV，疑似数字 / ID 是否归并取决于导出时的展示设置。报告可离线打开，不请求外部服务。</p><p id="generated"></p></footer>
+  </main>
+  <script id="reportData" type="application/json">__REPORT_DATA__</script>
+  <script>__REPORT_JS__</script>
+</body>
+</html>

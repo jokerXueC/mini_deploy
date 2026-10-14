@@ -51,6 +51,7 @@ import monitoring
 import container_monitoring
 import docker_events
 import request_history
+import request_export
 import cpu_metrics
 import sqlite3
 import docker_mirrors
@@ -2697,6 +2698,8 @@ UI_ASSET_TYPES = {
     "style.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
 }
+UI_ASSET_TYPES.update({'request-export.js': 'application/javascript; charset=utf-8',
+                       'request-export.css': 'text/css; charset=utf-8'})
 UI_ASSET_TYPES.update({
     f"previews/ssh-ai/icons/{name}.svg": "image/svg+xml"
     for name in (
@@ -3071,6 +3074,74 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _export_requests(self, query):
+        if not request_export.SLOT.acquire(blocking=False):
+            self._write_json(409, {'detail': '已有请求导出进行中，请完成后重试。'})
+            return
+        stream, output, ready = None, None, False
+        try:
+            backend = query.get('backend', ['gateway'])[0]
+            scope = query.get('scope', ['all'])[0]
+            format = query.get('format', ['zip'])[0]
+            if backend not in {'gateway', 'nginx', 'caddy'} or scope not in {'all', 'source', 'filtered'} or format not in {'csv', 'html', 'zip'}:
+                raise ValueError('导出来源、范围或文件格式无效')
+            options = request_export.validate({'key': query.get('key', [''])[0] if scope != 'all' else '',
+                'period': query.get('period', ['24h'])[0] if scope == 'filtered' else 'all',
+                'layout': query.get('layout', ['tree'])[0],
+                'status': query.get('status', ['all'])[0] if scope == 'filtered' else 'all',
+                'search': query.get('search', [''])[0] if scope == 'filtered' else '',
+                'slow_ms': int(query.get('slow_ms', ['1000'])[0])})
+            if backend == 'gateway':
+                if scope != 'all' and not options['key']:
+                    raise ValueError('请先选择要导出的采集入口')
+                stream, metadata = request_export.snapshot(_request_history(), options)
+            else:
+                if scope == 'all':
+                    raise ValueError('已有代理日志仅支持导出所选来源的近期样本；全部历史请选择后端请求来源')
+                limit = int(query.get('limit', ['300'])[0])
+                payload = (_nginx_requests_payload(limit) if backend == 'nginx' else
+                           caddy_requests.recent(limit, query.get('container', [''])[0]))
+                items = request_export.filter_samples(payload.get('records') or [], options)
+                name = backend.upper() + (' · ' + payload['container'] if payload.get('container') else ' · 本机')
+                items = [{**item, 'source': backend, 'source_name': name} for item in items]
+                stream, metadata = request_export.samples(items, {'scope': name, 'filters': options,
+                    'notice': '仅导出所选代理日志来源的近期样本。筛选选择整类地址，导出包含该类全部样本。',
+                    'warnings': [payload['notice']] if payload.get('notice') else []})
+            output, length, content_type = request_export.build(stream, metadata, format)
+            _audit_event('request_export', actor=self.client_address[0], success=True,
+                         detail={'backend': backend, 'scope': scope, 'format': format, 'count': metadata['count']})
+            ready = True
+        except ValueError as exc:
+            self._write_json(400, {'detail': str(exc)})
+            return
+        except (OSError, sqlite3.Error):
+            self._write_json(503, {'detail': '导出失败，请检查数据目录和临时磁盘空间；请求历史与服务器文件保留。'})
+            return
+        finally:
+            if stream is not None:
+                stream.close()
+            if not ready:
+                if output is not None:
+                    output.close()
+                request_export.SLOT.release()
+        try:
+            filename = 'mini-deploy-requests-' + time.strftime('%Y%m%d-%H%M%S', time.gmtime()) + '.' + format
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(length))
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('X-Request-Export-Count', str(metadata['count']))
+            self.end_headers()
+            while chunk := output.read(256 * 1024):
+                self.wfile.write(chunk)
+        except OSError:
+            pass
+        finally:
+            output.close()
+            request_export.SLOT.release()
+
     def _write_text_download(self, filename: str, text: str, truncated: bool = False) -> None:
         if truncated:
             text = (
@@ -3354,6 +3425,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._write_json(200, caddy_requests.recent(count, container))
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "caddy_requests_failed", "detail": str(exc)})
+            return
+        if path == '/request-export':
+            if self._require_auth_json():
+                self._export_requests(parse_qs(parsed.query))
             return
         if path == "/request-history":
             if self._require_auth_json():

@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="ui/terminal-ai.css">
   <link rel="stylesheet" href="ui/operations.css">
   <link rel="stylesheet" href="ui/ssh-file-manager.css">
+  <link rel="stylesheet" href="ui/request-export.css">
   <link rel="stylesheet" href="ui/vendor/xterm.css">
 </head>
 <body>
@@ -128,6 +129,7 @@
           <div class="request-actions">
             <button id="gatewayConnectOpen" class="danger-button compact-action" type="button">接入后端</button>
             <button id="requestRefresh" class="ghost-button compact-action" type="button" title="刷新请求" aria-label="刷新请求">刷新</button>
+            <button id="requestExportOpen" class="ghost-button compact-action" type="button" title="导出请求记录与统计报告"><img src="ui/previews/ssh-ai/icons/download.svg" alt="">导出</button>
           </div>
         </div>
           <section id="gatewayConnectPanel" class="gateway-connect" hidden aria-labelledby="gatewayConnectTitle">
@@ -640,6 +642,7 @@
   <script src="ui/request-gateway.js"></script>
   <script src="ui/gateway-connect.js"></script>
   <script src="ui/nginx-requests.js"></script>
+  <script src="ui/request-export.js"></script>
   <script src="ui/vendor/xterm.js"></script>
   <script src="ui/vendor/addon-fit.js"></script>
   <script src="ui/ssh-terminal.js"></script>
