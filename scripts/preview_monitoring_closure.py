@@ -1,6 +1,8 @@
 """Isolated resource-alert/Prometheus preview; never touches real host services."""
 import argparse
 import copy
+import json
+import math
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent  # noqa: E402
 import monitoring  # noqa: E402
 import resource_alerts  # noqa: E402
+import terminal_ai  # noqa: E402
 from server_performance import History  # noqa: E402
 from scripts.local_ssh import configure  # noqa: E402
 from scripts.preview_operations import Handler as OperationsHandler, examples  # noqa: E402
@@ -68,14 +71,14 @@ def seed(home, now=None):
 class Handler(OperationsHandler):
     def do_GET(self):  # noqa: N802
         path = agent._normal_path(urlparse(self.path).path)
-        if path in {'/metrics', '/metrics/access', '/monitoring', '/operations/incident', '/status', '/system-metrics',
+        if path.startswith('/terminal-ai/') or path in {'/metrics', '/metrics/access', '/monitoring', '/operations/incident', '/status', '/system-metrics',
                     '/performance/server', '/performance/server/export', '/performance/server/context'}:
             agent.Handler.do_GET(self)
         else:
             super().do_GET()
 
     def do_POST(self):  # noqa: N802
-        if agent._normal_path(urlparse(self.path).path) in {'/monitoring', '/metrics/access', '/login'}:
+        if agent._normal_path(urlparse(self.path).path) in {'/terminal-ai/panel', '/terminal-ai/cancel', '/monitoring', '/metrics/access', '/login'}:
             agent.Handler.do_POST(self)
         else:
             super().do_POST()
@@ -85,6 +88,7 @@ def main():
     parser = argparse.ArgumentParser(description='资源异常与 Prometheus 接入模拟预览')
     parser.add_argument('--port', type=int, default=60689)
     parser.add_argument('--data-dir', type=Path, required=True)
+    parser.add_argument('--demo-ai', action='store_true', help='使用本地模拟模型，不发送数据或操作真实服务器')
     args = parser.parse_args()
     configure(args.data_dir.resolve(), args.port)
     home = Path(tempfile.mkdtemp(prefix='monitoring-demo-', dir=args.data_dir))
@@ -95,9 +99,43 @@ def main():
     def realtime():
         current = copy.deepcopy(server)
         current['sampled_ts'] = time.time()
+        current['cpu_percent'] = 78 + math.sin(current['sampled_ts'] / 9) * 18
+        current['memory']['percent'] = 93 + math.sin(current['sampled_ts'] / 35) * 1.2
+        current['memory']['used_mb'] = current['memory']['percent'] * 81.92
         return {'server': current, 'realtime_history': [], 'realtime_interval_seconds': 1}
     agent._realtime_metrics_payload = realtime
     agent._system_status_payload = lambda: {**realtime(), 'docker': {'available': True, 'containers': []}, 'history': []}
+    if args.demo_ai:
+        from types import SimpleNamespace
+        agent._operations = lambda: SimpleNamespace(logs=lambda source, **options: {
+            'source': source, 'name': 'api（模拟日志）', 'checked_at': time.time(), **options,
+            'lines': ['ERROR worker exceeded memory limit; exit_code=137（模拟）'], 'truncated': False,
+            'notice': '本地模拟数据，不代表真实服务器。'})
+        manager = agent._ai_manager()
+        manager.save({'protocol': 'openai', 'base_url': f'http://127.0.0.1:{args.port}/v1',
+                      'model': '本地演示模型（模拟结果）', 'api_key': ''})
+        def simulated_model(config, messages, tools=None, *, check=None, publish=None):
+            for _ in range(4):
+                if check:
+                    check()
+                time.sleep(.25)
+            tool = next((m for m in reversed(messages) if m['role'] == 'tool'), None)
+            data = json.loads(json.loads(tool['content'])['output'])['evidence'] if tool else {}
+            rows = data.get('process_scenes') or []
+            if rows and rows[0].get('run') and not any('get_panel_process_scene' in m.get('content', '') for m in messages if m['role'] == 'tool'):
+                scene = rows[0]
+                return {'text': '', 'calls': [{'id': 'demo_process_scene', 'type': 'function',
+                    'function': {'name': 'get_panel_process_scene', 'arguments': json.dumps({'run':scene['run'], 'ts':scene['ts']})}}]}
+            text = ('## 诊断结果（本地模拟）\n\n**已读取所选范围的资源与进程证据。**\n\n'
+                    '| 排查线索 | 演示结果 |\n| --- | --- |\n'
+                    '| CPU | Python 工作进程占用较高 |\n| 内存 | 同时段内存升高 |\n'
+                    '| 容器事件 | 存在 OOM 退出与重启记录 |\n\n'
+                    '这些现象发生在相近时间，**不能据此确认因果**。建议先核对工作进程并发量、容器内存限额和请求量。\n\n'
+                    '本轮只读，没有修改服务。以上内容来自本地模拟模型，不是实际服务器诊断。')
+            if publish:
+                publish(text)
+            return {'text': text, 'calls': [], 'usage': {}}
+        terminal_ai.complete = simulated_model
     stop = threading.Event()
     def update():
         template = copy.deepcopy(history.latest_scene)
@@ -106,7 +144,11 @@ def main():
             at = current['sampled_ts']
             history.observe(current, at)
             if at - history.latest_scene['at'] >= 5:
-                history.record_context({**copy.deepcopy(template), 'at': at}, current)
+                scene = copy.deepcopy(template)
+                scene['at'] = at
+                scene['processes'][0]['cpu_percent'] = current['cpu_percent'] * 6
+                scene['processes'][0]['host_cpu_percent'] = current['cpu_percent'] * .75
+                history.record_context(scene, current)
             resource_alerts.evaluate(monitor, [current], history.latest_scene)
             history.flush(at)
             if at - monitor.last_flush >= 30:
@@ -120,6 +162,8 @@ def main():
     finally:
         stop.set()
         worker.join(timeout=5)
+        if agent._ai_manager_instance is not None:
+            agent._ai_manager_instance.shutdown()
 
 
 if __name__ == '__main__':

@@ -1,0 +1,191 @@
+import json
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
+import agent
+import panel_diagnostics as diagnostics
+import terminal_ai
+import terminal_tools
+import test_terminal_ai as ai_tests
+from test_terminal_agent import tool_response, answer
+from test_ssh_terminal import request
+from test_deployment_removal import http_server as http_server, runtime as runtime
+from test_server_performance import sample
+from server_performance import History
+
+manager = ai_tests.manager
+model_server = ai_tests.model_server
+
+
+@pytest.fixture
+def evidence(monkeypatch, tmp_path):
+    history = History(tmp_path / 'performance')
+    now = int(time.time())
+    for offset, cpu in [(90, 20), (60, 98), (30, 34)]:
+        at = now - offset
+        history.observe(sample(cpu), at)
+        history.record_context({'at': at, 'available': True, 'warnings': [], 'scanned': 2, 'readable': 2,
+                               'processes': [{'pid': 123, 'name': 'python', 'cpu_percent': cpu,
+                                              'rss_mib': 1024, 'host_cpu_percent': cpu / 4}]}, sample(cpu))
+    history.flush(now, force=True)
+    logs = []
+    incident = {'incident': {'id': 'alert-test', 'title': 'CPU 持续升高', 'metadata': {'token': 'private-incident'}},
+                'window': {'since': now - 300, 'until': now}, 'window_available': True,
+                'log_source': 'container:' + 'a' * 64, 'timeline': [], 'related_events': [],
+                'checked_at': now, 'process_scenes': [], 'resource_samples': [],
+                'server_now': {'cpu_percent': 34, 'sampled_ts': now}}
+    def read_logs(source, **options):
+        logs.append((source, options))
+        return {'lines': ['ERROR slow worker password=private-log'], 'truncated': True, 'since': options['since'], 'until': options['until']}
+    def get_incident(key):
+        if key != 'alert-test':
+            raise ValueError('异常已不在保留范围')
+        return incident
+    monkeypatch.setattr(agent, '_incident_diagnostics', get_incident)
+    monkeypatch.setattr(agent, '_server_performance', lambda: history)
+    monkeypatch.setattr(agent, '_monitor', lambda: SimpleNamespace(snapshot=lambda: {'alerts': [], 'events': []}))
+    monkeypatch.setattr(agent, '_realtime_metrics_payload', lambda: {'server': {'cpu_percent': 34, 'sampled_ts': now}})
+    monkeypatch.setattr(agent, '_operations', lambda: SimpleNamespace(logs=read_logs))
+    monkeypatch.setattr(agent, '_ssh_manager', lambda: pytest.fail('Panel evidence must never use SSH'))
+    def backend(selection):
+        return diagnostics.Backend(selection, '面板主机：test / 123', incident=get_incident,
+            history=lambda: history, monitor=lambda: {'alerts': [], 'events': []}, realtime=lambda: {}, logs=read_logs)
+    return SimpleNamespace(history=history, incident=incident, logs=logs, backend=backend)
+
+
+def execute(backend, name, args=None):
+    return json.loads(backend.execute(backend.plan(name, args or {}), threading.Event())['output'])['evidence']
+
+
+def test_performance_evidence_includes_peak_bucket_and_persisted_processes(evidence):
+    backend = evidence.backend({'kind': 'performance', 'period': '24h'})
+    data = execute(backend, 'get_panel_performance')
+    assert data['summary']['cpu_percent']['peak'] == 98
+    assert data['peak_samples']['cpu_percent']['cpu_percent_peak'] == 98
+    assert 0 < data['coverage_percent'] < 100
+    assert data['process_scenes'][0]['cpu_name'] == 'python'
+    scene = data['process_scenes'][0]
+    detail = execute(backend, 'get_panel_process_scene', {'run': scene['run'], 'ts': scene['ts']})
+    assert detail['processes'][0]['pid'] == 123
+    assert execute(backend, 'get_panel_process_scene', {'run': 'a' * 32, 'ts': 100})['available'] is False
+
+
+def test_incident_and_logs_are_timed_redacted_and_selected_server_only(evidence):
+    backend = evidence.backend({'kind': 'incident', 'id': 'alert-test'})
+    data = execute(backend, 'get_panel_incident')
+    assert data['incident']['metadata']['token'] == '[已隐藏]'
+    data = execute(backend, 'get_panel_incident_logs')
+    assert 'private-log' not in json.dumps(data)
+    assert data['truncated'] is True
+    assert evidence.logs == [('container:' + 'a' * 64, {**evidence.incident['window'], 'limit': 100})] * 2
+
+
+def test_missing_log_source_never_guesses_or_reads_current_logs(evidence):
+    backend = evidence.backend({'kind': 'incident', 'id': 'alert-test'})
+    evidence.incident['log_source'] = ''
+    assert execute(backend, 'get_panel_incident_logs')['available'] is False
+    assert evidence.logs == []
+    with pytest.raises(terminal_tools.ToolError):
+        execute(evidence.backend({'kind': 'performance'}), 'get_panel_incident_logs')
+
+
+@pytest.mark.parametrize('name,args', [
+    ('restart_container', {'container': 'api'}), ('write_file', {'path': '/root/a'}),
+    ('execute_shell', {'command': 'rm -rf /'}), ('get_panel_incident_logs', {'path': '/etc/shadow'}),
+    ('get_panel_performance', {'period': []}), ('get_panel_process_scene', {'run': 'a' * 32, 'ts': True}),
+])
+def test_readonly_tools_reject_writes_paths_and_invalid_arguments(evidence, name, args):
+    with pytest.raises(terminal_tools.ToolError):
+        evidence.backend({'kind': 'overview'}).plan(name, args)
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_real_model_loop_reads_evidence_and_logs_before_answer_and_persists(
+        http_server, manager, model_server, evidence, protocol):
+    manager.save(ai_tests.config(model_server, protocol))
+    def responses(body, count):
+        text = json.dumps(body, ensure_ascii=False)
+        assert 'private-incident' not in text and 'private-log' not in text
+        assert 'CPU 持续升高' in text
+        names = {t.get('name') or t.get('function', {}).get('name') for t in body['tools']}
+        assert 'get_panel_incident_logs' in names and 'restart_container' not in names
+        return tool_response(protocol, 'get_panel_incident_logs', {}) if count == 1 else answer(protocol)
+    model_server.content = responses
+    data = {**ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'incident', 'id': 'alert-test'}}
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', data)
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    assert done['status'] == 'done' and done['permission'] == 'readonly'
+    assert len(done['events']) == 2 and all(event['status'] == 'done' for event in done['events'])
+    assert result['target'].startswith('面板主机：') and evidence.logs
+    detail = manager.history.detail(result['history_id'])
+    assert len(detail['turns']) == 1 and detail['conversation']['target'] == result['target']
+    assert 'private-incident' not in json.dumps(detail) and 'private-log' not in json.dumps(detail)
+    # Continue from durable history with the same host identity, independent of SSH.
+    model_server.content = answer(protocol)
+    status, followup = request(http_server, 'POST', '/terminal-ai/panel', {**data, 'history_id': result['history_id']})
+    assert status == 200
+    assert ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), followup['id'])['status'] == 'done'
+    assert len(manager.history.detail(result['history_id'])['turns']) == 2
+
+
+def test_model_cannot_escalate_panel_diagnosis_to_modify_server(http_server, manager, model_server, evidence):
+    manager.save(ai_tests.config(model_server))
+    model_server.content = lambda body, count: tool_response('openai', 'restart_service', {'service': 'nginx'}) if count == 1 else answer('openai')
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', {
+        **ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'overview'}})
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    assert done['events'][1]['status'] == 'blocked'
+    assert done['status'] == 'done'
+
+
+def test_panel_route_enforces_auth_origin_csrf_consent_and_scope(http_server, manager, model_server, evidence):
+    manager.save(ai_tests.config(model_server))
+    data = {**ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'performance', 'period': '24h'}}
+    for kwargs, expected in [({'authenticated': False}, 401), ({'csrf': False}, 403), ({'origin': False}, 403)]:
+        assert request(http_server, 'POST', '/terminal-ai/panel', data, **kwargs)[0] == expected
+    for changes in [{'permission': 'auto'}, {'session_id': 'remote'}, {'include_terminal': True},
+                    {'consent': False}, {'selection': {'kind': 'performance', 'period': []}},
+                    {'selection': {'kind': []}}, {'selection': {'kind': 'incident'}},
+                    {'selection': {'kind': 'overview', 'command': 'rm /'}}]:
+        assert request(http_server, 'POST', '/terminal-ai/panel', {**data, **changes})[0] == 400
+    assert model_server.calls == []
+
+
+def test_history_from_another_host_is_never_sent_to_model(http_server, manager, model_server, evidence):
+    manager.save(ai_tests.config(model_server))
+    manager.history.begin('foreign-history', 'foreign-job', '其他主机诊断', '面板主机：other / 456', 'test-model', 'foreign evidence')
+    manager.history.finish('foreign-job', 'foreign answer', 'done', [])
+    status, _ = request(http_server, 'POST', '/terminal-ai/panel', {
+        **ai_tests.chat_data(manager, permission='readonly'), 'history_id': 'foreign-history',
+        'selection': {'kind': 'overview'}})
+    assert status == 400 and not model_server.calls
+
+
+def test_log_failure_preserves_incident_and_missing_data_not_success(evidence):
+    backend = evidence.backend({'kind': 'incident', 'id': 'alert-test'})
+    def failure(*args, **kwargs):
+        raise RuntimeError('Docker logs unavailable')
+    backend.logs = failure
+    data = execute(backend, 'get_panel_incident')
+    assert data['incident']['id'] == 'alert-test' and data['logs']['available'] is False
+    with pytest.raises(terminal_tools.ToolError, match='证据读取失败'):
+        execute(backend, 'get_panel_incident_logs')
+
+
+def test_sparse_long_history_keeps_peak_separate_from_sampled_trend(evidence):
+    from copy import deepcopy
+    original = evidence.history.query('7d', include_details=False)
+    template = original['points'][0]
+    points = [{**deepcopy(template), 'ts': template['ts'] + i * 30, 'cpu_percent_peak': 12} for i in range(200)]
+    points[103]['cpu_percent_peak'] = 100
+    fake = {**original, 'period': '7d', 'points': points}
+    backend = evidence.backend({'kind': 'performance', 'period': '7d'})
+    backend.history = lambda: SimpleNamespace(query=lambda *a, **k: fake)
+    data = execute(backend, 'get_panel_performance')
+    assert len(data['trend']) == 96 and data['point_count'] == 200
+    assert data['peak_samples']['cpu_percent']['ts'] == points[103]['ts']

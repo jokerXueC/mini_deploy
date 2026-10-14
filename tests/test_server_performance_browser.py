@@ -105,6 +105,8 @@ def test_empty_history_and_unavailable_export_are_visible(page, http_server, run
     playwright.expect(frame.locator('html')).to_have_attribute('data-theme', 'dark')
     playwright.expect(frame.locator('.plot-empty').first).to_be_visible()
     monkeypatch.setattr(history, 'query', lambda *args: (_ for _ in ()).throw(OSError('disk full')))
+    preview_url = page.locator('#serverPerformanceFrame').get_attribute('src')
     page.locator('#serverPerformanceRefresh').click()
-    playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text('生成失败')
-    assert page.locator('#serverPerformanceFrame').is_hidden()
+    playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text('历史暂不可用')
+    assert page.locator('#serverPerformanceFrame').get_attribute('src') == preview_url
+    assert page.locator('#serverPerformanceFrame').is_visible()

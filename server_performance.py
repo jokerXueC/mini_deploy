@@ -244,7 +244,20 @@ class History:
                         self.persisted.pop(key, None)
                 self.last_flush, self.error = now, ''
 
-    def query(self, period='24h', now=None):
+    def version(self, period='24h', now=None):
+        if period not in PERIODS:
+            raise ValueError('请选择 1 小时、24 小时或 7 天')
+        now = time.time() if now is None else now
+        with self.connect() as db:
+            samples = tuple(db.execute('SELECT MAX(last),SUM(observations),COUNT(*) FROM samples').fetchone())
+            scenes = tuple(db.execute('SELECT MAX(at),SUM(score),COUNT(*) FROM process_context').fetchone())
+            info = self.path.stat()
+            modified = (info.st_mtime_ns, info.st_size, info.st_ino)
+        stale = bool(samples[0] is not None and now - samples[0] > 65)
+        signature = (period, int(now // INTERVAL), samples, scenes, modified, self.error, stale)
+        return '"' + hashlib.sha256(repr(signature).encode()).hexdigest() + '"'
+
+    def query(self, period='24h', now=None, include_details=True):
         if period not in PERIODS:
             raise ValueError('请选择 1 小时、24 小时或 7 天')
         now = time.time() if now is None else now
@@ -254,7 +267,7 @@ class History:
             contexts = [json.loads(row[0]) for row in db.execute(
                 'SELECT summary FROM process_context WHERE at>=? AND at<=? ORDER BY at DESC', (since, now))]
             # Bound embedded details. The ZIP includes every retained process scene as CSV.
-            chosen = {(c['run'], c['ts']) for c in contexts[:120] + sorted(contexts, key=lambda c: c['score'], reverse=True)[:120]}
+            chosen = {(c['run'], c['ts']) for c in contexts[:120] + sorted(contexts, key=lambda c: c['score'], reverse=True)[:120]} if include_details else set()
             details = []
             for run, ts in chosen:
                 row = db.execute('SELECT detail FROM process_context WHERE run=? AND ts=?', (run, ts)).fetchone()

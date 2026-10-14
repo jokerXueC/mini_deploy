@@ -1,0 +1,22 @@
+.panel-ai-dialog { max-width: 900px; }
+.panel-ai-toolbar, .panel-ai-compose { padding: 12px 22px; }
+.panel-ai-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; border-bottom: 1px solid var(--line); }
+.panel-ai-toolbar p { flex: 1 1 240px; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.panel-ai-messages { flex: 1; overflow: auto; min-height: 100px; padding: 16px 22px; }
+.panel-ai-entry { margin-bottom: 24px; }
+.panel-ai-question { font-size: 13px; margin: 0 0 12px; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.panel-ai-entry .tai-answer { font-size: 13px; line-height: 1.8; }
+.panel-ai-evidence { margin: 10px 0; color: var(--muted); font-size: 12px; }
+.panel-ai-evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
+.panel-ai-loading { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+.panel-ai-loading img { width: 16px; height: 16px; filter: invert(1); animation: tai-spin 1.2s linear infinite; }
+html[data-theme=light] .panel-ai-loading img { filter: none; }
+.panel-ai-history { max-height: 220px; overflow: auto; padding: 12px 22px; border-bottom: 1px solid var(--line); }
+.panel-ai-compose { flex-shrink: 0; border-top: 1px solid var(--line); }
+.panel-ai-compose textarea { width: 100%; min-height: 66px; max-height: 180px; resize: vertical; padding: 10px; background: var(--field-bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 13px; }
+.panel-ai-bottom { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+.panel-ai-bottom p { flex: 1; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.panel-ai-http { padding: 12px 22px; font-size: 12px; }
+.panel-ai-http label { display: block; margin-bottom: 8px; }
+@media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-http { padding-left: 14px; padding-right: 14px; } }
+@media (prefers-reduced-motion:reduce) { .panel-ai-loading img { animation: none; } }

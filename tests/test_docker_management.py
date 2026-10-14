@@ -51,11 +51,76 @@ def test_replaced_container_is_never_deleted(monkeypatch):
 def test_image_list_groups_tags_and_retains_untagged_images(monkeypatch):
     rows = [dict(ID=IMAGE, Repository='demo', Tag=tag, Size='12MB', CreatedAt='today') for tag in ('v1', 'latest')]
     rows.append(dict(ID='sha256:' + 'c' * 64, Repository='<none>', Tag='<none>', Size='2MB'))
-    monkeypatch.setattr(agent, '_run_command', lambda *a, **k: (0, '\n'.join(map(json.dumps, rows))))
+    def run(command, **kwargs):
+        if command[1:3] == ['image', 'ls']:
+            return 0, '\n'.join(map(json.dumps, rows))
+        if command[2] == 'ls':
+            return 0, CONTAINER
+        return 0, IMAGE
+    monkeypatch.setattr(agent, '_run_command', run)
     images = agent._docker_images()
     assert len(images) == 2
     assert images[0]['tags'] == ['demo:v1', 'demo:latest']
     assert images[1]['tags'] == []
+    assert images[0]['usage'] == 'in_use'
+    assert images[1]['usage'] == 'unused'
+
+
+@pytest.mark.parametrize('failure', ['list', 'inspect', 'malformed'])
+def test_image_reference_failure_never_marks_images_unused(monkeypatch, failure):
+    def run(command, **kwargs):
+        if command[1:3] == ['image', 'ls']:
+            return 0, json.dumps(dict(ID=IMAGE, Repository='demo', Tag='v1'))
+        if command[2] == 'ls':
+            return (1, 'unavailable') if failure == 'list' else (0, CONTAINER)
+        return (1, 'gone') if failure == 'inspect' else (0, 'bad-image-id')
+    monkeypatch.setattr(agent, '_run_command', run)
+    assert agent._docker_images()[0]['usage'] == 'unknown'
+
+
+@pytest.mark.parametrize('all_unused', [False, True])
+def test_cleanup_scope_only_images_and_never_force_removes(monkeypatch, all_unused):
+    calls = []
+    monkeypatch.setattr(agent, '_run_command', lambda command, **k: (calls.append(command) or 0, 'Total reclaimed space: 12MB'))
+    assert '12MB' in agent._docker_image_cleanup(all_unused)
+    assert calls == [['docker', 'image', 'prune', '--force', *(['--all'] if all_unused else ['--filter', 'until=24h'])]]
+
+
+def test_automatic_cleanup_retries_hourly_after_failure_and_stops(monkeypatch):
+    class Stop:
+        def __init__(self):
+            self.waits = []
+
+        def wait(self, seconds):
+            self.waits.append(seconds)
+            return len(self.waits) == 3
+
+        def is_set(self):
+            return False
+
+    calls = []
+    def cleanup(all_unused=False):
+        calls.append(all_unused)
+        if len(calls) == 1:
+            raise RuntimeError('daemon temporarily unavailable')
+        return 'Total reclaimed space: 0B'
+    monkeypatch.setattr(agent, 'DOCKER_AUTO_IMAGE_CLEANUP', True)
+    monkeypatch.setattr(agent.shutil, 'which', lambda _: 'docker')
+    monkeypatch.setattr(agent, '_docker_image_cleanup', cleanup)
+    monkeypatch.setattr(agent, '_docker_image_cleanup_status', {})
+    monkeypatch.setattr(agent, '_audit_event', lambda *a, **k: None)
+    monkeypatch.setattr(agent, '_log', lambda *a: None)
+    stop = Stop()
+    agent._docker_image_cleanup_sampler(stop)
+    assert calls == [False, False]
+    assert stop.waits == [60, 3600, 3600]
+    assert agent._docker_image_cleanup_status['ok'] is True
+
+
+def test_disabled_automatic_cleanup_runs_no_docker_command(monkeypatch):
+    monkeypatch.setattr(agent, 'DOCKER_AUTO_IMAGE_CLEANUP', False)
+    monkeypatch.setattr(agent, '_docker_image_cleanup', lambda *a, **k: pytest.fail('disabled'))
+    agent._docker_image_cleanup_sampler(threading.Event())
 
 
 @pytest.mark.parametrize('reference', ['--all-tags', 'nginx;id', 'nginx\nredis', 'https://host/image', ''])
@@ -92,7 +157,9 @@ def test_image_routes_require_auth_csrf_and_confirmation(monkeypatch):
     monkeypatch.setattr(agent, '_audit_event', lambda *a, **k: None)
     monkeypatch.setattr(agent, '_docker_images', lambda: [])
     calls = []
+    cleanups = []
     monkeypatch.setattr(agent, '_docker_image_action', lambda *a: calls.append(a) or 'ok')
+    monkeypatch.setattr(agent, '_docker_image_cleanup', lambda **kwargs: cleanups.append(kwargs) or 'reclaimed')
     cookie = agent._make_session_cookie()
     headers = {'Cookie': f'{agent.COOKIE_NAME}={cookie}'}
     server = ThreadingHTTPServer(('127.0.0.1', 0), agent.Handler)
@@ -119,6 +186,14 @@ def test_image_routes_require_auth_csrf_and_confirmation(monkeypatch):
         payload['confirmed'] = True
         assert request('POST', '/docker/images/action', payload, headers) == 200
         assert calls == [('remove', IMAGE)]
+        payload = {'action': 'prune_unused'}
+        assert request('POST', '/docker/images/action', payload) == 401
+        assert request('POST', '/docker/images/action', payload, {'Cookie': headers['Cookie']}) == 403
+        assert request('POST', '/docker/images/action', payload, headers) == 400
+        assert not cleanups
+        payload['confirmed'] = True
+        assert request('POST', '/docker/images/action', payload, headers) == 200
+        assert cleanups == [{'all_unused': True}]
     finally:
         connection.close()
         server.shutdown()

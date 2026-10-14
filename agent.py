@@ -57,6 +57,7 @@ import sqlite3
 import docker_mirrors
 import ssh_terminal
 import terminal_ai
+import panel_diagnostics
 import terminal_history
 import server_operations
 import performance_metrics
@@ -142,6 +143,9 @@ DOCKER_LOG_METRIC_INTERVAL_SECONDS = max(15, min(int(os.getenv("DEPLOY_DOCKER_LO
 SYSTEM_METRIC_MAX_POINTS = int(os.getenv("DEPLOY_SYSTEM_METRIC_MAX_POINTS", "336"))
 NETWORK_MAX_MBPS = float(os.getenv("DEPLOY_NETWORK_MAX_MBPS", "100"))
 DOCKER_LOG_TAIL_MAX_LINES = int(os.getenv("DEPLOY_DOCKER_LOG_TAIL_MAX_LINES", "5000"))
+DOCKER_AUTO_IMAGE_CLEANUP = os.getenv("DEPLOY_DOCKER_AUTO_IMAGE_CLEANUP", "true").strip().lower() in {
+    "1", "true", "yes", "on", "enabled",
+}
 HEALTH_CHECK_INTERVAL_SECONDS = max(5, min(int(os.getenv("DEPLOY_HEALTH_CHECK_INTERVAL_SECONDS", "15")), 300))
 HEALTH_CHECK_TIMEOUT_SECONDS = max(1, min(float(os.getenv("DEPLOY_HEALTH_CHECK_TIMEOUT_SECONDS", "5")), 30))
 
@@ -2034,7 +2038,67 @@ def _docker_images() -> list[dict[str, Any]]:
         digest = item.get("Digest")
         if digest and digest != "<none>" and digest not in image["digests"]:
             image["digests"].append(digest)
+    # Container inspection returns immutable image IDs, including stopped containers.
+    references: set[str] = set()
+    known = False
+    try:
+        code, output = _run_command(["docker", "container", "ls", "-aq", "--no-trunc"], timeout=10)
+        if code != 0:
+            raise RuntimeError(output)
+        ids = output.split()
+        if any(not re.fullmatch(r"[a-f0-9]{64}", value) for value in ids):
+            raise ValueError("无法识别容器 ID")
+        for start in range(0, len(ids), 200):
+            code, output = _run_command(["docker", "container", "inspect", "--format", "{{.Image}}",
+                                         *ids[start:start + 200]], timeout=10)
+            values = output.split()
+            if code != 0 or len(values) != len(ids[start:start + 200]) or any(
+                not re.fullmatch(r"sha256:[a-f0-9]{64}", value) for value in values
+            ):
+                raise RuntimeError("无法核实容器引用")
+            references.update(values)
+        known = True
+    except (OSError, ValueError, RuntimeError):
+        pass
+    for image in images.values():
+        image["usage"] = "in_use" if image["id"] in references else "unused" if known else "unknown"
     return list(images.values())
+
+
+_docker_image_cleanup_lock = threading.Lock()
+_docker_image_cleanup_status: dict[str, Any] = {}
+
+
+@_maintenance_shared_operation
+def _docker_image_cleanup(all_unused: bool = False) -> str:
+    with _docker_image_cleanup_lock:
+        # --force bypasses the interactive prompt; Docker still protects all container references.
+        command = ["docker", "image", "prune", "--force"]
+        if all_unused:
+            command.append("--all")
+        else:
+            command.extend(["--filter", "until=24h"])
+        code, output = _run_command(command, timeout=180)
+        if code != 0:
+            raise RuntimeError(f"镜像清理失败，未执行强制删除：{output[-4000:]}")
+        return output[-4000:]
+
+
+def _docker_image_cleanup_sampler(stop: threading.Event) -> None:
+    if not DOCKER_AUTO_IMAGE_CLEANUP or stop.wait(60):
+        return
+    while not stop.is_set():
+        try:
+            if shutil.which("docker"):
+                output = _docker_image_cleanup()
+                _docker_image_cleanup_status.update(at=time.time(), ok=True, output=output)
+                _audit_event("docker_image_cleanup", actor="automatic", success=True,
+                             detail={"scope": "dangling_older_than_24h", "output": output})
+        except Exception as exc:  # noqa: BLE001 - keep periodic housekeeping alive
+            _docker_image_cleanup_status.update(at=time.time(), ok=False, output=str(exc)[-4000:])
+            _log(f"automatic Docker image cleanup failed: {exc}")
+        if stop.wait(3600):
+            return
 
 
 _docker_mirror_manager: docker_mirrors.Manager | None = None
@@ -2755,6 +2819,8 @@ UI_ASSET_TYPES = {
     "operations.js": "application/javascript; charset=utf-8",
     "operations.css": "text/css; charset=utf-8",
     "terminal-ai.js": "application/javascript; charset=utf-8",
+    "panel-ai.js": "application/javascript; charset=utf-8",
+    "panel-ai.css": "text/css; charset=utf-8",
     "terminal-ai.css": "text/css; charset=utf-8",
     "previews/ssh-ai/index.html": "text/html; charset=utf-8",
     "previews/ssh-ai/preview.js": "application/javascript; charset=utf-8",
@@ -2937,6 +3003,25 @@ class Handler(BaseHTTPRequestHandler):
                 _audit_event("ai_settings_saved", actor=self.client_address[0], success=True)
             elif path == "/terminal-ai/test":
                 result = manager.submit(owner, action="test", data=data)
+            elif path == '/terminal-ai/panel':
+                if data.get('session_id') or data.get('include_terminal') or data.get('permission', 'readonly') != 'readonly':
+                    raise terminal_ai.AIError('面板诊断仅查询本机证据，不使用 SSH 或修改权限')
+                try:
+                    identity = Path('/etc/machine-id').read_text(encoding='ascii').strip()
+                except (OSError, UnicodeError):
+                    identity = str(STATE_FILE.parent.resolve())
+                target = f'面板主机：{socket.gethostname()} / {hashlib.sha256(identity.encode()).hexdigest()[:12]}'
+                try:
+                    backend = panel_diagnostics.Backend(data.get('selection', {'kind': 'overview'}), target,
+                        incident=_incident_diagnostics, history=_server_performance, monitor=lambda: _monitor().snapshot(),
+                        realtime=lambda: _realtime_metrics_payload()['server'], logs=lambda source, **options: _operations().logs(source, **options))
+                except ValueError as exc:
+                    raise terminal_ai.AIError(str(exc)) from exc
+                result = manager.submit(owner, action='chat', data=data, session_id='panel-monitoring',
+                    target=target, executor=backend.execute, evidence_backend=backend)
+                result['target'] = target
+                _audit_event('ai_panel_diagnosis', actor=self.client_address[0], target=target, success=True,
+                             detail={'kind': backend.selection['kind']})
             elif path in {"/terminal-ai/chat", "/terminal-ai/restore", "/terminal-ai/health"}:
                 session_id = str(data.get("session_id") or "")
                 output = ""
@@ -3491,8 +3576,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/performance/server':
             if self._require_auth_json():
                 try:
-                    period = parse_qs(parsed.query).get('period', ['24h'])[0]
-                    self._write_json(200, _server_performance().query(period))
+                    query = parse_qs(parsed.query)
+                    period = query.get('period', ['24h'])[0]
+                    history = _server_performance()
+                    if query.get('live', ['0'])[0] == '1':
+                        now = time.time()
+                        tag = history.version(period, now)
+                        if self.headers.get('If-None-Match') == tag:
+                            self.send_response(304)
+                            self.send_header('ETag', tag)
+                            self.send_header('Cache-Control', 'private, no-store')
+                            self.end_headers()
+                        else:
+                            self._write_json(200, history.query(period, now, False), headers={'ETag': tag})
+                    else:
+                        self._write_json(200, history.query(period))
                 except ValueError as exc:
                     self._write_json(400, {'detail': str(exc)})
                 except (OSError, sqlite3.Error, RuntimeError):
@@ -3563,7 +3661,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/docker/images":
             if self._require_auth_json():
                 try:
-                    self._write_json(200, {"images": _docker_images()})
+                    self._write_json(200, {"images": _docker_images(), "cleanup": {
+                        "enabled": DOCKER_AUTO_IMAGE_CLEANUP, "interval_seconds": 3600,
+                        "retention_hours": 24, **_docker_image_cleanup_status,
+                    }})
                 except (OSError, ValueError, RuntimeError) as exc:
                     self._write_json(500, {"error": "docker_images_failed", "detail": str(exc)})
             return
@@ -4050,9 +4151,9 @@ class Handler(BaseHTTPRequestHandler):
             data = _read_json_body(self, max_bytes=4096)
             action = str(data.get("action") or "")
             reference = str(data.get("reference") or "").strip()
-            if action == "remove" and data.get("confirmed") is not True:
+            if action in {"remove", "prune_unused"} and data.get("confirmed") is not True:
                 raise ValueError("请先确认删除镜像")
-            output = _docker_image_action(action, reference)
+            output = _docker_image_cleanup(all_unused=True) if action == "prune_unused" else _docker_image_action(action, reference)
         except ValueError as exc:
             self._write_json(400, {"error": str(exc)})
             return
@@ -4227,6 +4328,10 @@ def main() -> None:
     docker_event_worker = threading.Thread(target=docker_events.run, args=(_monitor,),
         kwargs={"stop_event": docker_event_stop}, name="docker-event-observer", daemon=True)
     docker_event_worker.start()
+    image_cleanup_stop = threading.Event()
+    image_cleanup_worker = threading.Thread(target=_docker_image_cleanup_sampler, args=(image_cleanup_stop,),
+                                           name="docker-image-cleanup", daemon=True)
+    image_cleanup_worker.start()
     threading.Thread(target=_certificate_discovery_sampler, name="certificate-discovery-sampler", daemon=True).start()
     history_stop = threading.Event()
     history_worker = threading.Thread(target=request_history.Collector(_request_history()).run,
@@ -4240,6 +4345,7 @@ def main() -> None:
         docker_event_stop.set()
         history_stop.set()
         performance_stop.set()
+        image_cleanup_stop.set()
         if _ssh_manager_instance is not None:
             _ssh_manager_instance.shutdown()
         if _ai_manager_instance is not None:
@@ -4247,6 +4353,7 @@ def main() -> None:
         docker_event_worker.join(timeout=5)
         history_worker.join(timeout=10)
         performance_worker.join(timeout=10)
+        image_cleanup_worker.join(timeout=5)
         try:
             _server_performance().flush(force=True)
         except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:

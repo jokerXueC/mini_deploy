@@ -189,6 +189,8 @@
       : '先关闭此窗口，在远程终端上方确认允许本次登录使用 HTTP；也可通过 HTTPS 或本地隧道打开面板。', !allowed, 'aiSettingsFeedback');
   }
   async function openSettings() {
+    // Allow model settings to open from diagnostics while the terminal view is hidden.
+    document.body.append(el('aiSettingsDialog'));
     await refresh();
     el('aiProtocol').value = settings.protocol || 'openai'; el('aiBaseUrl').value = settings.base_url || '';
     el('aiModel').value = settings.model || ''; el('aiKey').value = ''; el('aiClearKey').checked = false;
@@ -333,7 +335,7 @@
     const messages = el('aiMessages');
     messages.scrollTop += entry.approval.getBoundingClientRect().top - messages.getBoundingClientRect().top - 10;
   }
-  function renderAnswer(target, text) {
+  function renderAnswer(target, text, options = {}) {
     target.replaceChildren();
     if (!window.marked || !window.DOMPurify) { target.textContent = text; return; }
     // Parse Markdown, then retain only formatting elements; model HTML cannot create active UI.
@@ -368,7 +370,7 @@
         catch { message('请选中命令后使用系统复制。'); }
       });
       actions.append(copy);
-      if (command && !/[\x00-\x1f\x7f]/.test(command) && command.length <= 3000) {
+      if (options.insertCommand !== false && command && !/[\x00-\x1f\x7f]/.test(command) && command.length <= 3000) {
         const fill = document.createElement('button'); fill.type = 'button'; fill.className = 'tai-text-button'; fill.textContent = '填入终端';
         fill.addEventListener('click', () => {
           if (!window.SSHTerminal.insertCommand(command)) message('请先连接 SSH，并确认命令内容。');
@@ -494,7 +496,10 @@
         const button = document.createElement('button'); button.type = 'button'; button.className = 'tai-history-row';
         const title = document.createElement('strong'); title.textContent = item.title;
         const detail = document.createElement('span'); detail.textContent = `${item.target || '普通对话'} · ${historyDate(item.updated)} · ${item.model}`;
-        button.append(title, detail); button.addEventListener('click', () => openHistory(item.id));
+        button.append(title, detail); button.addEventListener('click', () => {
+          if (item.target?.startsWith('面板主机：')) { el('aiHistoryDialog').close(); window.PanelAI.restore(item.id); }
+          else openHistory(item.id);
+        });
         el('aiHistoryList').append(button);
       }
       historyOffset = result.next_offset;
@@ -646,7 +651,7 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleAuto(); });
   matchMedia('(max-width:1000px)').addEventListener('change', syncPanel);
   window.addEventListener('pagehide', () => { cancelJob(job); stopAuto(); if (!submitting) controller?.abort(); el('aiKey').value = ''; });
-  window.TerminalAI = {prepareAnalysis(text) {
+  window.TerminalAI = {renderAnswer, openSettings, prepareAnalysis(text) {
     panel(true);
     const question = el('aiQuestion');
     question.value = question.value.trim() ? `${question.value}\n\n${text}` : text;

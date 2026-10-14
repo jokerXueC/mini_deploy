@@ -460,7 +460,7 @@ class Manager:
         messages = [{"role": "system", "content": SYSTEM}, *history["messages"], {"role": "user", "content": content}]
         return config, messages, key, {"lines": len(text.splitlines()), "characters": len(text)}
 
-    def submit(self, owner, *, action, data, session_id="", output="", executor=None, validate=None, target=""):
+    def submit(self, owner, *, action, data, session_id="", output="", executor=None, validate=None, target="", evidence_backend=None):
         with self.lock:
             self._cleanup()
             if self.stopped:
@@ -476,6 +476,8 @@ class Manager:
                 raise AIError("操作过于频繁，请稍后重试。", 429)
             operation_plan = None
             mode = self.access(owner, session_id)["mode"] if action in {"chat", "restore", "health"} and session_id and executor else "chat"
+            if evidence_backend is not None:
+                mode = 'readonly'
             if action == "chat" and data.get("permission", mode) != mode:
                 raise AIError("操作权限已改变，请重新选择后发送。", 409)
             conversation_id, context = "", {}
@@ -538,6 +540,8 @@ class Manager:
             if action == 'chat' and data.get("automatic") is True and mode != "chat":
                 mode = "readonly"
             self.jobs[key]["permission"] = mode
+            if evidence_backend is not None:
+                self.jobs[key]['_evidence_backend'] = evidence_backend
             if action in {'restore', 'health'}:
                 self.jobs[key].update(history_id=archive_id, _operation_plan=operation_plan)
             record = self.permissions.get((owner, session_id))
@@ -700,16 +704,25 @@ class Manager:
         job = self._check_task(key, config, validate)
         mode, usage, count, writes, history = job["permission"], {}, 0, set(), []
         call_ids, write_failed = set(), False
-        tools = terminal_tools.schemas(writes=mode in {"approve", "auto"})
+        backend = job.get('_evidence_backend')
+        tools = backend.schemas() if backend else terminal_tools.schemas(writes=mode in {"approve", "auto"})
         messages = [*messages]
         messages[0] = {**messages[0], "content": messages[0]["content"] +
             f"当前工具目标：{job['target']}。权限模式：{mode}。"
             "修改后应检查结果。"}
+        if backend:
+            import panel_diagnostics
+            messages[0]['content'] += panel_diagnostics.GUIDANCE
+        initial = backend.initial_call() if backend else None
         while True:
             self._check_task(key, config, validate)
             with self.lock:
                 job["stage"] = "model"
-            result = self._complete(key, config, messages, tools, validate)
+            if initial:
+                result = {'text': '', 'calls': [initial]}
+                initial = None
+            else:
+                result = self._complete(key, config, messages, tools, validate)
             for name, value in result.get("usage", {}).items():
                 usage[name] = usage.get(name, 0) + value
             calls = result.get("calls", [])
@@ -728,7 +741,7 @@ class Manager:
                 with self.lock:
                     self.jobs[key]["events"].append(event)
                 try:
-                    plan = terminal_tools.plan(name, json.loads(raw))
+                    plan = backend.plan(name, json.loads(raw)) if backend else terminal_tools.plan(name, json.loads(raw))
                     if config["api_key"] and config["api_key"] in plan["command"]:
                         raise terminal_tools.ToolError("工具参数包含模型凭据，未执行。")
                     self._event_update(event, title=plan["title"], command=self._safe_text(config, plan["command"]),

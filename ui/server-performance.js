@@ -3,16 +3,59 @@
   const $ = id => document.getElementById(id), dialog = document.createElement('dialog');
   dialog.className = 'ops-dialog server-performance-dialog'; dialog.id = 'serverPerformanceDialog'; dialog.setAttribute('aria-labelledby', 'serverPerformanceTitle');
   dialog.innerHTML = `<header class="ops-head"><div><h2 id="serverPerformanceTitle">服务器性能历史</h2><p>持续采集 · 关闭网页也会保存</p></div><button id="serverPerformanceClose" class="toolbar-icon" type="button" title="关闭性能历史" aria-label="关闭性能历史"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></header><div class="server-performance-toolbar"><div class="ops-tabs" role="group" aria-label="服务器性能范围"><button type="button" data-server-period="1h">1 小时</button><button type="button" data-server-period="24h">24 小时</button><button type="button" data-server-period="7d">7 天</button></div><div class="server-performance-actions"><button id="serverPerformanceRefresh" class="toolbar-icon" type="button" title="刷新性能历史" aria-label="刷新性能历史"><img src="ui/previews/ssh-ai/icons/refresh-cw.svg" alt=""></button><button id="serverPerformanceCsv" class="ghost-button compact-action" type="button">采样 CSV</button><button id="serverPerformanceExport" class="ghost-button compact-action" type="button"><img src="ui/previews/ssh-ai/icons/download.svg" alt="">导出报告</button></div></div><p id="serverPerformanceFeedback" class="ops-feedback" role="status"></p><iframe id="serverPerformanceFrame" title="服务器性能报告" sandbox="allow-scripts allow-modals" hidden></iframe>`;
+  const automatic = document.createElement('label'); automatic.className = 'server-performance-auto';
+  automatic.innerHTML = '<input id="serverPerformanceAuto" type="checkbox" checked> 自动更新';
+  dialog.querySelector('.server-performance-actions').prepend(automatic);
   document.body.append(dialog);
-  let period = '24h', controller, revision = 0, url = '', busy = false;
+  const aiAnalyze = document.createElement('button'); aiAnalyze.type = 'button'; aiAnalyze.id = 'serverPerformanceAI';
+  aiAnalyze.className = 'ghost-button compact-action'; aiAnalyze.textContent = 'AI 分析';
+  dialog.querySelector('.server-performance-actions').append(aiAnalyze);
+  aiAnalyze.addEventListener('click', () => { const selected = period; dialog.close(); window.PanelAI.open({kind:'performance', period:selected}); });
+  let period = '24h', controller, revision = 0, requestVersion = 0, url = '', busy = false;
+  let ready = false, refreshing = false, timer, liveController, contextController, etag = '';
   function controls() {
-    ['serverPerformanceRefresh', 'serverPerformanceCsv', 'serverPerformanceExport'].forEach(id => $(id).disabled = busy);
+    ['serverPerformanceCsv', 'serverPerformanceExport'].forEach(id => $(id).disabled = busy);
+    $('serverPerformanceRefresh').disabled = busy || refreshing;
     dialog.querySelectorAll('[data-server-period]').forEach(button => { button.disabled = busy; button.setAttribute('aria-pressed', String(button.dataset.serverPeriod === period)); });
   }
-  function clearFrame() { if (url) URL.revokeObjectURL(url); url = ''; $('serverPerformanceFrame').removeAttribute('src'); $('serverPerformanceFrame').hidden = true; }
+  function stopAutomatic() { clearTimeout(timer); liveController?.abort(); }
+  function schedule() {
+    clearTimeout(timer);
+    if (dialog.open && ready && !busy && !refreshing && !document.hidden && $('serverPerformanceAuto').checked) timer = setTimeout(() => refreshData(), 15000);
+  }
+  function clearFrame() {
+    stopAutomatic(); contextController?.abort(); contextController = new AbortController(); ready = false; etag = ''; revision++;
+    if (url) URL.revokeObjectURL(url); url = ''; $('serverPerformanceFrame').removeAttribute('src'); $('serverPerformanceFrame').hidden = true;
+  }
+  async function refreshData(force = false) {
+    clearTimeout(timer);
+    if (!dialog.open || busy || refreshing) return;
+    if (!ready) { if (force) load(); return; }
+    if (!force && (document.hidden || !$('serverPerformanceAuto').checked)) return;
+    const version = revision, requestedPeriod = period;
+    liveController?.abort(); const request = liveController = new AbortController();
+    refreshing = true; controls();
+    try {
+      const response = await fetch(`performance/server?${new URLSearchParams({period:requestedPeriod, live:'1'})}`, {credentials:'same-origin', cache:'no-store', signal:request.signal, headers:etag ? {'If-None-Match':etag} : {}});
+      if (!dialog.open || version !== revision || request.signal.aborted || busy) return;
+      if (response.status === 304) {
+        if (force) $('serverPerformanceFeedback').textContent = '已检查，暂无新增的已保存采样。';
+        return;
+      }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || '性能历史更新失败');
+      if (!dialog.open || version !== revision || request.signal.aborted || busy) return;
+      if (data.period !== requestedPeriod || !Array.isArray(data.points) || !Array.isArray(data.metrics) || !data.summary || typeof data.summary !== 'object' || !Number.isFinite(data.sample_seconds)) throw new Error('性能历史数据格式异常');
+      etag = response.headers.get('ETag') || '';
+      $('serverPerformanceFrame').contentWindow.postMessage({type:'performance-report-update', data}, '*');
+      $('serverPerformanceFeedback').textContent = `已更新 ${new Date().toLocaleTimeString('zh-CN', {hour12:false})} · ${data.sample_seconds} 次有效采样 · 每 30 秒保存统计`;
+    } catch (error) {
+      if (version === revision && error.name !== 'AbortError') $('serverPerformanceFeedback').textContent = `${error.message.replace(/[。；]$/, '')}；保留当前图表，稍后重试。`;
+    } finally { if (liveController === request) { refreshing = false; controls(); schedule(); } }
+  }
   async function load(format = 'html') {
     if (busy && format !== 'html') return;
-    const run = ++revision; controller?.abort(); controller = new AbortController(); busy = true; controls();
+    const run = ++requestVersion; stopAutomatic(); controller?.abort(); controller = new AbortController(); busy = true; controls();
     if (format === 'html') clearFrame();
     $('serverPerformanceFeedback').textContent = format === 'html' ? '读取已保存的性能采样…' : '生成性能报告…';
     try {
@@ -20,7 +63,7 @@
       if (format === 'html') parameters.set('preview', '1');
       const response = await fetch(`performance/server/export?${parameters}`, {credentials:'same-origin', signal:controller.signal});
       if (!response.ok) { const data = await response.json(); throw new Error(data.detail || '性能报告读取失败'); }
-      const blob = await response.blob(); if (run !== revision || !dialog.open) return;
+      const blob = await response.blob(); if (run !== requestVersion || !dialog.open) return;
       const target = URL.createObjectURL(blob), count = response.headers.get('X-Performance-Samples') || '0';
       if (format === 'html') { url = target; $('serverPerformanceFrame').src = target; $('serverPerformanceFrame').hidden = false; }
       else {
@@ -29,21 +72,23 @@
         document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(target), 60000);
       }
       $('serverPerformanceFeedback').textContent = `${format === 'html' ? '已读取' : '已下载'} · ${count} 次有效采样${count === '0' ? ' · 采集通常在 30 秒内开始，过去的数据无法补回' : ' · 每 30 秒保存统计'}`;
-    } catch (error) { if (run === revision && error.name !== 'AbortError') $('serverPerformanceFeedback').textContent = error.message; }
-    finally { if (run === revision) { busy = false; controls(); } }
+    } catch (error) { if (run === requestVersion && error.name !== 'AbortError') $('serverPerformanceFeedback').textContent = error.message; }
+    finally { if (run === requestVersion) { busy = false; controls(); schedule(); } }
   }
   $('serverPerformanceOpen').addEventListener('click', () => { period = '24h'; dialog.showModal(); load(); });
   $('serverPerformanceClose').addEventListener('click', () => dialog.close());
-  $('serverPerformanceRefresh').addEventListener('click', () => load());
+  $('serverPerformanceRefresh').addEventListener('click', () => refreshData(true));
   $('serverPerformanceExport').addEventListener('click', () => load('zip'));
   $('serverPerformanceCsv').addEventListener('click', () => load('csv'));
   window.addEventListener('message', async event => {
     const message = event.data, frame = $('serverPerformanceFrame');
-    if (!dialog.open || event.source !== frame.contentWindow || message?.type !== 'performance-context-request') return;
+    if (!dialog.open || event.source !== frame.contentWindow) return;
+    if (message?.type === 'performance-report-ready' && message.period === period) { ready = true; schedule(); return; }
+    if (message?.type !== 'performance-context-request') return;
     if (!/^[a-f0-9]{32}$/.test(message.run) || !Number.isSafeInteger(message.ts) || typeof message.token !== 'string' || message.token.length > 80) return;
     const version = revision, source = event.source;
     try {
-      const response = await fetch(`performance/server/context?${new URLSearchParams({run:message.run, ts:message.ts})}`, {credentials:'same-origin', signal:controller?.signal});
+      const response = await fetch(`performance/server/context?${new URLSearchParams({run:message.run, ts:message.ts})}`, {credentials:'same-origin', signal:contextController?.signal});
       const body = await response.json();
       if (dialog.open && version === revision) source.postMessage({type:'performance-context-response', token:message.token, scene:response.ok ? body : null, error:response.ok ? '' : body.detail || '现场读取失败'}, '*');
     } catch (error) {
@@ -51,5 +96,7 @@
     }
   });
   dialog.addEventListener('click', event => { const button = event.target.closest('[data-server-period]'); if (button) { period = button.dataset.serverPeriod; load(); } });
-  dialog.addEventListener('close', () => { revision++; controller?.abort(); busy = false; clearFrame(); });
+  $('serverPerformanceAuto').addEventListener('change', () => { if ($('serverPerformanceAuto').checked) refreshData(); else { stopAutomatic(); $('serverPerformanceFeedback').textContent = '自动更新已暂停，服务器仍持续采集。'; } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopAutomatic(); else if (dialog.open && $('serverPerformanceAuto').checked) refreshData(); });
+  dialog.addEventListener('close', () => { requestVersion++; controller?.abort(); busy = false; clearFrame(); });
 })();

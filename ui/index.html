@@ -520,11 +520,13 @@
         </section>
         <div class="docker-image-tools">
           <input id="dockerImageSearch" type="search" aria-label="搜索镜像" placeholder="搜索镜像名称、标签或 ID">
+          <button id="dockerImagesCleanup" class="ghost-button compact-action danger-text" type="button" disabled>清理未使用镜像</button>
           <form id="dockerImagePullForm">
             <input id="dockerImageReference" aria-label="要拉取的镜像" placeholder="例如 nginx:stable-alpine" maxlength="255" required>
             <button id="dockerImagePull" class="ghost-button compact-action" type="submit">拉取镜像</button>
           </form>
         </div>
+        <p id="dockerImageCleanupPolicy" class="muted"></p>
         <p id="dockerImageFeedback" class="muted" role="status" aria-live="polite"></p>
         <div id="dockerImageList" class="docker-image-list"></div>
       </section>
@@ -663,6 +665,8 @@
   <script src="ui/monitoring.js"></script>
   <script src="ui/prometheus.js"></script>
   <script src="ui/docker-images.js"></script>
+  <link rel="stylesheet" href="ui/panel-ai.css">
+  <script src="ui/panel-ai.js"></script>
   <script src="ui/docker-mirrors.js"></script>
   <script src="ui/request-gateway.js"></script>
   <script src="ui/gateway-connect.js"></script>

@@ -77,7 +77,12 @@ def dashboard():
                     if payload.get("action") == "replace":
                         result = {"message": "证书已替换", "backup": "/data/certificate-backups/example"}
                 elif path == "/docker/images":
-                    result = {"images": []}
+                    result = {"images": state.get('images', []), 'cleanup': {'enabled': True}}
+                elif path == "/docker/images/action":
+                    if payload.get('action') == 'prune_unused':
+                        assert payload['confirmed'] is True
+                        state['images'] = [item for item in state.get('images', []) if item['usage'] != 'unused']
+                    result = {'ok': True, 'output': 'Total reclaimed space: 12MB'}
                 elif path == "/docker/logs":
                     result = {"container": "web", "lines": ["healthy"]}
                 elif path == "/request-gateways":
@@ -138,6 +143,33 @@ def test_routes_and_monitoring_only_requests(dashboard, view):
         page.wait_for_timeout(100)
         page.clock.run_for(31000)
     assert not state["errors"]
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_image_cleanup_confirm_cancel_and_reference_status(dashboard, tmp_path, width):
+    page, state, origin = dashboard
+    state['images'] = [{'id': 'sha256:' + char * 64, 'tags': tags, 'usage': usage,
+                        'size': '12MB', 'created': '2026-10-10 10:00:00 +0000 UTC'}
+                       for char, tags, usage in [('a', ['web:current'], 'in_use'),
+                                                ('b', ['web:rollback'], 'unused'), ('c', [], 'unused')]]
+    page.set_viewport_size({'width': width, 'height': 960})
+    page.goto(origin + '/ui?view=server')
+    playwright.expect(page.locator('#dockerImageCount')).to_have_text('3 个镜像 · 2 个未使用')
+    playwright.expect(page.locator('#dockerImageCleanupPolicy')).to_contain_text('24 小时')
+    assert page.locator('[data-image-remove]').count() == 2
+    page.locator('#dockerImagesCleanup').click()
+    playwright.expect(page.locator('#confirmModal')).to_be_visible()
+    page.locator('#confirmCancelBtn').click()
+    assert not any(path == '/docker/images/action' for path, _, _ in state['calls'])
+    page.locator('#dockerImagesCleanup').click()
+    page.locator('#confirmOkBtn').click()
+    playwright.expect(page.locator('#dockerImageCount')).to_have_text('1 个镜像 · 0 个未使用')
+    playwright.expect(page.locator('#dockerImageFeedback')).to_contain_text('12MB')
+    playwright.expect(page.locator('#dockerImagesCleanup')).to_be_disabled()
+    assert not state['errors']
+    page.locator('.docker-images-panel').scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / f'docker-cleanup-{width}.png'))
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
 
 
 def connection_source(name="proxy", networks=None):

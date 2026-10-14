@@ -110,15 +110,15 @@ def test_log_filters_pause_download_and_read_errors(operations):
     playwright.expect(page.locator("#opsLogDownload")).to_be_disabled()
 
 
-def test_ai_receives_evidence_as_draft_without_submitting_or_mutating(operations):
+def test_ai_entry_opens_panel_scope_without_ssh_or_missing_model_submission(operations):
     page, _, _ = operations
     page.locator("#alertList summary").click()
     page.locator("#alertList [data-incident-diagnose]").click()
     playwright.expect(page.locator("#opsAnalyze")).to_be_enabled()
     received = []
-    page.expose_function("captureDraft", lambda draft: received.append(draft))
-    page.evaluate("window.TerminalAI = {viewChanged() {}, prepareAnalysis: captureDraft}")
+    page.expose_function("captureScope", lambda scope: received.append(scope))
+    page.evaluate("window.PanelAI = {open: captureScope}")
     page.locator("#opsAnalyze").click()
-    playwright.expect(page.locator("#terminalView")).to_have_class("dashboard-view active")
+    playwright.expect(page.locator("#eventsView")).to_have_class("dashboard-view active")
     page.wait_for_timeout(100)
-    assert "debian-demo" in received[0] and "137" in received[0] and "当前 SSH 连接可能是其他服务器" in received[0]
+    assert received[0]['kind'] == 'incident' and received[0]['id']
