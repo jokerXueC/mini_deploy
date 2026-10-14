@@ -1,0 +1,10 @@
+.server-performance-report { --report-line: #e3e7eb; --report-muted: #687580; }
+.server-performance-report .totals { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.server-performance-report .charts { gap: 28px 36px; }.server-performance-report .plot { height: 220px; }.server-performance-report canvas { height: 220px; }
+.server-performance-report .tables table { margin-top: 20px; }.server-performance-report .tables td { white-space: nowrap; font-variant-numeric: tabular-nums; }.server-performance-report .tables td:first-child { white-space: normal; }.server-performance-report .tables td:nth-child(4) { min-width: 0; }
+html[data-theme=dark] { background: #111418; color: #e4e8ed; }
+html[data-theme=dark] .server-performance-report { --report-line: #293038; --report-muted: #97a3b0; }
+html[data-theme=dark] .caption, html[data-theme=dark] .brand, html[data-theme=dark] .legend, html[data-theme=dark] footer, html[data-theme=dark] .metric span, html[data-theme=dark] .metric small { color: #97a3b0; }
+html[data-theme=dark] button { background: #1a2027; color: #e4e8ed; border-color: #3c454f; }html[data-theme=dark] .totals, html[data-theme=dark] .tables { border-color: #293038; }html[data-theme=dark] th { background: #1a2027; }html[data-theme=dark] td, html[data-theme=dark] th { border-color: #293038; }html[data-theme=dark] a { color: #65c4aa; }
+@media (max-width: 850px) { .server-performance-report .totals { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media print { html[data-theme=dark] { background: white; color: #20252b; }html[data-theme=dark] th { background: #edf1f4; }.server-performance-report .charts > div { break-inside: avoid; }.server-performance-report .charts { grid-template-columns: repeat(2, minmax(0, 1fr)); }.server-performance-report .totals { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

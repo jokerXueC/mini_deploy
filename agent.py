@@ -60,6 +60,7 @@ import terminal_ai
 import terminal_history
 import server_operations
 import performance_metrics
+import server_performance
 import panel_maintenance
 import ssh_files
 
@@ -2072,6 +2073,8 @@ def _docker_image_action(action: str, reference: str) -> str:
 _disk_sampler = performance_metrics.DiskSampler()
 _container_performance = None
 _container_performance_lock = threading.Lock()
+_server_performance_instance = None
+_server_performance_lock = threading.Lock()
 
 
 def _panel_maintenance():
@@ -2084,6 +2087,22 @@ def _performance_history():
         if _container_performance is None or _container_performance.path.parent.parent != STATE_FILE.parent:
             _container_performance = performance_metrics.ContainerHistory(STATE_FILE.parent, _maintenance_shared_lock)
         return _container_performance
+
+
+def _server_performance():
+    global _server_performance_instance
+    with _server_performance_lock:
+        if _server_performance_instance is None or _server_performance_instance.path.parent.parent != STATE_FILE.parent:
+            _server_performance_instance = server_performance.History(STATE_FILE.parent, _maintenance_shared_lock)
+        return _server_performance_instance
+
+
+def _server_performance_sampler(stop):
+    while not stop.wait(5):
+        try:
+            _server_performance().flush()
+        except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+            _log(f'server performance persistence failed: {exc}')
 
 
 def _system_status_payload() -> dict[str, Any]:
@@ -2131,6 +2150,7 @@ def _sample_realtime_metrics() -> None:
     with _realtime_metrics_lock:
         _realtime_server = server
         _realtime_metrics.appendleft(entry)
+    _server_performance().observe(server, now)
 
 
 def _realtime_metrics_payload() -> dict[str, Any]:
@@ -2700,6 +2720,8 @@ UI_ASSET_TYPES = {
 }
 UI_ASSET_TYPES.update({'request-export.js': 'application/javascript; charset=utf-8',
                        'request-export.css': 'text/css; charset=utf-8'})
+UI_ASSET_TYPES.update({'server-performance.js': 'application/javascript; charset=utf-8',
+                       'server-performance-panel.css': 'text/css; charset=utf-8'})
 UI_ASSET_TYPES.update({
     f"previews/ssh-ai/icons/{name}.svg": "image/svg+xml"
     for name in (
@@ -3142,6 +3164,48 @@ class Handler(BaseHTTPRequestHandler):
             output.close()
             request_export.SLOT.release()
 
+    def _export_server_performance(self, query):
+        if not request_export.SLOT.acquire(blocking=False):
+            self._write_json(409, {'detail': '已有报告导出进行中，请完成后重试。'})
+            return
+        output, ready = None, False
+        try:
+            period, format = query.get('period', ['24h'])[0], query.get('format', ['zip'])[0]
+            theme = query.get('theme', ['light'])[0]
+            data = _server_performance().query(period)
+            output, length, mime = server_performance.build(data, format, theme)
+            _audit_event('server_performance_export', actor=self.client_address[0], success=True,
+                         detail={'period': period, 'format': format, 'samples': data['sample_seconds']})
+            ready = True
+        except ValueError as exc:
+            self._write_json(400, {'detail': str(exc)})
+            return
+        except (OSError, sqlite3.Error, RuntimeError):
+            self._write_json(503, {'detail': '性能报告生成失败，请检查历史数据库和临时磁盘空间；原历史保留。'})
+            return
+        finally:
+            if not ready:
+                if output is not None:
+                    output.close()
+                request_export.SLOT.release()
+        try:
+            filename = 'mini-deploy-performance-' + period + '-' + time.strftime('%Y%m%d-%H%M%S', time.gmtime()) + '.' + format
+            self.send_response(200)
+            self.send_header('Content-Type', mime)
+            self.send_header('Content-Length', str(length))
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('X-Performance-Samples', str(data['sample_seconds']))
+            self.end_headers()
+            while chunk := output.read(256 * 1024):
+                self.wfile.write(chunk)
+        except OSError:
+            pass
+        finally:
+            output.close()
+            request_export.SLOT.release()
+
     def _write_text_download(self, filename: str, text: str, truncated: bool = False) -> None:
         if truncated:
             text = (
@@ -3324,6 +3388,20 @@ class Handler(BaseHTTPRequestHandler):
                     self._write_json(200, payload)
                 except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                     self._write_json(503, {'error': 'maintenance_unavailable', 'detail': str(exc)})
+            return
+        if path == '/performance/server':
+            if self._require_auth_json():
+                try:
+                    period = parse_qs(parsed.query).get('period', ['24h'])[0]
+                    self._write_json(200, _server_performance().query(period))
+                except ValueError as exc:
+                    self._write_json(400, {'detail': str(exc)})
+                except (OSError, sqlite3.Error, RuntimeError):
+                    self._write_json(503, {'detail': '服务器性能历史暂不可用，请检查数据目录和采样日志；原历史保留。'})
+            return
+        if path == '/performance/server/export':
+            if self._require_auth_json():
+                self._export_server_performance(parse_qs(parsed.query))
             return
         if path == '/performance/containers':
             if self._require_auth_json():
@@ -4016,6 +4094,10 @@ def main() -> None:
     _read_state()
     threading.Thread(target=_realtime_metric_sampler, name="realtime-metric-sampler", daemon=True).start()
     threading.Thread(target=_system_metric_sampler, name="system-metric-sampler", daemon=True).start()
+    performance_stop = threading.Event()
+    performance_worker = threading.Thread(target=_server_performance_sampler, args=(performance_stop,),
+                                           name='server-performance-writer', daemon=True)
+    performance_worker.start()
     threading.Thread(target=_docker_log_metric_sampler, name="docker-log-metric-sampler", daemon=True).start()
     threading.Thread(target=_health_check_sampler, name="health-check-sampler", daemon=True).start()
     docker_event_stop = threading.Event()
@@ -4034,12 +4116,18 @@ def main() -> None:
     finally:
         docker_event_stop.set()
         history_stop.set()
+        performance_stop.set()
         if _ssh_manager_instance is not None:
             _ssh_manager_instance.shutdown()
         if _ai_manager_instance is not None:
             _ai_manager_instance.shutdown()
         docker_event_worker.join(timeout=5)
         history_worker.join(timeout=10)
+        performance_worker.join(timeout=10)
+        try:
+            _server_performance().flush(force=True)
+        except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+            _log(f'server performance final persistence failed: {exc}')
         server.server_close()
 
 

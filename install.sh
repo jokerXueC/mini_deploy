@@ -44,7 +44,7 @@ UPGRADE_SERVICE_FAILSAFE_ARMED="false"
 # Only these program entries are updated. Never prune an installed tree:
 # retired deployment scripts and user-owned business resources must survive.
 RELEASE_ENTRIES=(
-  agent.py cpu_metrics.py server_operations.py performance_metrics.py panel_maintenance.py release.json certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
+  agent.py cpu_metrics.py server_operations.py performance_metrics.py server_performance.py panel_maintenance.py release.json certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
   caddy_requests.py request_gateway.py request_history.py request_export.py gateway_connections.py monitoring.py container_monitoring.py docker_events.py docker_mirrors.py ssh_terminal.py ssh_files.py ssh_file_manager.py terminal_ai.py terminal_model_io.py terminal_tools.py terminal_history.py requirements-ssh.txt
   install.sh env.example server.env.example LICENSE THIRD_PARTY_NOTICES.md ui
   examples/nginx.compose.yml

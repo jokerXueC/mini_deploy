@@ -1,0 +1,7 @@
+.server-performance-dialog { width: min(1340px, calc(100vw - 28px)); height: min(920px, calc(100dvh - 32px)); }
+.server-performance-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 0 20px 12px; }
+.server-performance-toolbar .ops-tabs { margin: 0; padding: 0; border: 0; }.server-performance-toolbar [aria-pressed=true] { color: var(--green); box-shadow: inset 0 -2px var(--green); }
+.server-performance-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }.server-performance-actions img, #serverPerformanceOpen img { width: 16px; height: 16px; vertical-align: middle; filter: invert(1); margin-right: 4px; }html[data-theme=light] .server-performance-actions img, html[data-theme=light] #serverPerformanceOpen img { filter: none; }
+#serverPerformanceFrame { width: calc(100% - 32px); flex: 1; min-height: 0; margin: 0 16px 16px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+.server-performance-dialog [hidden] { display: none !important; }
+@media (max-width: 700px) { .server-performance-dialog { width: calc(100vw - 16px); height: calc(100dvh - 20px); }.server-performance-toolbar { padding: 0 14px 10px; }#serverPerformanceFrame { width: calc(100% - 20px); margin: 0 10px 10px; } }

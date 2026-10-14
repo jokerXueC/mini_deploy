@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="ui/operations.css">
   <link rel="stylesheet" href="ui/ssh-file-manager.css">
   <link rel="stylesheet" href="ui/request-export.css">
+  <link rel="stylesheet" href="ui/server-performance-panel.css">
   <link rel="stylesheet" href="ui/vendor/xterm.css">
 </head>
 <body>
@@ -447,6 +448,7 @@
             <p id="systemTrendHint">等待资源采样</p>
           </div>
           <div class="trend-head-actions">
+            <button id="serverPerformanceOpen" class="ghost-button compact-action" type="button"><img src="ui/previews/ssh-ai/icons/eye.svg" alt="">24 小时性能</button>
             <div class="trend-range-controls" aria-label="趋势范围">
               <button class="trend-range active" type="button" data-trend-range="realtime">实时</button>
               <button class="trend-range" type="button" data-trend-range="24h">24h</button>
@@ -633,6 +635,7 @@
   <script src="ui/app.js"></script>
   <script src="ui/operations.js"></script>
   <script src="ui/performance.js"></script>
+  <script src="ui/server-performance.js"></script>
   <script src="ui/maintenance.js"></script>
   <script src="ui/certificates.js"></script>
   <script src="ui/certificate-discovery.js"></script>
