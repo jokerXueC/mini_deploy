@@ -13,6 +13,35 @@
   aiAnalyze.addEventListener('click', () => { const selected = period; dialog.close(); window.PanelAI.open({kind:'performance', period:selected}); });
   let period = '24h', controller, revision = 0, requestVersion = 0, url = '', busy = false;
   let ready = false, refreshing = false, timer, liveController, contextController, etag = '';
+  let retryInitial = false, failures = 0;
+  async function requestHistory(path, options = {}, format = 'json') {
+    const abort = new AbortController();
+    const cancel = () => abort.abort();
+    options.signal?.addEventListener('abort', cancel, {once:true});
+    if (options.signal?.aborted) cancel();
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; abort.abort(); }, format === 'blob' ? 60000 : 30000);
+    try {
+      const response = await fetch(path, {...options, credentials:'same-origin', cache:'no-store', signal:abort.signal});
+      if (response.status === 304) return {response};
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        const error = new Error(response.status === 401 ? '登录已过期，请刷新页面重新登录。' : body.detail || `性能历史请求失败（HTTP ${response.status}）。`);
+        error.retry = response.status === 409 || response.status === 429 || response.status >= 500;
+        throw error;
+      }
+      return {response, data:format === 'blob' ? await response.blob() : await response.json()};
+    } catch (error) {
+      if (timedOut) throw Object.assign(new Error('性能历史读取超时，请检查服务器连接或稍后重试。'), {retry:true});
+      if (error.name === 'AbortError' || typeof error.retry === 'boolean') throw error;
+      const message = error instanceof SyntaxError ? '服务器返回的数据不完整，请稍后重试。'
+        : navigator.onLine === false ? '网络已断开，恢复连接后会自动重试。'
+        : '性能历史传输失败，连接可能中断或响应未接收完整。';
+      throw Object.assign(new Error(message), {retry:true});
+    } finally {
+      clearTimeout(timeout); options.signal?.removeEventListener('abort', cancel);
+    }
+  }
   function controls() {
     ['serverPerformanceCsv', 'serverPerformanceExport'].forEach(id => $(id).disabled = busy);
     $('serverPerformanceRefresh').disabled = busy || refreshing;
@@ -21,7 +50,10 @@
   function stopAutomatic() { clearTimeout(timer); liveController?.abort(); }
   function schedule() {
     clearTimeout(timer);
-    if (dialog.open && ready && !busy && !refreshing && !document.hidden && $('serverPerformanceAuto').checked) timer = setTimeout(() => refreshData(), 15000);
+    if (dialog.open && (ready || retryInitial) && !busy && !refreshing && !document.hidden && navigator.onLine !== false && $('serverPerformanceAuto').checked) {
+      const delay = retryInitial ? Math.min(30000, 3000 * 2 ** Math.min(4, failures - 1)) : 15000;
+      timer = setTimeout(() => retryInitial ? load() : refreshData(), delay);
+    }
   }
   function clearFrame() {
     stopAutomatic(); contextController?.abort(); contextController = new AbortController(); ready = false; etag = ''; revision++;
@@ -30,20 +62,18 @@
   async function refreshData(force = false) {
     clearTimeout(timer);
     if (!dialog.open || busy || refreshing) return;
-    if (!ready) { if (force) load(); return; }
+    if (!ready) { if (force || retryInitial) load(); return; }
     if (!force && (document.hidden || !$('serverPerformanceAuto').checked)) return;
     const version = revision, requestedPeriod = period;
     liveController?.abort(); const request = liveController = new AbortController();
     refreshing = true; controls();
     try {
-      const response = await fetch(`performance/server?${new URLSearchParams({period:requestedPeriod, live:'1'})}`, {credentials:'same-origin', cache:'no-store', signal:request.signal, headers:etag ? {'If-None-Match':etag} : {}});
+      const {response, data} = await requestHistory(`performance/server?${new URLSearchParams({period:requestedPeriod, live:'1'})}`, {signal:request.signal, headers:etag ? {'If-None-Match':etag} : {}});
       if (!dialog.open || version !== revision || request.signal.aborted || busy) return;
       if (response.status === 304) {
         if (force) $('serverPerformanceFeedback').textContent = '已检查，暂无新增的已保存采样。';
         return;
       }
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || '性能历史更新失败');
       if (!dialog.open || version !== revision || request.signal.aborted || busy) return;
       if (data.period !== requestedPeriod || !Array.isArray(data.points) || !Array.isArray(data.metrics) || !data.summary || typeof data.summary !== 'object' || !Number.isFinite(data.sample_seconds)) throw new Error('性能历史数据格式异常');
       etag = response.headers.get('ETag') || '';
@@ -56,23 +86,28 @@
   async function load(format = 'html') {
     if (busy && format !== 'html') return;
     const run = ++requestVersion; stopAutomatic(); controller?.abort(); controller = new AbortController(); busy = true; controls();
-    if (format === 'html') clearFrame();
+    if (format === 'html') { retryInitial = false; clearFrame(); }
     $('serverPerformanceFeedback').textContent = format === 'html' ? '读取已保存的性能采样…' : '生成性能报告…';
     try {
       const parameters = new URLSearchParams({period, format, theme: format === 'html' ? document.documentElement.dataset.theme || 'light' : 'light'});
       if (format === 'html') parameters.set('preview', '1');
-      const response = await fetch(`performance/server/export?${parameters}`, {credentials:'same-origin', signal:controller.signal});
-      if (!response.ok) { const data = await response.json(); throw new Error(data.detail || '性能报告读取失败'); }
-      const blob = await response.blob(); if (run !== requestVersion || !dialog.open) return;
+      const {response, data:blob} = await requestHistory(`performance/server/export?${parameters}`, {signal:controller.signal}, 'blob');
+      if (run !== requestVersion || !dialog.open) return;
       const target = URL.createObjectURL(blob), count = response.headers.get('X-Performance-Samples') || '0';
-      if (format === 'html') { url = target; $('serverPerformanceFrame').src = target; $('serverPerformanceFrame').hidden = false; }
+      if (format === 'html') { failures = 0; url = target; $('serverPerformanceFrame').src = target; $('serverPerformanceFrame').hidden = false; }
       else {
         const link = document.createElement('a'); link.href = target;
         link.download = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '')?.[1] || `mini-deploy-performance.${format}`;
         document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(target), 60000);
       }
       $('serverPerformanceFeedback').textContent = `${format === 'html' ? '已读取' : '已下载'} · ${count} 次有效采样${count === '0' ? ' · 采集通常在 30 秒内开始，过去的数据无法补回' : ' · 每 30 秒保存统计'}`;
-    } catch (error) { if (run === requestVersion && error.name !== 'AbortError') $('serverPerformanceFeedback').textContent = error.message; }
+    } catch (error) {
+      if (run === requestVersion && error.name !== 'AbortError') {
+        retryInitial = format === 'html' && error.retry !== false;
+        if (retryInitial) failures++;
+        $('serverPerformanceFeedback').textContent = error.message + (retryInitial ? ' 历史数据保留，自动更新开启时会重试，也可点击刷新。' : '');
+      }
+    }
     finally { if (run === requestVersion) { busy = false; controls(); schedule(); } }
   }
   $('serverPerformanceOpen').addEventListener('click', () => { period = '24h'; dialog.showModal(); load(); });
@@ -88,15 +123,16 @@
     if (!/^[a-f0-9]{32}$/.test(message.run) || !Number.isSafeInteger(message.ts) || typeof message.token !== 'string' || message.token.length > 80) return;
     const version = revision, source = event.source;
     try {
-      const response = await fetch(`performance/server/context?${new URLSearchParams({run:message.run, ts:message.ts})}`, {credentials:'same-origin', signal:contextController?.signal});
-      const body = await response.json();
-      if (dialog.open && version === revision) source.postMessage({type:'performance-context-response', token:message.token, scene:response.ok ? body : null, error:response.ok ? '' : body.detail || '现场读取失败'}, '*');
+      const {data:body} = await requestHistory(`performance/server/context?${new URLSearchParams({run:message.run, ts:message.ts})}`, {signal:contextController?.signal});
+      if (dialog.open && version === revision) source.postMessage({type:'performance-context-response', token:message.token, scene:body, error:''}, '*');
     } catch (error) {
-      if (dialog.open && version === revision && error.name !== 'AbortError') source.postMessage({type:'performance-context-response', token:message.token, error:'现场读取失败，请重试。'}, '*');
+      if (dialog.open && version === revision && error.name !== 'AbortError') source.postMessage({type:'performance-context-response', token:message.token, error:error.message}, '*');
     }
   });
   dialog.addEventListener('click', event => { const button = event.target.closest('[data-server-period]'); if (button) { period = button.dataset.serverPeriod; load(); } });
   $('serverPerformanceAuto').addEventListener('change', () => { if ($('serverPerformanceAuto').checked) refreshData(); else { stopAutomatic(); $('serverPerformanceFeedback').textContent = '自动更新已暂停，服务器仍持续采集。'; } });
   document.addEventListener('visibilitychange', () => { if (document.hidden) stopAutomatic(); else if (dialog.open && $('serverPerformanceAuto').checked) refreshData(); });
-  dialog.addEventListener('close', () => { requestVersion++; controller?.abort(); busy = false; clearFrame(); });
+  window.addEventListener('offline', stopAutomatic);
+  window.addEventListener('online', () => { if (dialog.open && $('serverPerformanceAuto').checked) refreshData(true); });
+  dialog.addEventListener('close', () => { requestVersion++; controller?.abort(); busy = false; retryInitial = false; clearFrame(); });
 })();

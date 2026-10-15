@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import gzip
 from collections import deque
 from contextlib import closing, contextmanager, nullcontext
 import hashlib
@@ -422,7 +423,7 @@ def report(data, theme='light'):
         .replace('__THEME__', 'dark' if theme == 'dark' else 'light').replace('__REPORT_JS__', javascript)).encode()
 
 
-def build(data, format='zip', theme='light', history=None):
+def build(data, format='zip', theme='light', history=None, *, compress=False):
     if format not in {'csv', 'html', 'zip'} or theme not in {'light', 'dark'}:
         raise ValueError('性能导出格式无效')
     output = tempfile.TemporaryFile()
@@ -430,7 +431,8 @@ def build(data, format='zip', theme='light', history=None):
         if format == 'csv':
             write_csv(output, FIELDS, csv_points(data))
         elif format == 'html':
-            output.write(report(data, theme))
+            content = report(data, theme)
+            output.write(gzip.compress(content, compresslevel=5, mtime=0) if compress else content)
         else:
             packaged = {**data, 'package': True}
             with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:

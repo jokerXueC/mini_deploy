@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import errno
 import getpass
+import gzip
 import hashlib
 import hmac
 import html
@@ -3205,8 +3206,23 @@ class Handler(BaseHTTPRequestHandler):
 
     server_version = "mini_deploy_agent/1.1"
 
-    def _write_json(self, status: int, payload: dict[str, Any], *, headers=None) -> None:
+    def _accepts_gzip(self) -> bool:
+        for encoding in self.headers.get('Accept-Encoding', '').split(','):
+            parts = [part.strip().lower() for part in encoding.split(';')]
+            if parts[0] != 'gzip':
+                continue
+            try:
+                quality = next((float(part.split('=', 1)[1]) for part in parts[1:] if part.startswith('q=')), 1.0)
+            except ValueError:
+                return False
+            return 0 < quality <= 1
+        return False
+
+    def _write_json(self, status: int, payload: dict[str, Any], *, headers=None, compress=False) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if compress and self._accepts_gzip():
+            body = gzip.compress(body, compresslevel=5, mtime=0)
+            headers = {**(headers or {}), 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding'}
         self.send_response(status)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
@@ -3321,9 +3337,11 @@ class Handler(BaseHTTPRequestHandler):
             period, format = query.get('period', ['24h'])[0], query.get('format', ['zip'])[0]
             theme = query.get('theme', ['light'])[0]
             history = _server_performance()
-            data = history.query(period)
-            data['live_detail'] = format == 'html' and query.get('preview', ['0'])[0] == '1'
-            output, length, mime = server_performance.build(data, format, theme, history)
+            preview = format == 'html' and query.get('preview', ['0'])[0] == '1'
+            data = history.query(period, None, False) if preview else history.query(period)
+            data['live_detail'] = preview
+            compressed = preview and self._accepts_gzip()
+            output, length, mime = server_performance.build(data, format, theme, history, compress=compressed)
             _audit_event('server_performance_export', actor=self.client_address[0], success=True,
                          detail={'period': period, 'format': format, 'samples': data['sample_seconds']})
             ready = True
@@ -3343,15 +3361,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', mime)
             self.send_header('Content-Length', str(length))
-            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            if compressed:
+                self.send_header('Content-Encoding', 'gzip')
+                self.send_header('Vary', 'Accept-Encoding')
+            self.send_header('Content-Disposition', f'{"inline" if preview else "attachment"}; filename="{filename}"')
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('X-Performance-Samples', str(data['sample_seconds']))
+            if preview:
+                self.send_header('X-Performance-Detail-Mode', 'on-demand')
             self.end_headers()
             while chunk := output.read(256 * 1024):
                 self.wfile.write(chunk)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log(f'server performance response interrupted: period={period} format={format} bytes={length} error={type(exc).__name__}')
         finally:
             output.close()
             request_export.SLOT.release()
@@ -3588,7 +3611,7 @@ class Handler(BaseHTTPRequestHandler):
                             self.send_header('Cache-Control', 'private, no-store')
                             self.end_headers()
                         else:
-                            self._write_json(200, history.query(period, now, False), headers={'ETag': tag})
+                            self._write_json(200, history.query(period, now, False), headers={'ETag': tag}, compress=True)
                     else:
                         self._write_json(200, history.query(period))
                 except ValueError as exc:

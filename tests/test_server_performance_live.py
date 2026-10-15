@@ -81,12 +81,13 @@ def test_automatic_poll_updates_existing_canvas_preserves_reading_and_stops_when
     frame.locator('.scene-detail:not([hidden]) summary').first.click()
     frame.locator('.scene-detail:not([hidden])').scroll_into_view_if_needed()
     scroll = frame.locator('body').evaluate('() => scrollY')
-    previous_count = demo.query(now=clock[0])['sample_seconds']
     clock[0] += 1
     demo.observe(sample(100), clock[0])
     demo.flush(clock[0], force=True)
+    # A rolling 24-hour window can expire old samples as new ones arrive.
+    expected_count = demo.query(now=clock[0])['sample_seconds']
     page.clock.run_for(15500)
-    playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text(f'{previous_count + 1} 次有效采样')
+    playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text(f'{expected_count} 次有效采样')
     page.clock.run_for(550)
     assert page.locator('#serverPerformanceFrame').get_attribute('src') == original_url
     assert frame.locator('body').evaluate('() => window.liveMarker') == 1
