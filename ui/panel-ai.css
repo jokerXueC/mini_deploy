@@ -7,7 +7,7 @@
 .panel-ai-question { font-size: 13px; margin: 0 0 12px; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
 .panel-ai-entry .tai-answer { font-size: 13px; line-height: 1.8; }
 .panel-ai-evidence { margin: 10px 0; color: var(--muted); font-size: 12px; }
-.panel-ai-evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
+.panel-ai-evidence pre { font: inherit; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
 .panel-ai-loading { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
 .panel-ai-loading img { width: 16px; height: 16px; filter: invert(1); animation: tai-spin 1.2s linear infinite; }
 html[data-theme=light] .panel-ai-loading img { filter: none; }

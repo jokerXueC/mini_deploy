@@ -23,7 +23,7 @@ from scripts.verify_backup import verify_backup
 REMOTES = {'gitee': ('https://gitee.com/XC1960/mini_deploy.git', 'master'),
            'github': ('https://github.com/jokerXueC/mini_deploy.git', 'main')}
 ENTRIES = (
-    'agent.py', 'cpu_metrics.py', 'server_operations.py', 'performance_metrics.py', 'server_performance.py', 'server_processes.py', 'resource_alerts.py', 'prometheus_metrics.py', 'panel_maintenance.py',
+    'agent.py', 'ip_security.py', 'security_observation.py', 'security_center.py', 'cpu_metrics.py', 'server_operations.py', 'performance_metrics.py', 'server_performance.py', 'server_processes.py', 'resource_alerts.py', 'prometheus_metrics.py', 'panel_maintenance.py',
     'release.json', 'certificates.py', 'certificate_discovery.py', 'nginx_runtime.py', 'nginx_install.py',
     'nginx_requests.py', 'caddy_requests.py', 'request_gateway.py', 'request_history.py', 'request_export.py', 'gateway_connections.py',
     'monitoring.py', 'container_monitoring.py', 'docker_events.py', 'docker_mirrors.py', 'ssh_terminal.py',

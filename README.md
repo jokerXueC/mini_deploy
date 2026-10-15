@@ -5,6 +5,7 @@ The name stays mini_deploy; Git-based application deployment is no longer part o
 the product.
 
 - [中文快速上手](docs/QUICKSTART.zh-CN.md)
+- [Public website preview](website/index.html) (standalone static files)
 - [首次使用与升级说明](docs/BEGINNER_DEPLOY_FLOW.zh-CN.md)
 - [Linux 验收清单](docs/LINUX_TEST.zh-CN.md)
 - [独立请求网关](docs/REQUEST_GATEWAY.zh-CN.md)
@@ -13,6 +14,7 @@ the product.
 ## Scope
 
 - CPU, memory, disk and network monitoring.
+- Security center with host/Docker risk checks, SSH login activity, configuration change baselines and unified events. Fail2ban login protection keeps backups, ban history and the current client IP protected.
 - Website availability, response latency and live TLS certificate checks: enter a URL; no proxy changes required.
 - Sustained alerts, recovery messages, repeat limits and temporary notification mute via WeCom, DingTalk or email.
 - Docker container status, logs and management; image listing, search, pull and removal.
@@ -129,7 +131,7 @@ the installer. See [Security](SECURITY.md) for remaining limitations.
 
 ## Validation Status
 
-The full automated suite passed 476 tests, with 19 skipped because Linux/Docker
-environments were unavailable. Site creation, editing and deletion also passed a UI
-test against the real backend. Linux server acceptance has not yet been performed;
+The latest security, authentication, installer, maintenance and browser regression
+run passed 233 tests, with 4 skipped because Linux tools or POSIX behavior were unavailable.
+This was a focused regression run. Linux server acceptance has not yet been performed;
 see the [checklist](docs/LINUX_TEST.zh-CN.md) and [roadmap](docs/ROADMAP.zh-CN.md).

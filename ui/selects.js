@@ -2,7 +2,7 @@
 window.AppSelects = (() => {
   const controls = new Map();
   let opened = null;
-  const selector = '#certificatesView select, #projectForm select, #requestsView select, #eventsView select, #terminalView select, #operationsDialog select, #maintenanceDialog select, #requestExportDialog select';
+  const selector = '#certificatesView select, #projectForm select, #requestsView select, #eventsView select, #terminalView select, #securityView select, #operationsDialog select, #maintenanceDialog select, #requestExportDialog select';
 
   function close(focus = false) {
     if (!opened) return;
@@ -204,9 +204,12 @@ window.AppSelects = (() => {
   });
   window.addEventListener('resize', () => close());
   document.addEventListener('scroll', event => {
-    // Only scrolling an ancestor moves the anchor. Text inputs may scroll
-    // internally on blur, just after another control opens its menu.
-    if (opened && (event.target === document || event.target.contains?.(opened.button))) close();
+    // Focus or browser scrolling can finish after the menu opens.
+    if (opened && (event.target === document || event.target.contains?.(opened.button))) {
+      const rect = opened.button.getBoundingClientRect();
+      if (rect.bottom <= 0 || rect.top >= innerHeight) close();
+      else position(opened);
+    }
   }, true);
   syncAll();
   return {syncAll, close};

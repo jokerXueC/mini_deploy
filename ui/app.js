@@ -487,8 +487,8 @@ function animateNumberText(id, value, formatter) {
 }
 
 function setView(view) {
-  activeView = ['server', 'events', 'notify', 'certificates', 'requests', 'terminal'].includes(view) ? view : 'server';
-  ['server', 'events', 'notify', 'certificates', 'requests', 'terminal'].forEach(name => {
+  activeView = ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security'].includes(view) ? view : 'server';
+  ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security'].forEach(name => {
     $(`${name}View`)?.classList.toggle('active', activeView === name);
     $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
   });
@@ -503,6 +503,7 @@ function setView(view) {
     certificates: ['域名与证书', '已发现的网站、证书有效期与线上状态。'],
     requests: ['请求记录', '后端 HTTP 请求、响应状态与耗时'],
     terminal: ['远程终端', 'SSH 连接与服务器操作'],
+    security: ['安全中心', '主机风险、登录活动与防护状态'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
@@ -522,6 +523,7 @@ function setView(view) {
   if (activeView !== 'events') window.WebsiteMonitoring?.refresh();
   window.SSHTerminal?.viewChanged(activeView);
   window.TerminalAI?.viewChanged(activeView);
+  window.IPSecurity?.viewChanged(activeView);
 }
 
 
@@ -1673,6 +1675,7 @@ $('eventsViewTab')?.addEventListener('click', () => setView('events'));
 $('notifyViewTab')?.addEventListener('click', () => setView('notify'));
 $('certificatesViewTab')?.addEventListener('click', () => setView('certificates'));
 $('requestsViewTab')?.addEventListener('click', () => setView('requests'));
+$('securityViewTab')?.addEventListener('click', () => setView('security'));
 document.querySelectorAll('[data-server-refresh]').forEach(button => {
   button.addEventListener('click', () => setServerRefreshInterval(button.dataset.serverRefresh));
 });

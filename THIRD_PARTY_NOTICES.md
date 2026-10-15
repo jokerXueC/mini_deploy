@@ -31,6 +31,10 @@ Registry SHA-512 integrity values verified when vendoring:
 
 ## Lucide Icons
 
+The public website bundles Lucide SVGs in website/assets/. Its license is
+preserved in website/assets/LUCIDE-LICENSE. Fail2ban is installed through the
+host package manager when requested; no Fail2ban or SafeLine source is bundled.
+
 The refresh-cw and ellipsis SVG icons in ui/index.html are from lucide-static
 v0.468.0 (https://lucide.dev). The SSH AI design preview also bundles SVGs from
 this version in ui/previews/ssh-ai/icons/, with the full license in that directory.

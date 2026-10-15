@@ -59,6 +59,7 @@ import docker_mirrors
 import ssh_terminal
 import terminal_ai
 import panel_diagnostics
+import ip_security
 import terminal_history
 import server_operations
 import performance_metrics
@@ -2068,6 +2069,18 @@ def _docker_images() -> list[dict[str, Any]]:
 
 _docker_image_cleanup_lock = threading.Lock()
 _docker_image_cleanup_status: dict[str, Any] = {}
+_ip_security_instance = None
+_ip_security_lock = threading.Lock()
+
+
+def _ip_security():
+    global _ip_security_instance
+    with _ip_security_lock:
+        if _ip_security_instance is None or _ip_security_instance.home != STATE_FILE.parent:
+            _ip_security_instance = ip_security.Manager(STATE_FILE.parent, AUDIT_LOG_FILE, maintenance=_maintenance_shared_lock,
+                audit=lambda action, success, detail: _audit_event('ip_security_' + action,
+                    actor=detail.pop('actor', ''), success=success, detail=detail))
+        return _ip_security_instance
 
 
 @_maintenance_shared_operation
@@ -2446,6 +2459,17 @@ def _certificate_discovery_sampler() -> None:
         time.sleep(10)
 
 
+def _security_sampler(stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            manager = _ip_security()
+            manager.scan()
+            ip_security.evaluate(_monitor(), {'history': manager.history.snapshot(), 'activity': manager.center.activity()})
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            _log(f'security observation failed: {type(exc).__name__}')
+        stop.wait(60)
+
+
 @_maintenance_shared_operation
 def _discovery_replace(data: dict[str, Any]) -> dict[str, Any]:
     with _config_transaction_lock, _nginx_lock:
@@ -2822,6 +2846,8 @@ UI_ASSET_TYPES = {
     "terminal-ai.js": "application/javascript; charset=utf-8",
     "panel-ai.js": "application/javascript; charset=utf-8",
     "panel-ai.css": "text/css; charset=utf-8",
+    "ip-security.js": "application/javascript; charset=utf-8",
+    "ip-security.css": "text/css; charset=utf-8",
     "terminal-ai.css": "text/css; charset=utf-8",
     "previews/ssh-ai/index.html": "text/html; charset=utf-8",
     "previews/ssh-ai/preview.js": "application/javascript; charset=utf-8",
@@ -3587,6 +3613,30 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._write_json(200, _realtime_metrics_payload())
             return
+        if path in {'/security/center', '/security/fail2ban'}:
+            if self._require_auth_json():
+                try:
+                    query = parse_qs(parsed.query)
+                    manager = _ip_security()
+                    if query.get('scan') == ['1'] and query.get('job') != ['1']:
+                        manager.request_scan()
+                    payload = manager.status(query.get('jail', [''])[0], query.get('job') == ['1'],
+                                             int(query.get('history_page', ['0'])[0]),
+                                             int(query.get('activity_page', ['0'])[0]), query.get('activity_source', ['all'])[0])
+                    payload.update(client_ip=_request_client_ip(self), csrf_token=self._csrf_token_for_request())
+                    if query.get('job') != ['1']:
+                        recent = [item for item in _audit_tail(lines=300) if item.get('action') in {
+                            'ip_security_configure', 'ip_security_disable', 'ip_security_configure_ssh',
+                            'ip_security_disable_ssh', 'ip_security_ban', 'ip_security_unban'}
+                            or item.get('action') == 'login' and item.get('success') is False]
+                        payload['recent'] = [{'at': item.get('at'), 'action': item.get('action'),
+                            'actor': item.get('actor'), 'success': item.get('success'),
+                            'ip': (item.get('detail') or {}).get('ip', ''),
+                            'jail': (item.get('detail') or {}).get('jail', '')} for item in reversed(recent[-40:])]
+                    self._write_json(200, payload)
+                except (ValueError, OSError, RuntimeError, sqlite3.Error) as exc:
+                    self._write_json(503, {'detail': str(exc)})
+            return
         if path == '/panel-maintenance':
             if self._require_auth_json():
                 try:
@@ -3799,6 +3849,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path in {'/security/center', '/security/fail2ban'}:
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=8192)
+                    client_ip = _request_client_ip(self)
+                    _audit_event('ip_security_requested', actor=client_ip, detail={'action': str(data.get('action', ''))[:32]})
+                    self._write_json(202, _ip_security().start(data, client_ip))
+                except ValueError as exc:
+                    self._write_json(400, {'detail': str(exc)})
+                except (OSError, RuntimeError) as exc:
+                    self._write_json(503, {'detail': str(exc)})
+            return
         if path == '/metrics/access':
             if self._require_auth_json():
                 try:
@@ -4356,6 +4418,9 @@ def main() -> None:
                                            name="docker-image-cleanup", daemon=True)
     image_cleanup_worker.start()
     threading.Thread(target=_certificate_discovery_sampler, name="certificate-discovery-sampler", daemon=True).start()
+    security_stop = threading.Event()
+    security_worker = threading.Thread(target=_security_sampler, args=(security_stop,), name='security-observer', daemon=True)
+    security_worker.start()
     history_stop = threading.Event()
     history_worker = threading.Thread(target=request_history.Collector(_request_history()).run,
         args=(history_stop, _log), name="request-history-sampler", daemon=True)
@@ -4369,6 +4434,7 @@ def main() -> None:
         history_stop.set()
         performance_stop.set()
         image_cleanup_stop.set()
+        security_stop.set()
         if _ssh_manager_instance is not None:
             _ssh_manager_instance.shutdown()
         if _ai_manager_instance is not None:
@@ -4377,6 +4443,7 @@ def main() -> None:
         history_worker.join(timeout=10)
         performance_worker.join(timeout=10)
         image_cleanup_worker.join(timeout=5)
+        security_worker.join(timeout=5)
         try:
             _server_performance().flush(force=True)
         except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:

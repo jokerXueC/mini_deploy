@@ -18,7 +18,7 @@
   const duration = value => Number.isFinite(value) ? (value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(2)} ms`) : '-';
   const feedback = message => { el('monitorFeedback').textContent = message; };
   const sources = {docker: '容器', container: '容器', server: '服务器资源', cpu: '处理器', memory: '内存', disk: '磁盘',
-    resource: '服务器资源', website: '网站探测', health: '服务健康检查', certificate: '证书', monitoring: '监测服务', docker_events: '容器生命周期'};
+    resource: '服务器资源', website: '网站探测', health: '服务健康检查', certificate: '证书', monitoring: '监测服务', security: '基础防护', docker_events: '容器生命周期'};
   const sourceName = source => sources[source] || (source ? `其他来源（${source}）` : '来源未提供');
   const severityName = level => ({critical: '严重', warning: '警告', info: '提示', success: '恢复'}[level] || '提示');
   const activeAlerts = () => (snapshot.alerts || []).filter(item => item.active !== false);
@@ -30,7 +30,7 @@
   const reasonNames = {oom: '内存溢出', oom_killed: '内存溢出退出', restarts: '反复重启', restart_storm: '反复重启',
     health: '健康检查失败', unhealthy: '健康检查失败', exit: '异常退出', abnormal_exit: '异常退出',
     configured_container_missing: '配置容器未找到', container_disappeared: '容器消失', missing: '容器未找到', not_running: '容器未运行',
-    cpu:'CPU 持续超限', memory:'内存持续超限', disk:'根分区空间不足', inode:'inode 不足', swap:'Swap 占用高', iowait:'I/O 等待高', load:'系统负载高', memory_growth:'内存持续增长'};
+    cpu:'CPU 持续超限', memory:'内存持续超限', disk:'根分区空间不足', inode:'inode 不足', swap:'Swap 占用高', iowait:'I/O 等待高', load:'系统负载高', memory_growth:'内存持续增长', ban_burst:'短时多次 IP 封禁', ssh_failure_burst:'SSH 集中认证失败'};
   const metadata = item => {
     const meta = item.metadata || {};
     return {...meta, container: meta.container ?? meta.name, container_id: meta.container_id ?? meta.id,
@@ -74,6 +74,7 @@
 
   function guidance(item) {
     const meta = metadata(item);
+    if (item.source === 'security') return '打开安全中心查看登录来源、封禁时间和关联规则，核对是否存在正常重试或误封。';
     if (meta.oom_killed) return '检查容器内存限制、宿主机余量及退出前的日志，排查内存峰值后再恢复服务。';
     if (meta.reason === 'configured_container_missing' || historyStatus(item) === 'disappeared') return '核对配置的容器名称与项目部署状态，确认容器是否重建或被移除。';
     if (item.source === 'certificate') return '检查证书到期时间、续期任务及线上证书是否已替换。';
@@ -92,7 +93,7 @@
       ['exit_code', '退出码'], ['oom_killed', '内存溢出'], ['restart_count', '重启次数'], ['restart_delta_5m', '近 5 分钟重启增量'],
       ['restart_window_seconds', '重启统计窗口（秒）'], ['restart_policy', '重启策略'], ['started_at', '启动时间'], ['finished_at', '退出时间'],
       ['health_exit_code', '健康检查退出码'], ['health_checked_at', '健康检查时间'], ['health_output', '健康检查输出'], ['action', '容器事件'], ['reason', '原因'],
-      ['value', '采样值'], ['threshold', '阈值'], ['unit', '单位'], ['recovering', '正在确认恢复']];
+      ['value', '采样值'], ['threshold', '阈值'], ['unit', '单位'], ['recovering', '正在确认恢复'], ['ban_count', '近 10 分钟封禁次数'], ['login_failure_count', '集中认证失败次数'], ['ip_count', '涉及 IP 数']];
     const entries = fields.filter(([key]) => meta[key] !== undefined && meta[key] !== null && meta[key] !== '')
       .map(([key, label]) => `<div><dt>${label}</dt><dd>${text(key === 'reason' ? reasonNames[meta[key]] || meta[key] : typeof meta[key] === 'boolean' ? meta[key] ? '是' : '否' : meta[key])}</dd></div>`);
     if (item.incident_id) entries.push(`<div><dt>异常 ID</dt><dd>${text(item.incident_id)}</dd></div>`);
@@ -103,7 +104,7 @@
       <p class="incident-guidance">${text(guidance(item))}</p>
       ${current && item.stale ? '<p>采样待更新，当前异常尚未恢复。</p>' : ''}
       <div class="certificate-actions">${item.id ? `<button type="button" class="ghost-button compact-action" data-incident-diagnose="${text(item.id)}">排查异常</button><button type="button" class="ghost-button compact-action" data-incident-ai="${text(item.id)}">AI 诊断</button>` : ''}${container ? `<button type="button" class="ghost-button compact-action" data-incident-log="${text(container)}">查看容器日志</button>` : ''}
-      ${item.source === 'certificate' ? '<a class="ghost-button compact-action" href="?view=certificates" data-incident-certificate>查看证书</a>' : ''}</div></div>`;
+      ${item.source === 'security' ? '<a class="ghost-button compact-action" href="?view=security">安全中心</a>' : ''}${item.source === 'certificate' ? '<a class="ghost-button compact-action" href="?view=certificates" data-incident-certificate>查看证书</a>' : ''}</div></div>`;
   }
 
   function replaceRows(id, html) {
@@ -147,13 +148,13 @@
     el('alertBadge').textContent = alerts.length ? `${alerts.length} 项异常` : loaded ? '暂无当前异常' : '等待采样';
     el('eventTimelineHint').textContent = alerts.length ? `${critical} 项严重 · ${alerts.length - critical} 项其他异常 · ${acknowledged} 项已知晓` : loaded ? '暂无当前异常，采样覆盖见下方' : '等待监测采样';
     const coverage = snapshot.coverage || {};
-    const coverageKeys = ['server', 'docker', ...(coverage.docker_events ? ['docker_events'] : [])];
+    const coverageKeys = ['server', 'docker', ...(coverage.docker_events ? ['docker_events'] : []), ...(coverage.security ? ['security'] : [])];
     const latestSample = Math.max(0, ...coverageKeys.map(key => Number(coverage[key]?.checked_at) || 0));
     el('incidentCoverage').innerHTML = coverageKeys.map(key => {
       const sample = coverage[key] || {};
       const fresh = Number(sample.checked_at) > 0 && Date.now() / 1000 - sample.checked_at <= 120;
       const available = !loadError && sample.status === 'healthy' && fresh;
-      return `<span class="incident-coverage-item ${available ? 'available' : ''}" title="${text(sample.detail || '服务未提供采样详情')}">${{server: '服务器', docker: '容器', docker_events: '容器生命周期'}[key]} · ${available ? '采样可用' : sample.status === 'disabled' ? '告警暂停' : sample.status === 'not_installed' ? '未安装' : '采样未知'}</span>`;
+      return `<span class="incident-coverage-item ${available ? 'available' : ''}" title="${text(sample.detail || '服务未提供采样详情')}">${{server: '服务器', docker: '容器', docker_events: '容器生命周期', security: '基础防护'}[key]} · ${available ? '采样可用' : sample.status === 'disabled' ? '告警暂停' : sample.status === 'not_installed' ? '未安装' : '采样未知'}</span>`;
     }).join('') + (latestSample ? `<small>最近采样 ${text(time(latestSample))}</small>` : '');
     el('acknowledgeAllBtn').disabled = busy || !alerts.some(item => !item.acknowledged_at);
     const severity = el('incidentSeverity').value, source = el('incidentSource').value, state = el('incidentStatus').value;
