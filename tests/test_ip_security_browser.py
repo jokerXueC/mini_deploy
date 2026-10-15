@@ -103,7 +103,7 @@ def test_security_center_risks_unified_events_filters_and_refresh(page, http_ser
     monkeypatch.setattr(agent, '_ip_security', lambda: manager)
     now = time.time()
     with manager.history.connection() as db:
-        for n in range(60):
+        for n in range(9):
             db.execute('INSERT INTO security_activity VALUES (?,?,?,?,?,?,?,?)',
                        (str(n), now - 5 - n, 'ssh', 'login_failure', f'198.51.100.{n + 1}', 'root', 'SSH', 'SSH password 认证失败'))
         db.execute('INSERT INTO security_activity VALUES (?,?,?,?,?,?,?,?)', ('success', now - 100, 'ssh', 'login_success', '192.0.2.8', 'deploy', 'SSH', '认证成功'))
@@ -117,9 +117,19 @@ def test_security_center_risks_unified_events_filters_and_refresh(page, http_ser
     playwright.expect(page.locator('#panelTitle')).to_have_text('安全中心')
     playwright.expect(page.locator('#securityRiskCount')).to_have_text('3')
     assert page.locator('#securityProtection').get_attribute('open') is None
-    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(50)
+    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(10)
+    playwright.expect(page.locator('#securityActivityPage')).to_have_text('第 1 / 2 页 · 1–10 条，共 12 条')
+    playwright.expect(page.locator('#securityActivityPrev')).to_be_disabled()
+    playwright.expect(page.locator('#securityActivityNext')).to_be_enabled()
+    assert page.locator('#securityActivityList').evaluate('(el) => el.scrollHeight <= el.clientHeight + 1')
+    page.screenshot(path=str(tmp_path / f'security-pagination-{width}-{theme}.png'), full_page=True)
     page.locator('#securityActivityNext').click()
-    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(13)
+    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(2)
+    playwright.expect(page.locator('#securityActivityPage')).to_have_text('第 2 / 2 页 · 11–12 条，共 12 条')
+    playwright.expect(page.locator('#securityActivityNext')).to_be_disabled()
+    page.locator('#securityActivityPrev').click()
+    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(10)
+    playwright.expect(page.locator('#securityActivityPrev')).to_be_disabled()
     page.get_by_role('combobox', name='事件来源').click()
     page.get_by_role('option', name='配置变化', exact=True).click()
     playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(1)

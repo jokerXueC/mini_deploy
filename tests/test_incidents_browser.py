@@ -73,7 +73,7 @@ def incidents(dashboard):
 
     page.route("**/monitoring", monitoring)
     # Old dismissals deliberately match the alert's legacy signature.
-    page.add_init_script("localStorage.setItem('mini_deploy-dismissed-notices', JSON.stringify(['alert||critical|api 内存溢出退出|docker|', 'event|recovery|success|网站已恢复|website||HTTP 200|']));")
+    page.add_init_script("try { localStorage.setItem('mini_deploy-dismissed-notices', JSON.stringify(['alert||critical|api 内存溢出退出|docker|', 'event|recovery|success|网站已恢复|website||HTTP 200|'])); } catch (_) {}")
     page.goto(f"{origin}/ui?view=events")
     playwright.expect(page.locator("#alertBadge")).to_have_text("5 项异常")
     yield page, state, control

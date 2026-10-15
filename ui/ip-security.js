@@ -27,7 +27,7 @@
     const waiting = busy || loading, unavailable = waiting || status.read_only;
     $('ipSecurityRefresh').disabled = waiting;
     $('securityActivityPrev').disabled = waiting || activityPage === 0;
-    $('securityActivityNext').disabled = waiting || (activityPage + 1) * 50 >= (status.activity?.total || 0);
+    $('securityActivityNext').disabled = waiting || (activityPage + 1) * (status.activity?.page_size || 50) >= (status.activity?.total || 0);
     $('securityActivitySource').disabled = waiting;
     $('ipSecuritySetup').disabled = unavailable || !status.supported;
     $('ipSecurityDisable').disabled = unavailable;
@@ -133,7 +133,10 @@
     $('securityActivityNote').textContent = `已采集 SSH 成功 ${activity.login_success_24h || 0} 次、失败 ${activity.login_failure_24h || 0} 次（24 小时）${activity.auth?.limited ? ' · 日志存在采集空档或达到上限' : ''}`;
     $('securityActivityList').innerHTML = (activity.items || []).length ? activity.items.map(item => `<details class="security-event" data-event="${text(item.id)}" data-kind="${text(item.kind)}" ${expandedEvents.has(item.id) ? 'open' : ''}><summary><time>${text(date(item.ts))}</time><span class="security-event-kind">${labels[item.kind] || '记录'}</span><strong>${text(item.ip || item.target)}</strong><span class="security-event-account">${text(item.account || sourceLabels[item.source] || '')}</span></summary><div class="security-event-detail"><span>${text(item.target)}</span><p>${text(item.detail)}</p></div></details>`).join('') : `<p class="security-empty">暂无已采集的安全事件。${text(activity.auth?.detail || '等待后台采集')} 不代表历史上没有活动。</p>`;
     $('securityActivityRetention').textContent = activity.notice || '仅显示已采集事件，停机或日志轮转可能留下空档。';
-    $('securityActivityPage').textContent = `第 ${activityPage + 1} 页 · 共 ${activity.total || 0} 条`;
+    const total = activity.total || 0, pageSize = activity.page_size || 50;
+    const start = (activity.items || []).length ? activityPage * pageSize + 1 : 0;
+    const end = start ? start + activity.items.length - 1 : 0;
+    $('securityActivityPage').textContent = `第 ${activityPage + 1} / ${Math.max(1, Math.ceil(total / pageSize))} 页 · ${start}–${end} 条，共 ${total} 条`;
   }
   async function refresh(scan = false) {
     if (loading || busy || !view) return;

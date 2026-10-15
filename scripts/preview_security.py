@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent  # noqa: E402
-from security_center import finding  # noqa: E402
+from security_center import ACTIVITY_PAGE_SIZE, finding  # noqa: E402
 from scripts.preview_operations import Handler as OperationsHandler  # noqa: E402
 
 
@@ -74,6 +74,10 @@ class Handler(OperationsHandler):
                 data['activity']['items'] = [item for item in data['activity']['items'] if item['source'] == source]
                 data['activity']['total'] = len(data['activity']['items'])
                 data['activity']['source'] = source
+            activity = data['activity']
+            page = max(0, int(query.get('activity_page', ['0'])[0]))
+            activity.update(page=page, page_size=ACTIVITY_PAGE_SIZE)
+            activity['items'] = activity['items'][page * ACTIVITY_PAGE_SIZE:(page + 1) * ACTIVITY_PAGE_SIZE]
             data['csrf_token'] = self._csrf_token_for_request()
             self._write_json(200, data)
         else:

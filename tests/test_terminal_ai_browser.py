@@ -580,7 +580,8 @@ def test_real_insecure_http_requires_confirmation_then_supports_claude_and_ssh(p
     assert 'http-input' in json.dumps(model_server.calls[-1][2])
     page.locator('#aiPanelClose').click()
     page.locator('#sshDisconnect').click()
-    page.goto(origin + '/logout')
+    # Redirects bypass the route shim and would resolve the reserved .test host.
+    page.evaluate("fetch('/logout', {redirect:'manual'}).then(response => response.type)")
     page.context.add_cookies([{'name': agent.COOKIE_NAME, 'value': agent._make_session_cookie(), 'url': origin}])
     page.goto(origin + '/ui?view=terminal')
     playwright.expect(page.locator('#sshHost')).to_be_disabled()

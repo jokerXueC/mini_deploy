@@ -117,81 +117,6 @@ function selectedDownloadLines(selectId, inputId, currentValue = 200) {
   return positiveLineCount(value, currentValue);
 }
 
-function closeLogSelectMenus(except = null) {
-  document.querySelectorAll('.log-select').forEach(root => {
-    if (root === except) return;
-    root.classList.remove('open');
-    const button = root.querySelector('.log-select-button');
-    const menu = root.querySelector('.log-select-menu');
-    if (button) button.setAttribute('aria-expanded', 'false');
-    if (menu) menu.hidden = true;
-  });
-}
-
-function enhanceLogSelect(selectId) {
-  const select = $(selectId);
-  if (!select || select.dataset.enhanced === '1') return;
-  select.dataset.enhanced = '1';
-
-  const root = document.createElement('div');
-  root.className = 'log-select';
-  root.dataset.selectFor = selectId;
-
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'log-select-button';
-  button.setAttribute('aria-haspopup', 'listbox');
-  button.setAttribute('aria-expanded', 'false');
-  button.innerHTML = '<span></span><span class="select-caret" aria-hidden="true"></span>';
-
-  const menu = document.createElement('div');
-  menu.className = 'log-select-menu';
-  menu.setAttribute('role', 'listbox');
-  menu.hidden = true;
-
-  function syncLabel() {
-    const selected = select.options[select.selectedIndex];
-    button.querySelector('span').textContent = selected ? selected.textContent : select.value;
-    menu.querySelectorAll('.log-select-option').forEach(option => {
-      const active = option.dataset.value === select.value;
-      option.classList.toggle('active', active);
-      option.setAttribute('aria-selected', active ? 'true' : 'false');
-    });
-  }
-
-  Array.from(select.options).forEach(item => {
-    const option = document.createElement('button');
-    option.type = 'button';
-    option.className = 'log-select-option';
-    option.setAttribute('role', 'option');
-    option.dataset.value = item.value;
-    option.textContent = item.textContent;
-    option.addEventListener('click', () => {
-      select.value = item.value;
-      syncLabel();
-      closeLogSelectMenus();
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    menu.appendChild(option);
-  });
-
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    const willOpen = menu.hidden;
-    closeLogSelectMenus(root);
-    root.classList.toggle('open', willOpen);
-    menu.hidden = !willOpen;
-    button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
-  });
-  root.addEventListener('click', event => event.stopPropagation());
-  select.addEventListener('change', syncLabel);
-
-  root.appendChild(button);
-  root.appendChild(menu);
-  select.insertAdjacentElement('afterend', root);
-  syncLabel();
-}
-
 function containerLogFilterOptions() {
   const level = $('containerLogFilterSelect')?.value || 'all';
   const keyword = ($('containerLogKeywordInput')?.value || '').trim();
@@ -1351,6 +1276,7 @@ function renderSystemStatus(system = {}) {
 }
 
 function closeContainerLogsModal() {
+  window.AppSelects?.close();
   const modal = $('containerLogsModal');
   if (modal) modal.hidden = true;
 }
@@ -1737,9 +1663,6 @@ document.addEventListener('click', async (event) => {
     window.setTimeout(() => { delete code.dataset.copied; }, 900);
   } catch (_) {}
 });
-document.addEventListener('click', () => {
-  closeLogSelectMenus();
-});
 document.addEventListener('pointermove', (event) => {
   const point = event.target?.closest?.('.trend-point');
   if (!point) return;
@@ -1765,7 +1688,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     hideTrendTooltip();
     if (closeConfirmDialog(false)) return;
-    closeLogSelectMenus();
+    window.AppSelects?.close();
     closeContainerLogsModal();
   }
 });
@@ -1801,7 +1724,6 @@ $('containerLogKeywordInput').addEventListener('input', () => {
   containerLogKeywordTimer = window.setTimeout(refreshOpenContainerLogs, 350);
 });
 $('downloadContainerLogBtn').addEventListener('click', downloadCurrentContainerLog);
-['containerLogLineSelect', 'containerLogDownloadSelect', 'containerLogFilterSelect', 'containerLogContextSelect'].forEach(enhanceLogSelect);
 syncCustomLineInput('containerLogLineSelect', 'containerLogLineCustomInput', currentContainerLogLineLimit);
 syncCustomLineInput('containerLogDownloadSelect', 'containerLogDownloadCustomInput', currentContainerLogLineLimit);
 syncContainerLogFilterControls();

@@ -2,12 +2,14 @@
 window.AppSelects = (() => {
   const controls = new Map();
   let opened = null;
-  const selector = '#certificatesView select, #projectForm select, #requestsView select, #eventsView select, #terminalView select, #securityView select, #operationsDialog select, #maintenanceDialog select, #requestExportDialog select';
+  const selector = '#certificatesView select, #projectForm select, #requestsView select, #eventsView select, #terminalView select, #securityView select, #containerLogsModal select, #operationsDialog select, #maintenanceDialog select, #requestExportDialog select';
+  const anchorObserver = new ResizeObserver(() => { if (opened) position(opened); });
 
   function close(focus = false) {
     if (!opened) return;
     const state = opened;
     opened = null;
+    anchorObserver.disconnect();
     state.menu.hidden = true;
     state.button.setAttribute('aria-expanded', 'false');
     state.button.removeAttribute('aria-activedescendant');
@@ -16,14 +18,21 @@ window.AppSelects = (() => {
 
   function position(state) {
     const rect = state.button.getBoundingClientRect();
-    if (!rect.width || !rect.height) { close(); return; }
-    const below = innerHeight - rect.bottom - 12;
-    const above = rect.top - 12;
-    const up = below < 180 && above > below;
-    const space = Math.max(60, Math.min(280, up ? above : below));
-    state.menu.style.width = `${Math.min(rect.width, innerWidth - 24)}px`;
-    state.menu.style.left = `${Math.max(12, Math.min(rect.left, innerWidth - rect.width - 12))}px`;
-    state.menu.style.maxHeight = `${space}px`;
+    if (!rect.width || !rect.height || rect.bottom <= 0 || rect.top >= innerHeight) { close(); return; }
+    const viewportWidth = document.documentElement.clientWidth;
+    const availableWidth = Math.max(0, viewportWidth - 24);
+    // Menus fit their labels independently of compact trigger widths.
+    state.menu.style.minWidth = `${Math.min(192, availableWidth)}px`;
+    state.menu.style.maxWidth = `${availableWidth}px`;
+    state.menu.style.width = 'max-content';
+    const naturalWidth = Math.min(480, state.menu.getBoundingClientRect().width);
+    const width = Math.min(availableWidth, Math.max(rect.width, naturalWidth));
+    state.menu.style.width = `${width}px`;
+    state.menu.style.left = `${Math.max(12, Math.min(rect.left, viewportWidth - width - 12))}px`;
+    const below = innerHeight - rect.bottom - 18;
+    const above = rect.top - 18;
+    const up = below < Math.min(320, state.menu.scrollHeight) && above > below;
+    state.menu.style.maxHeight = `${Math.max(0, Math.min(320, up ? above : below))}px`;
     state.menu.style.top = up ? 'auto' : `${rect.bottom + 6}px`;
     state.menu.style.bottom = up ? `${innerHeight - rect.top + 6}px` : 'auto';
   }
@@ -47,7 +56,9 @@ window.AppSelects = (() => {
 
   function sync(state) {
     const {select, button} = state;
-    button.querySelector('.form-select-value').textContent = select.selectedOptions[0]?.textContent || '请选择';
+    const value = select.selectedOptions[0]?.textContent || '请选择';
+    button.querySelector('.form-select-value').textContent = value;
+    button.title = value;
     button.disabled = select.matches(':disabled');
     button.setAttribute('aria-required', String(select.required));
     if (select.validity.valid) {
@@ -74,6 +85,9 @@ window.AppSelects = (() => {
     sync(state);
     if (state.button.disabled) return;
     close();
+    // AI controls may move into a modal after initialization.
+    const host = state.button.closest('dialog') || document.body;
+    if (state.menu.parentElement !== host) host.appendChild(state.menu);
     state.menu.replaceChildren();
     Array.from(state.select.options).forEach((option, index) => {
       const item = document.createElement('div');
@@ -92,6 +106,7 @@ window.AppSelects = (() => {
     state.button.setAttribute('aria-expanded', 'true');
     position(state);
     highlight(state, state.select.selectedIndex);
+    anchorObserver.observe(state.button);
   }
 
   function bind(select) {
@@ -105,7 +120,7 @@ window.AppSelects = (() => {
     button.setAttribute('role', 'combobox');
     button.setAttribute('aria-haspopup', 'listbox');
     button.setAttribute('aria-expanded', 'false');
-    const label = select.closest('label');
+    const label = select.labels?.[0] || select.closest('label');
     const labelText = label?.querySelector('span')?.textContent || Array.from(label?.childNodes || [])
       .filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim();
     button.setAttribute('aria-label', labelText || select.getAttribute('aria-label') || '选择选项');
@@ -134,7 +149,10 @@ window.AppSelects = (() => {
     dialog?.addEventListener('close', () => { if (opened === state) close(); });
     button.addEventListener('click', event => { event.preventDefault(); opened === state ? close() : open(state); });
     button.addEventListener('keydown', event => {
-      if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+      if (event.key === 'Escape') {
+        if (opened === state) { event.preventDefault(); event.stopPropagation(); close(); }
+        return;
+      }
       if (event.key === 'Tab') { close(); return; }
       if (['Enter', ' '].includes(event.key)) {
         event.preventDefault();
@@ -202,7 +220,10 @@ window.AppSelects = (() => {
   document.addEventListener('pointerdown', event => {
     if (opened && !opened.root.contains(event.target) && !opened.menu.contains(event.target)) close();
   });
-  window.addEventListener('resize', () => close());
+  window.addEventListener('resize', () => { if (opened) position(opened); });
+  document.addEventListener('close', event => {
+    if (opened && event.target.contains(opened.button)) close();
+  }, true);
   document.addEventListener('scroll', event => {
     // Focus or browser scrolling can finish after the menu opens.
     if (opened && (event.target === document || event.target.contains?.(opened.button))) {

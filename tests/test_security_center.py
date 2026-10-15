@@ -120,8 +120,12 @@ def test_journal_login_history_deduplicates_survives_restart_filters_and_paginat
     scanner.scan(facts())
     scanner.scan(facts())
     result = scanner.activity()
-    assert result['total'] == 62 and len(result['items']) == 50 and result['login_failure_24h'] == 61
-    assert len(scanner.activity(1, 'ssh')['items']) == 12 and scanner.activity(0, 'config')['total'] == 0
+    assert result['total'] == 62 and len(result['items']) == 10 and result['login_failure_24h'] == 61
+    assert result['page_size'] == 10
+    pages = [scanner.activity(page, 'ssh')['items'] for page in range(7)]
+    assert [len(items) for items in pages] == [10, 10, 10, 10, 10, 10, 2]
+    assert len({item['id'] for items in pages for item in items}) == 62
+    assert scanner.activity(0, 'config')['total'] == 0
     restored = Center(scanner.history, runner=scanner.run, which=scanner.which, config_root=root, clock=scanner.clock)
     assert restored.activity()['total'] == 62
     state['fail'].add('journalctl')

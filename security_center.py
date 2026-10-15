@@ -18,6 +18,7 @@ DOCKER_FORMAT = ('{"id":{{json .Id}},"name":{{json .Name}},"privileged":{{json .
                  '"network":{{json .HostConfig.NetworkMode}},"pid":{{json .HostConfig.PidMode}},'
                  '"capabilities":{{json .HostConfig.CapAdd}},"mounts":{{json .Mounts}}}')
 SSH_MATCH = ['_SYSTEMD_UNIT=ssh.service', '+', '_SYSTEMD_UNIT=sshd.service', '+', '_COMM=sshd', '+', '_COMM=sshd-session']
+ACTIVITY_PAGE_SIZE = 10
 SCHEMA = '''CREATE TABLE IF NOT EXISTS security_activity (
  id TEXT PRIMARY KEY, ts REAL NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
  ip TEXT NOT NULL, account TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL);
@@ -243,9 +244,9 @@ class Center:
                 'notice': '只读检查常见位置与运行中容器。配置摘要首次建立基线；未覆盖项不代表安全。'}
 
     def activity(self, page=0, source='all'):
-        if type(page) is not int or not 0 <= page <= 800 or source not in {'all', 'ssh', 'config', 'fail2ban'}:
+        if type(page) is not int or not 0 <= page <= 4000 or source not in {'all', 'ssh', 'config', 'fail2ban'}:
             raise ValueError('安全事件筛选无效')
-        empty = {'items': [], 'total': 0, 'page': page, 'source': source, 'login_success_24h': 0,
+        empty = {'items': [], 'total': 0, 'page': page, 'page_size': ACTIVITY_PAGE_SIZE, 'source': source, 'login_success_24h': 0,
                  'login_failure_24h': 0, 'config_changes_24h': 0, 'auth': {'readable': False, 'detail': '等待后台采集'}}
         if not self.history.path.exists():
             return empty
@@ -256,7 +257,7 @@ class Center:
             combined = "(SELECT * FROM security_activity UNION ALL SELECT id,ts,'fail2ban' AS source,kind,ip,'' AS account,jail AS target,reason AS detail FROM events WHERE kind != 'failure')"
             predicate = 'ts >= ?' + (' AND source=?' if source != 'all' else '')
             args = [cutoff] + ([source] if source != 'all' else [])
-            items = db.execute('SELECT * FROM ' + combined + ' WHERE ' + predicate + ' ORDER BY ts DESC,id DESC LIMIT 50 OFFSET ?', (*args, page * 50)).fetchall()
+            items = db.execute('SELECT * FROM ' + combined + ' WHERE ' + predicate + ' ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?', (*args, ACTIVITY_PAGE_SIZE, page * ACTIVITY_PAGE_SIZE)).fetchall()
             total = db.execute('SELECT COUNT(*) FROM ' + combined + ' WHERE ' + predicate, args).fetchone()[0]
             counts = dict(db.execute('SELECT kind,COUNT(*) FROM security_activity WHERE ts BETWEEN ? AND ? GROUP BY kind',
                                      (self.clock() - 86400, self.clock())).fetchall())
