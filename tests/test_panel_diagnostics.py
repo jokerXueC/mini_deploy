@@ -189,3 +189,60 @@ def test_sparse_long_history_keeps_peak_separate_from_sampled_trend(evidence):
     data = execute(backend, 'get_panel_performance')
     assert len(data['trend']) == 96 and data['point_count'] == 200
     assert data['peak_samples']['cpu_percent']['ts'] == points[103]['ts']
+
+
+@pytest.mark.parametrize('period', ['24h', '7d'])
+def test_large_performance_evidence_keeps_full_window_statistics_and_events(evidence, monkeypatch, period):
+    now = int(time.time())
+    monkeypatch.setattr(diagnostics.time, 'time', lambda: now)
+    backend = evidence.backend({'kind': 'performance', 'period': period})
+    report = evidence.history.query(period, include_details=False)
+    events = [{'at_ts': int(time.time()) - n, 'id': f'event-{n}',
+               'detail': '历史事件现场 ' * 500, 'token': 'private-event'} for n in range(40)]
+    backend.monitor = lambda: {'alerts': [], 'events': events}
+    result = backend.execute(backend.plan('get_panel_performance', {}), threading.Event())
+    assert len(result['output']) > 100000
+    assert result['exit_code'] == 0 and result['truncated'] is False
+    assert 'private-event' not in result['output']
+    data = json.loads(result['output'])['evidence']
+    assert data['period'] == period
+    assert data['since'] == report['since'] and data['until'] == report['until']
+    assert data['summary'] == report['summary']
+    assert data['peak_samples']['cpu_percent']['cpu_percent_peak'] == 98
+    assert data['point_count'] == len(report['points'])
+    assert len(data['events']) == 40 and data['events'][-1]['id'] == 'event-39'
+    scene = data['process_scenes'][0]
+    assert execute(backend, 'get_panel_process_scene', {'run': scene['run'], 'ts': scene['ts']})['processes'][0]['pid'] == 123
+
+
+def test_large_process_scene_can_be_read_without_losing_processes(evidence):
+    backend = evidence.backend({'kind': 'performance', 'period': '24h'})
+    scene = execute(backend, 'get_panel_performance')['process_scenes'][0]
+    original = evidence.history.context(scene['run'], scene['ts'])
+    processes = [{**original['processes'][0], 'pid': n + 1, 'name': f'worker-{n}'} for n in range(2000)]
+    backend.history = lambda: SimpleNamespace(context=lambda run, ts: {**original, 'processes': processes})
+    result = backend.execute(backend.plan('get_panel_process_scene', {'run': scene['run'], 'ts': scene['ts']}), threading.Event())
+    assert len(result['output']) > 100000 and result['truncated'] is False
+    assert json.loads(result['output'])['evidence']['processes'] == processes
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_large_performance_result_reaches_model(http_server, manager, model_server, evidence, monkeypatch, protocol):
+    manager.save(ai_tests.config(model_server, protocol))
+    events = [{'at_ts': int(time.time()) - n, 'id': f'large-evidence-{n}',
+               'detail': '历史事件现场 ' * 500} for n in range(40)]
+    monkeypatch.setattr(agent, '_monitor', lambda: SimpleNamespace(snapshot=lambda: {'alerts': [], 'events': events}))
+
+    def respond(body, count):
+        text = json.dumps(body, ensure_ascii=False)
+        assert len(text) > 100000 and 'large-evidence-39' in text
+        assert '证据过大' not in text and 'cpu_percent_peak' in text
+        return answer(protocol)
+
+    model_server.content = respond
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', {
+        **ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'performance', 'period': '24h'}})
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    assert done['status'] == 'done' and done['events'][0]['status'] == 'done'
+    assert model_server.calls

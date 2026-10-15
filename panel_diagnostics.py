@@ -140,9 +140,7 @@ class Backend:
             data['events'] = [e for e in current['events'] if since <= (e.get('at_ts') or 0) <= until][:40]
             data['context_notice'] = report.get('context_notice')
         result = scrub({'target': self.target, 'source': name, 'checked_at': time.time(), 'evidence': data})
-        encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
-        if len(encoded) > 100000:
-            raise terminal_tools.ToolError('证据过大；请选择较短性能范围或单独读取进程现场')
+        encoded = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
         return {'exit_code': 0, 'output': encoded, 'truncated': False}
 
     def _incident_logs(self, evidence):
