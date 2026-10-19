@@ -47,11 +47,65 @@
     if (button) { period = button.dataset.performancePeriod; load(); }
   });
   dialog.addEventListener('close', () => { generation++; controller?.abort(); });
+  el('performanceValues').innerHTML = `<section><div class="swap-heading"><h3>Swap</h3><label class="swap-control"><input id="hostSwapToggle" type="checkbox" role="switch" aria-label="启用 Swap" disabled><span aria-hidden="true"></span></label></div><strong id="hostSwapValue">-</strong><p id="hostSwapUsage"></p><p id="hostSwapFeedback" role="status">展开后读取主机 Swap 配置</p><button id="hostSwapRetry" type="button" class="ghost-button compact-action" hidden>重试保存开机配置</button></section><section id="performanceInode"></section><section id="performanceDiskIO"></section>`;
+  let swapState = {}, swapPending = false, swapLoading = false, swapTimer, swapDesired = null;
+  const swapToggle = el('hostSwapToggle');
+  function renderSwap() {
+    swapToggle.checked = swapPending && swapDesired !== null ? swapDesired : Boolean(swapState.owned ? swapState.managed_active : swapState.enabled);
+    swapToggle.disabled = swapPending || swapLoading || !swapState.editable;
+    swapToggle.setAttribute('aria-busy', String(swapPending));
+    el('hostSwapRetry').hidden = !swapState.managed_active || swapState.persistent || !swapState.editable;
+    el('hostSwapRetry').disabled = swapPending || swapLoading;
+    el('hostSwapFeedback').textContent = swapState.job?.detail || swapState.detail || '正在读取主机配置…';
+    swapToggle.title = swapPending ? '正在处理，请稍候' : swapState.detail || '启用 Swap';
+  }
+  async function loadSwap() {
+    if (swapLoading) return;
+    clearTimeout(swapTimer); swapLoading = true; renderSwap();
+    try {
+      swapState = await fetchJson('system/swap');
+      swapPending = swapState.job?.state === 'running';
+      if (!swapPending) swapDesired = null;
+    } catch (error) {
+      swapState = {...swapState, editable:false, job:null, detail:`暂时无法读取 Swap：${error.message}`};
+    } finally {
+      swapLoading = false; renderSwap();
+      if (swapPending || el('performancePanel').open) swapTimer = setTimeout(loadSwap, swapPending ? 1500 : 10000);
+    }
+  }
+  el('performancePanel').addEventListener('toggle', () => {
+    if (el('performancePanel').open) loadSwap();
+    else if (!swapPending) clearTimeout(swapTimer);
+  });
+  async function changeSwap(enabled) {
+    if (swapPending || swapLoading || !swapState.editable) { renderSwap(); return; }
+    clearTimeout(swapTimer); swapDesired = enabled; swapPending = true; renderSwap();
+    if (!enabled && !await showConfirmDialog({title:'关闭面板 Swap？', message:'关闭会将交换数据移回内存；内存不足时会拒绝操作。交换文件保留，系统原有 Swap 不受影响。', confirmText:'关闭 Swap'})) {
+      swapDesired = null; swapPending = false; renderSwap();
+      if (el('performancePanel').open) swapTimer = setTimeout(loadSwap, 10000);
+      return;
+    }
+    clearTimeout(swapTimer);
+    try {
+      swapState = await postJsonBody('system/swap', {enabled});
+      swapPending = swapState.job?.state === 'running'; renderSwap();
+      await loadSwap();
+    } catch (error) {
+      // A lost response does not prove the operation failed; read actual state before retrying.
+      await loadSwap();
+      el('hostSwapFeedback').textContent = `提交未确认：${error.message}。请核对当前状态。`;
+    }
+  }
+  swapToggle.addEventListener('change', () => changeSwap(swapToggle.checked));
+  el('hostSwapRetry').addEventListener('click', () => changeSwap(true));
   let lastAt = 0;
   window.ServerPerformance = {update(server) {
     if (Date.now() - lastAt < 3000) return; lastAt = Date.now();
     const swap = server.memory?.swap, inode = server.disk?.inode || {}, io = server.disk_io || {};
     el('performanceBrief').textContent = `Swap ${swap ? swap.total_mb ? n(swap.percent, '%') : '未启用' : '-'} · inode ${n(inode.percent, '%')} · I/O wait ${n(io.iowait_percent, '%')}`;
-    el('performanceValues').innerHTML = `<section><h3>Swap</h3><strong>${swap ? swap.total_mb ? n(swap.percent, '%') : '未启用' : '不可用'}</strong><p>${swap ? `${n(swap.used_mb, ' MiB')} / ${n(swap.total_mb, ' MiB')}` : '系统未提供交换分区数据'}</p></section><section><h3>根分区 inode</h3><strong>${n(inode.percent, '%')}</strong><p>${inode.total ? `${inode.used.toLocaleString()} / ${inode.total.toLocaleString()}` : '文件系统未提供 inode 统计'}</p></section><section><h3>磁盘读写 · I/O wait ${n(io.iowait_percent, '%')}</h3>${io.devices?.length ? io.devices.map(d => `<p><strong>${h(d.device)}</strong><br>读 ${n(d.read_kib_s, ' KiB/s')} · 写 ${n(d.write_kib_s, ' KiB/s')}<br>${n(d.iops)} IOPS · 延迟 ${n(d.await_ms, ' ms')} · 忙碌 ${n(d.busy_percent, '%')}</p>`).join('') : '<p>等待采样，或系统未提供设备统计</p>'}</section>`;
+    el('hostSwapValue').textContent = swap ? swap.total_mb ? n(swap.percent, '%') : '未启用' : '不可用';
+    el('hostSwapUsage').textContent = swap ? `${n(swap.used_mb, ' MiB')} / ${n(swap.total_mb, ' MiB')}` : '系统未提供交换分区数据';
+    el('performanceInode').innerHTML = `<h3>根分区 inode</h3><strong>${n(inode.percent, '%')}</strong><p>${inode.total ? `${inode.used.toLocaleString()} / ${inode.total.toLocaleString()}` : '文件系统未提供 inode 统计'}</p>`;
+    el('performanceDiskIO').innerHTML = `<h3>磁盘读写 · I/O wait ${n(io.iowait_percent, '%')}</h3>${io.devices?.length ? io.devices.map(d => `<p><strong>${h(d.device)}</strong><br>读 ${n(d.read_kib_s, ' KiB/s')} · 写 ${n(d.write_kib_s, ' KiB/s')}<br>${n(d.iops)} IOPS · 延迟 ${n(d.await_ms, ' ms')} · 忙碌 ${n(d.busy_percent, '%')}</p>`).join('') : '<p>等待采样，或系统未提供设备统计</p>'}`;
   }};
 })();

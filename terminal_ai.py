@@ -96,7 +96,12 @@ SYSTEM = (
     "容器配置先查看挂载信息；单文件 bind mount 下原子替换宿主文件后容器可能仍读旧文件，"
     "不能仅凭宿主文件写入成功就声称容器已应用变更，应校验实际容器配置并告知需要的后续操作。"
     "校验服务器或容器内配置使用 validate_config，启动停止服务或容器使用 manage_service/manage_container。"
-    "用户要求保留服务器文件，因此没有任意 Shell、解释器、删除/清理命令；不能以其他操作绕过。"
+    "用户要求保留服务器文件，不得删除或清理数据。受控模式不能执行任意命令，不得绕过。"
+    "仅在本轮明确提供 execute_command 时，可通过通用命令调用容器内程序、数据库客户端等，无需逐个适配工具。"
+    "例如 docker exec 调用 psql 查询时，先核对目标容器，再提交完整命令和用途，由用户逐条确认。"
+    "通用命令不能因声称只读而跳过审批，不得索要自动放权；没有该工具时说明需要用户在权限中明确开启。"
+    "优先使用受控读取、搜索和备份后编辑工具；不要用通用命令绕过拒绝、修改凭据、删除文件或清理数据。"
+    "通用命令没有自动备份或回滚；超时或取消不证明远端程序终止。输出截断时不能声称已取得完整结果。"
     "操作失败、被拒绝、超时或权限不足时不要绕过限制或重复修改；如实说明并先检查状态。"
     "文件修改由系统先预览真实差异、备份并回读校验；已知 Nginx/Caddy 的实际配置时在编辑参数中提供 validation。"
     "文件摘要校验不等于配置语法有效，也不等于业务已生效；校验失败不得重载或重启。"
@@ -332,12 +337,12 @@ class Manager:
 
     def set_access(self, owner, session_id, data):
         mode = data.get("mode")
-        if not isinstance(mode, str) or mode not in {"chat", "readonly", "approve", "auto"}:
+        if not isinstance(mode, str) or mode not in {"chat", "readonly", "approve", "auto", "command"}:
             raise AIError("请选择有效的 AI 权限。")
         if "consent" in data and type(data["consent"]) is not bool:
             raise AIError("授权确认须为明确的同意或拒绝。")
-        if mode == "auto" and data.get("consent") is not True:
-            raise AIError("请确认授权当前 SSH 连接的受支持操作。")
+        if mode in {"auto", "command"} and data.get("consent") is not True:
+            raise AIError("请明确确认当前 SSH 连接的操作范围后授权。")
         with self.lock:
             self._cleanup()
             if len(self.permissions) >= 48 and (owner, session_id) not in self.permissions:
@@ -382,8 +387,12 @@ class Manager:
                 raise AIError("审批已结束或已失效，未执行新的操作。", 409)
             if type(decision) is not bool:
                 raise AIError("请明确同意或拒绝本次操作。")
-            if job["_cancel"].is_set() or self.access(owner, job["session_id"])["mode"] != "approve":
+            if (job["_cancel"].is_set() or job['permission'] not in {'approve', 'command'}
+                    or self.access(owner, job["session_id"])["mode"] != job['permission']):
                 raise AIError("授权已撤销，本次操作不会执行。", 409)
+            self._check_task(str(key), self._config())
+            if time.monotonic() >= job['_approval_expires']:
+                raise AIError('审批已过期，未执行本次操作。', 409)
             job["_decision"] = decision
             job.pop("approval")
             job["status"] = "running"
@@ -487,7 +496,7 @@ class Manager:
                 if validate:
                     validate()
                 if action == 'restore':
-                    if mode not in {'approve', 'auto'}:
+                    if mode not in {'approve', 'auto', 'command'}:
                         raise AIError('恢复需要修改权限，请选择“修改需确认”或授权自动操作。', 403)
                     identifiers = [data.get(k) for k in ('job_id', 'event_id')]
                     if any(not isinstance(v, str) or not v or len(v) > 128 for v in identifiers):
@@ -545,7 +554,7 @@ class Manager:
             if action in {'restore', 'health'}:
                 self.jobs[key].update(history_id=archive_id, _operation_plan=operation_plan)
             record = self.permissions.get((owner, session_id))
-            if mode in {"approve", "auto"} and record:
+            if mode in {"approve", "auto", "command"} and record:
                 self.jobs[key]["_access_expires"] = record["expires"]
             if conversation_id:
                 self.jobs[key].update(conversation_id=conversation_id, history_id=archive_id, context=context,
@@ -563,7 +572,7 @@ class Manager:
             if job["action"] == "chat" and self._hash(config) != self._hash(self._config()):
                 raise AIError("模型配置已改变，任务已停止。", 409)
             mode = job["permission"]
-            if mode in {"approve", "auto"}:
+            if mode in {"approve", "auto", "command"}:
                 current_mode = self.access(job["owner"], job["session_id"])["mode"]
                 record = self.permissions.get((job["owner"], job["session_id"]))
                 expires = job.get("_access_expires")
@@ -587,9 +596,14 @@ class Manager:
             if plan.get('validation'):
                 job['approval']['validation'] = self._safe_text(config, plan['validation']['command'])
             job["status"] = "awaiting_approval"
+            job['_approval_expires'] = time.monotonic() + 120
             decision_event = job["_decision_event"]
         while not decision_event.wait(.2):
             self._check_task(key, config, validate)
+            if time.monotonic() >= job['_approval_expires']:
+                with self.lock:
+                    job.pop('approval', None)
+                raise terminal_tools.ToolError('审批已过期，未执行本次操作；不要自动重试。')
         with self.lock:
             job = self._check_task(key, config, validate)
             return job.pop("_decision", False)
@@ -617,7 +631,7 @@ class Manager:
             safe_preview = self._safe_data(config, plan['preview'])
             self._event_update(event, preview=safe_preview)
             self._checkpoint(key)
-        if plan['write'] and job['permission'] == 'approve':
+        if plan['write'] and job['permission'] in {'approve', 'command'}:
             self._event_update(event, status='awaiting_approval', phase='approval')
             if not self._approval(key, config, plan, validate):
                 raise terminal_tools.ToolError('用户拒绝了本次操作，未执行。不要尝试绕过审批。')
@@ -705,7 +719,8 @@ class Manager:
         mode, usage, count, writes, history = job["permission"], {}, 0, set(), []
         call_ids, write_failed = set(), False
         backend = job.get('_evidence_backend')
-        tools = backend.schemas() if backend else terminal_tools.schemas(writes=mode in {"approve", "auto"})
+        tools = backend.schemas() if backend else terminal_tools.schemas(
+            writes=mode in {"approve", "auto", "command"}, commands=mode == 'command')
         messages = [*messages]
         messages[0] = {**messages[0], "content": messages[0]["content"] +
             f"当前工具目标：{job['target']}。权限模式：{mode}。"
@@ -741,13 +756,14 @@ class Manager:
                 with self.lock:
                     self.jobs[key]["events"].append(event)
                 try:
-                    plan = backend.plan(name, json.loads(raw)) if backend else terminal_tools.plan(name, json.loads(raw))
+                    plan = backend.plan(name, json.loads(raw)) if backend else terminal_tools.plan(
+                        name, json.loads(raw), commands=mode == 'command')
                     if config["api_key"] and config["api_key"] in plan["command"]:
                         raise terminal_tools.ToolError("工具参数包含模型凭据，未执行。")
                     self._event_update(event, title=plan["title"], command=self._safe_text(config, plan["command"]),
                                        reason=self._safe_text(config, plan['reason']), write=plan["write"])
                     if plan["write"]:
-                        if mode not in {"approve", "auto"}:
+                        if mode not in {"approve", "auto", "command"}:
                             raise terminal_tools.ToolError("本轮仅允许只读检查，未执行修改。")
                         signature = (name, json.dumps(plan["arguments"], sort_keys=True))
                         if signature in writes:

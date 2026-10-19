@@ -96,6 +96,9 @@ class Handler(agent.Handler):
                                        'ports': '127.0.0.1:8766 → 8766/tcp'}]}}}
         elif path == "/system-metrics":
             payload = {"server": evidence["server_now"]}
+        elif path == '/system/swap':
+            payload = {'supported': False, 'editable': False, 'enabled': True, 'owned': False,
+                       'detail': '本地演示不操作 Swap；正式环境可一键开启 2 GiB Swap。', 'job': {}}
         elif path == '/performance/containers':
             payload = {'container': 'a' * 64, 'period': query.get('period', ['24h'])[0],
                        'interval_seconds': 30, 'retention_days': 7,

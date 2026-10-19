@@ -1,4 +1,4 @@
-"""Validated Linux diagnostics and backup-first actions; no arbitrary scripts or deletion."""
+"""Controlled Linux tools and separately authorized, per-command SSH execution."""
 from __future__ import annotations
 
 import re
@@ -88,14 +88,65 @@ TOOLS = {
 }
 
 
-def schemas(writes=False):
-    return [{"type": "function", "function": {"name": name, "description": description, "parameters": {
+COMMAND_TOOL = {
+    'type': 'function', 'function': {
+        'name': 'execute_command',
+        'description': '在当前 SSH 服务器执行 Shell 命令，可调用容器内程序、数据库客户端等。'
+                       '每次执行均需用户确认，不能自行认定为只读而跳过审批。优先使用已有受控工具；'
+                       '不要删除文件、清理数据、绕过审批或读取凭据。执行后检查退出码和输出。',
+        'parameters': {'type': 'object', 'properties': {
+            'command': {'type': 'string', 'description': '完整命令，不使用交互输入；不要把密码或令牌写入命令。'},
+            'reason': REASON,
+            'working_directory': {'type': 'string', 'description': '可选的 Linux 绝对路径；省略使用 SSH 登录目录。'},
+            'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 600,
+                                'description': '等待完成的秒数，默认 60。超时不能保证远端进程已终止。'},
+        }, 'required': ['command', 'reason'], 'additionalProperties': False},
+    },
+}
+
+
+def schemas(writes=False, *, commands=False):
+    result = [{"type": "function", "function": {"name": name, "description": description, "parameters": {
         "type": "object", "properties": {**properties, **({'reason': REASON} if write else {})},
         "required": required, "additionalProperties": False}}}
         for name, (description, properties, required, write) in TOOLS.items() if writes or not write]
+    if commands and writes:
+        result.append(COMMAND_TOOL)
+    return result
 
 
-def plan(name, arguments):
+def command_plan(arguments):
+    fields = COMMAND_TOOL['function']['parameters']['properties']
+    if (not isinstance(arguments, dict) or set(arguments) - set(fields)
+            or not {'command', 'reason'} <= set(arguments)):
+        raise ToolError('通用命令须包含完整命令和操作原因。')
+    command, reason = arguments['command'], arguments['reason']
+    if (not isinstance(command, str) or not command.strip() or len(command) > 16000
+            or any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in command)):
+        raise ToolError('命令须为有效文本，最多 16000 字，不支持二进制或终端控制字符。')
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 500 or '\0' in reason:
+        raise ToolError('请说明本次命令的用途，最多 500 字。')
+    timeout = arguments.get('timeout_seconds', 60)
+    if type(timeout) is not int or not 1 <= timeout <= 600:
+        raise ToolError('命令等待时间须为 1 到 600 秒的整数。')
+    cwd = arguments.get('working_directory')
+    if 'working_directory' in arguments:
+        if (not isinstance(cwd, str) or not cwd.startswith('/') or len(cwd) > 4096
+                or any(ord(c) < 32 or ord(c) == 127 for c in cwd)):
+            raise ToolError('工作目录须为 Linux 绝对路径。')
+        command = 'cd -- ' + shlex.quote(cwd) + ' && exec sh -c ' + shlex.quote(command)
+    return {'name': 'execute_command', 'arguments': dict(arguments), 'title': '执行通用命令（需确认）',
+            'command': command, 'reason': reason, 'write': True, 'transport': 'exec',
+            'timeout_seconds': timeout,
+            'impact': f'使用当前 SSH 账号权限，最多等待 {timeout} 秒。命令可能修改或删除数据，'
+                      '不提供禁止删除保证，也不会自动备份或回滚。停止等待不保证远端进程终止。'}
+
+
+def plan(name, arguments, *, commands=False):
+    if name == 'execute_command':
+        if not commands:
+            raise ToolError('通用命令未授权。需由用户选择“通用命令 · 逐条确认”并确认授权，不能通过其他工具绕过。')
+        return command_plan(arguments)
     if name not in TOOLS:
         raise ToolError("不支持该工具；不能执行任意命令或删除文件。")
     description, properties, required, write = TOOLS[name]

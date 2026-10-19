@@ -207,6 +207,8 @@ class Session:
 
     def execute_plan(self, plan, cancel, *, timeout=20):
         if plan.get('transport') != 'sftp':
+            if plan.get('name') == 'execute_command':
+                return self.execute_tool(plan['command'], cancel, timeout=plan['timeout_seconds'], max_bytes=65536)
             return self.execute_tool(plan['command'], cancel, timeout=timeout)
         return self.execute_sftp(lambda client, check: ssh_files.execute(client, plan, check), cancel, timeout=timeout)
 
@@ -262,7 +264,8 @@ class Session:
         if self.closed or time.time() >= self.expires or cancel.is_set():
             raise SSHError("连接已关闭、登录已过期或任务已停止。", 410)
         channel, finished = None, threading.Event()
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         output, truncated = bytearray(), False
         try:
             channel = self.transport.open_session(timeout=min(5, timeout))
@@ -290,15 +293,14 @@ class Session:
                         output.extend(piece[:remaining])
                         truncated |= len(piece) > remaining
                         read = True
-                if truncated:
-                    break
                 if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
                     break
                 if not read:
                     cancel.wait(.03)
             self.activity = time.monotonic()
             return {"output": output.decode("utf-8", errors="replace"), "truncated": truncated,
-                    "exit_code": channel.recv_exit_status() if channel.exit_status_ready() else None}
+                    "exit_code": channel.recv_exit_status() if channel.exit_status_ready() else None,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 2)}
         except SSHError:
             raise
         except Exception:

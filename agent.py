@@ -56,6 +56,7 @@ import request_export
 import cpu_metrics
 import sqlite3
 import docker_mirrors
+import host_swap
 import ssh_terminal
 import terminal_ai
 import panel_diagnostics
@@ -2117,6 +2118,16 @@ def _docker_image_cleanup_sampler(stop: threading.Event) -> None:
 
 _docker_mirror_manager: docker_mirrors.Manager | None = None
 _docker_mirror_lock = threading.Lock()
+_host_swap_instance: host_swap.Manager | None = None
+_host_swap_lock = threading.Lock()
+
+
+def _host_swap() -> host_swap.Manager:
+    global _host_swap_instance
+    with _host_swap_lock:
+        if _host_swap_instance is None or _host_swap_instance.home != STATE_FILE.parent:
+            _host_swap_instance = host_swap.Manager(STATE_FILE.parent, maintenance=_maintenance_shared_lock)
+        return _host_swap_instance
 
 
 def _docker_mirrors_manager() -> docker_mirrors.Manager:
@@ -3741,6 +3752,10 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, ValueError, RuntimeError) as exc:
                     self._write_json(500, {"error": "docker_images_failed", "detail": str(exc)})
             return
+        if path == "/system/swap":
+            if self._require_auth_json():
+                self._write_json(200, {**_host_swap().status(), "csrf_token": self._csrf_token_for_request()})
+            return
         if path == "/docker/mirrors":
             if self._require_auth_json():
                 try:
@@ -3987,6 +4002,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/docker/images/action":
             if self._require_auth_json():
                 self._handle_docker_image_action()
+            return
+        if path == "/system/swap":
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=4096)
+                    if set(data) != {"enabled"}:
+                        raise ValueError("Swap 开关参数无效")
+                    result = _host_swap().start(data["enabled"], audit=lambda ok: _audit_event(
+                        "host_swap_enable" if data["enabled"] else "host_swap_disable",
+                        actor=_request_client_ip(self), success=ok))
+                    self._write_json(202, result)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    self._write_json(400, {"detail": str(exc)})
             return
         if path == "/docker/mirrors":
             if self._require_auth_json():

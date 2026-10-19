@@ -17,6 +17,8 @@ def preview(dashboard):
     page.route('**/status', lambda r: r.fulfill(json={'agent': {'status': 'ok'}, 'csrf_token': 'test-token',
         'system': {'server': server, 'docker': {'available': True, 'containers': [container]}}}))
     page.route('**/system-metrics', lambda r: r.fulfill(json={'server': server}))
+    page.route('**/system/swap', lambda r: r.fulfill(json={
+        'supported': False, 'editable': False, 'detail': '本地预览不操作 Swap', 'job': {}}))
     control = {'calls': [], 'running': False, 'finished': False, 'offline': False}
     def api(route):
         control['calls'].append((route.request.method, route.request.url, route.request.post_data_json))
