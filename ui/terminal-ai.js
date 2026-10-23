@@ -134,7 +134,7 @@
     el('aiAskSend').classList.toggle('is-loading', working && !dialogTest);
     el('aiShareOutput').disabled = !connected || working;
     el('aiPermission').disabled = !connected || !allowed || accessLoading || saving;
-    el('aiPermission').value = connected ? permission : 'chat';
+    el('aiPermission').value = connected && permission === 'auto' ? 'auto' : 'approve';
     el('aiHealthCheck').disabled = !connected || !allowed || working || saving || accessLoading || historyLoading;
     document.querySelectorAll('.tai-restore').forEach(button => {
       button.disabled = !connected || !allowed || working || saving || accessLoading || historyLoading
@@ -603,26 +603,23 @@
     if (!sessionId || !allowed) return;
     accessLoading = true; controls();
     try {
-      const result = await api('/terminal-ai/access', {session_id: sessionId, mode, consent});
+      const result = await api('/terminal-ai/access', {session_id: sessionId, mode, consent,
+        ...(mode === 'auto' ? {policy_version: 2} : {})});
       if (sessionId !== context().session_id) return;
       permission = result.mode;
       if (working && !dialogTest) stopWaiting();
-      stopAuto(); message(mode === 'command' ? '已开启通用命令，每条均需确认，有效 30 分钟'
-        : mode === 'auto' ? '已授权当前连接自动操作，有效 30 分钟' : '操作权限已更新');
+      stopAuto(); message(mode === 'auto' ? '已授权自动操作，有效 30 分钟；无法识别的命令仍会询问'
+        : '已切换为操作前确认');
     } finally { accessLoading = false; controls(); }
   }
   el('aiPermission').addEventListener('change', async () => {
     const mode = el('aiPermission').value;
-    if (mode === 'auto' || mode === 'command') {
+    if (mode === 'auto') {
       accessDraft = mode; accessSession = context().session_id;
-      el('aiAccessTitle').textContent = mode === 'command' ? '授权通用命令' : '授权自动操作';
+      el('aiAccessTitle').textContent = '授权自动操作';
       el('aiAccessTarget').textContent = `当前服务器：${context().target}`;
-      el('aiAccessDescription').textContent = mode === 'command'
-        ? 'AI 可调用服务器程序、Docker 容器内命令和数据库客户端。每条通用命令都先展示服务器、命令和用途，由你确认后执行；受控的只读检查仍自动执行。'
-        : 'AI 可以创建或编辑文件、启停容器及服务，不再逐次询问。已有文件先备份并校验版本；配置变更和服务操作可能中断业务。';
-      el('aiAccessPolicy').textContent = mode === 'command'
-        ? '通用命令可能修改或删除数据，无法保证“禁止删除”，也不会自动备份或回滚。请核对每条命令；需要严格保留文件时，请继续使用“修改需确认”等受控模式。停止或超时不保证远端程序终止。'
-        : '受控模式支持文件读取、搜索、备份后编辑及服务/容器管理；禁止文件删除、清理和任意脚本执行。通用命令需要单独授权。';
+      el('aiAccessDescription').textContent = 'AI 可自动检查、备份后编辑文件、启停服务和容器，并验证结果。常见通用查询命令和简单数据库统计也可自动执行，不再逐条询问；配置变更可能中断业务。';
+      el('aiAccessPolicy').textContent = '明确的删除、清空、格式化及卸载操作会被阻止。无法可靠判断的脚本或命令仍需确认，并说明原因；命令检查不能保证识别所有间接删除行为。通用命令没有自动备份或回滚，停止或超时不保证远端进程终止。';
       el('aiAccessConsent').checked = false; el('aiAccessConfirm').disabled = true;
       message('', false, 'aiAccessFeedback'); el('aiAccessDialog').showModal(); controls();
     } else {

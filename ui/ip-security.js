@@ -3,6 +3,7 @@
   const $ = id => document.getElementById(id);
   let status = {}, token = '', busy = false, loading = false, timer, view = false, historyPage = 0;
   let activityPage = 0;
+  let readError = '';
   const drafts = {};
   const text = value => escapeHtml(String(value ?? ''));
   const date = value => value ? new Date(value * 1000).toLocaleString('zh-CN', {hour12:false}) : '未知';
@@ -24,7 +25,7 @@
     $('ipSecurityIncrement').checked = settings['bantime.increment'] === 'true';
   }
   function controls() {
-    const waiting = busy || loading, unavailable = waiting || status.read_only;
+    const waiting = busy || loading, unavailable = waiting || status.read_only || !!readError;
     $('ipSecurityRefresh').disabled = waiting;
     $('securityActivityPrev').disabled = waiting || activityPage === 0;
     $('securityActivityNext').disabled = waiting || (activityPage + 1) * (status.activity?.page_size || 50) >= (status.activity?.total || 0);
@@ -52,7 +53,7 @@
     const response = await fetch(`security/center?${query}`, {method:data ? 'POST' : 'GET', credentials:'same-origin',
       headers:data ? {'Content-Type':'application/json', 'X-CSRF-Token':token} : {}, body:data ? JSON.stringify(data) : undefined});
     const body = await response.json();
-    if (!response.ok) throw new Error(body.detail || '无法读取安全中心状态');
+    if (!response.ok) throw Object.assign(new Error(body.detail || '无法读取安全中心状态'), {status: response.status});
     token = body.csrf_token || token; return body;
   }
   function render() {
@@ -94,20 +95,20 @@
   }
   function renderCenter() {
     const facts = status.observation || {}, center = facts.center || {}, activity = status.activity || {};
-    const fresh = center.checked_at && Date.now() / 1000 - center.checked_at <= 180 && !facts.scan_error;
+    const fresh = center.checked_at && Date.now() / 1000 - center.checked_at <= 180 && !facts.scan_error && !readError;
     const unknown = (center.checks || []).filter(item => item.state === 'unknown').length + (facts.host_readable ? 0 : 1) + (facts.docker_readable ? 0 : 1) + (activity.auth?.readable ? 0 : 1);
     const risks = [...(center.risks || [])];
     if (location.protocol === 'http:' && !['localhost','127.0.0.1','[::1]'].includes(location.hostname)) {
       risks.push({id:'panel:http', category:'host', level:'warning', title:'当前通过 HTTP 访问面板', target:location.host,
         detail:'浏览器与面板之间未使用 HTTPS，登录凭据与运维内容可能明文传输。', advice:'可以使用 HTTPS 入口或 SSH 本地隧道；HTTP 访问继续可用。'});
     }
-    const authFresh = activity.auth?.readable && Date.now() / 1000 - activity.auth.checked_at <= 180;
+    const authFresh = !readError && activity.auth?.readable && Date.now() / 1000 - activity.auth.checked_at <= 180;
     if (authFresh) for (const item of activity.concentrated_failures || []) risks.push({id:'login:' + item.ip, category:'login', level:'warning', title:'同一来源连续登录失败', target:item.ip,
       detail:`最近 10 分钟采集到 ${item.attempts} 次 SSH 认证失败。`, advice:'核对是否为自己的连接；需要封禁时先选择防护规则，不自动认定为攻击。'});
     const critical = risks.filter(item => item.level === 'critical').length;
     $('ipSecurityTitle').textContent = !fresh ? center.checked_at ? '安全检查待更新' : '正在读取安全状态' : risks.length ? `${risks.length} 项配置与活动需要核对` : unknown ? `${unknown} 项检查尚待核实` : '当前检查范围内未发现风险';
     $('ipSecurityTitle').closest('.security-heading').dataset.state = !fresh ? 'unknown' : critical ? 'critical' : risks.length ? 'warning' : unknown ? 'unknown' : 'known';
-    $('securitySummaryNote').textContent = center.checked_at ? `最近检查 ${date(center.checked_at)}${status.scanning ? ' · 正在重新检查' : ''}${unknown ? ` · ${unknown} 项检查未完成` : ''} · 不代表完整安全评估` : '首次检查正在后台进行，不会修改服务器设置';
+    $('securitySummaryNote').textContent = readError ? `读取失败：${readError}。保留上次结果，稍后自动重试。` : center.checked_at ? `最近检查 ${date(center.checked_at)}${status.scanning ? ' · 正在重新检查' : ''}${unknown ? ` · ${unknown} 项检查未完成` : ''} · 不代表完整安全评估` : '首次检查正在后台进行，不会修改服务器设置';
     $('securityRiskCount').textContent = fresh ? risks.length : '—';
     $('securityRiskHint').textContent = fresh ? `${critical} 项高风险${center.limited ? ' · 结果达到上限' : ''}` : '检查未完成或已过期';
     $('securityLoginCount').textContent = activity.auth?.checked_at ? activity.login_failure_24h ?? 0 : '—';
@@ -123,7 +124,7 @@
       ['SSH 登录', authFresh ? 'known' : 'unknown', activity.auth?.detail || '等待日志来源'],
       ['容器权限', fresh ? docker?.state || 'unknown' : 'unknown', docker?.detail || '等待容器检查'],
       ['配置变化', fresh ? (center.checks || []).find(item => item.name === '配置变化')?.state || 'unknown' : 'unknown', (center.checks || []).find(item => item.name === '配置变化')?.detail || '等待配置基线'],
-      ['登录防护', status.running && (status.panel_enabled || status.ssh_enabled || status.existing_ssh) ? 'known' : 'inactive', `${status.jails?.length || 0} 条活跃规则；实际阻断需验证`]
+      ['登录防护', readError ? 'unknown' : status.running && (status.panel_enabled || status.ssh_enabled || status.existing_ssh) ? 'known' : 'inactive', `${status.jails?.length || 0} 条活跃规则；实际阻断需验证`]
     ];
     $('securityCoverage').innerHTML = sources.map(([name,state,detail]) => `<div class="security-source" data-state="${state}"><span class="security-source-dot" aria-hidden="true"></span><strong>${text(name)}</strong><span title="${text(detail)}">${state === 'known' ? name === '登录防护' ? '运行中' : '已读取' : state === 'not_installed' ? '未安装' : state === 'inactive' ? '未启用' : '待核实'}</span><small>${text(detail)}</small></div>`).join('');
     $('securityCoverageNote').textContent = facts.scan_error || (center.checks || []).some(item => item.state === 'unknown') ? '部分检查未完成，展开检查明细查看原因。' : center.notice || '等待后台检查';
@@ -142,10 +143,15 @@
     if (loading || busy || !view) return;
     loading = true; controls();
     try {
-      status = await api(null, false, scan === true); render();
+      status = await api(null, false, scan === true); readError = ''; render();
       if (status.detail) feedback(status.detail);
       if (status.job?.state === 'running') { busy = true; poll(); }
-    } catch (error) { feedback(error.message); }
+    } catch (error) {
+      readError = error.message;
+      activityPage = status.activity?.page || 0; historyPage = status.history?.page || 0;
+      if (status.activity?.source) $('securityActivitySource').value = status.activity.source;
+      renderCenter(); window.AppSelects?.syncAll(); feedback(error.message);
+    }
     finally { loading = false; controls(); if (!busy) schedule(); }
   }
   function schedule() { clearTimeout(timer); if (view && !document.hidden) timer = setTimeout(() => refresh(), 15000); }
@@ -158,11 +164,14 @@
       busy = false; feedback(job?.message || '操作已结束');
       if (job?.state === 'succeeded' && job.action?.startsWith('configure')) delete drafts[job.action === 'configure_ssh' ? 'ssh' : 'panel'];
       await refresh();
-    } catch (error) { feedback(`状态暂不可读：${error.message}。操作可能仍在执行，请刷新核对。`); busy = false; }
+    } catch (error) {
+      feedback(`状态暂不可读：${error.message}。操作可能仍在执行，正在重新读取结果。`);
+      if (view && !document.hidden) timer = setTimeout(poll, 5000);
+    }
     finally { controls(); }
   }
   async function operate(action, ip = '') {
-    if (busy || loading) return;
+    if (busy || loading || readError || status.read_only) return;
     const jail = $('ipSecurityJail').value;
     const configuring = action.startsWith('configure'), disabling = action.startsWith('disable');
     const ssh = status.observation?.ssh || {};
@@ -182,7 +191,16 @@
         ignoreip:$('ipSecurityIgnore').value.split(/\s+/).filter(Boolean), ports:$('ipSecurityPorts').value === 'web' ? [6868,80,443] : [6868],
         increment:$('ipSecurityIncrement').checked, expected_ssh:ssh.fingerprint});
       await api(data); if (disabling) $('ipSecurityJail').value = ''; await poll();
-    } catch (error) { busy = false; feedback(error.message); controls(); }
+    } catch (error) {
+      if (!error.status || error.status >= 500) {
+        feedback(`提交结果暂未确认：${error.message}。正在查询执行状态，请勿重复提交。`);
+        clearTimeout(timer);
+        if (view && !document.hidden) timer = setTimeout(poll, 1000);
+      } else {
+        busy = false; feedback(error.message); schedule();
+      }
+      controls();
+    }
   }
   $('ipSecurityRefresh').onclick = () => refresh(true);
   $('securityRiskFilter').onchange = () => { renderCenter(); window.AppSelects?.syncAll(); };

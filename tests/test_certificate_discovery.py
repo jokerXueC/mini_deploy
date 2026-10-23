@@ -347,6 +347,44 @@ def test_managed_replace_reload_failure_restores_metadata_and_files(managed_disc
     assert [path.read_bytes() for path in (cert, key, metadata)] == original
 
 
+@pytest.mark.parametrize("changed", ["certificate", "metadata"])
+def test_failed_replace_preserves_concurrent_external_edit(managed_discovered, monkeypatch, pem_pair, changed):
+    manager, cert, _, metadata = managed_discovered
+    target = cert if changed == "certificate" else metadata
+    external = target.read_bytes() + b"\n\n"
+
+    def execute(source, args):
+        if "reload" in args:
+            target.write_bytes(external)
+            raise ValueError("reload failed")
+
+    monkeypatch.setattr(manager, "execute", execute)
+    row = manager.rows[0]
+    with pytest.raises(discovery.DiscoveryError, match="备份保留"):
+        manager.replace(row["id"], row["certificate"]["fingerprint"], pem_pair["certificate"] + "\n", pem_pair["private_key"])
+    assert target.read_bytes() == external
+    assert list((manager.home / "certificate-backups").glob("replacement-*/previous.crt"))
+
+
+def test_validation_race_preserves_external_certificate(managed_discovered, monkeypatch, pem_pair):
+    manager, cert, key, _ = managed_discovered
+    original_key = key.read_bytes()
+    external = cert.read_bytes() + b"\n\n"
+    inspect = discovery.certificates.inspect_pair
+
+    def change_during_validation(*args):
+        result = inspect(*args)
+        cert.write_bytes(external)
+        return result
+
+    monkeypatch.setattr(discovery.certificates, "inspect_pair", change_during_validation)
+    monkeypatch.setattr(manager, "execute", lambda *args: "")
+    row = manager.rows[0]
+    with pytest.raises(discovery.DiscoveryError, match="校验期间"):
+        manager.replace(row["id"], row["certificate"]["fingerprint"], pem_pair["certificate"], pem_pair["private_key"])
+    assert cert.read_bytes() == external and key.read_bytes() == original_key
+
+
 def test_managed_historical_revision_is_not_replaced(managed_discovered):
     manager, cert, key, metadata = managed_discovered
     record = json.loads(metadata.read_text())

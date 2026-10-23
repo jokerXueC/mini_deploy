@@ -9,7 +9,7 @@ import re
 import stat
 import time
 
-from security_observation import LIMIT, RETENTION, read_log
+from security_observation import LIMIT, RETENTION, read_journal, read_log
 from server_operations import safe_file, timestamp
 
 FILES = ('ssh/sshd_config', 'crontab', 'docker/daemon.json', 'fail2ban/jail.local',
@@ -194,22 +194,15 @@ class Center:
                 state.update(readable=True, limited=flags['limited'] or flags['initial_tail'] or flags['gap'],
                              detail=f'增量读取 {path}' + ('；轮转或截断可能留下空档' if flags['gap'] else ''))
             elif ssh.get('backend') == 'systemd':
-                saved = db.execute("SELECT value FROM cursors WHERE key='auth:journal'").fetchone()
-                since = max(now - RETENTION, float(saved['value']) - 1 if saved else now - 86400)
-                output = self.run(['journalctl', '--quiet', '--no-pager', '--since', '@' + str(int(since)), '-n', '500', '-o', 'json', *SSH_MATCH])
-                lines, latest = output.splitlines(), since
-                for line in lines:
-                    item = json.loads(line)
-                    at = int(item.get('__REALTIME_TIMESTAMP', 0)) / 1e6
-                    if not 0 < at <= now + 60:
-                        continue
-                    latest = max(latest, at)
+                entries, flags = read_journal(db, self.run, 'auth:journal', SSH_MATCH, now, 500)
+                for item, at in entries:
                     event = login_event(item.get('MESSAGE'), at, now)
                     if event:
-                        records.append({**event, '_identity': 'auth:journal:' + str(item.get('__CURSOR') or line)})
-                db.execute("INSERT OR REPLACE INTO cursors VALUES ('auth:journal',?)", (str(max(latest, now - 1)),))
-                state.update(readable=True, limited=len(lines) >= 500, detail='读取 SSH systemd 日志；首次最多回看 24 小时')
-        except (OSError, ValueError, RuntimeError, TypeError, AttributeError):
+                        records.append({**event, '_identity': 'auth:journal:' + str(item.get('__CURSOR') or json.dumps(item, sort_keys=True))})
+                state.update(readable=True, limited=flags['limited'] or flags['gap'],
+                             detail='增量读取 SSH systemd 日志；首次从最近 24 小时开始补采'
+                             + ('；原游标不可用，已按时间恢复读取，可能存在空档' if flags['gap'] else ''))
+        except (OSError, ValueError, RuntimeError, TypeError, AttributeError, OverflowError):
             records = []
             state['detail'] = 'SSH 日志读取失败或格式不完整；保留历史，不代表没有登录活动。'
         return records, state

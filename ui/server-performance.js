@@ -110,7 +110,7 @@
     }
     finally { if (run === requestVersion) { busy = false; controls(); schedule(); } }
   }
-  $('serverPerformanceOpen').addEventListener('click', () => { period = '24h'; dialog.showModal(); load(); });
+  $('serverPerformanceOpen').addEventListener('click', () => { period = '24h'; window.ServerOverview?.pause(); dialog.showModal(); load(); });
   $('serverPerformanceClose').addEventListener('click', () => dialog.close());
   $('serverPerformanceRefresh').addEventListener('click', () => refreshData(true));
   $('serverPerformanceExport').addEventListener('click', () => load('zip'));
@@ -134,5 +134,8 @@
   document.addEventListener('visibilitychange', () => { if (document.hidden) stopAutomatic(); else if (dialog.open && $('serverPerformanceAuto').checked) refreshData(); });
   window.addEventListener('offline', stopAutomatic);
   window.addEventListener('online', () => { if (dialog.open && $('serverPerformanceAuto').checked) refreshData(true); });
-  dialog.addEventListener('close', () => { requestVersion++; controller?.abort(); busy = false; retryInitial = false; clearFrame(); });
+  dialog.addEventListener('close', () => {
+    requestVersion++; controller?.abort(); busy = false; retryInitial = false; clearFrame();
+    document.dispatchEvent(new Event('server-observation-change'));
+  });
 })();

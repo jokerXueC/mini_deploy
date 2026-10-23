@@ -32,6 +32,9 @@ def embedded(raw):
 
 def test_large_preview_omits_embedded_process_details_and_compresses_without_losing_statistics(
         http_server, demo, monkeypatch):
+    # Compression and detail modes must be compared over the same rolling window.
+    now = agent.time.time()
+    monkeypatch.setattr(agent.time, 'time', lambda: now)
     original = demo.query
     calls = []
     def query(*args, **kwargs):

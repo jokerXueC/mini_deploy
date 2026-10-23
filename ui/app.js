@@ -9,7 +9,7 @@ let systemStatusRequestId = 0;
 let currentContainerLogName = '';
 let currentContainerLogLineLimit = 200;
 let containerLogKeywordTimer = null;
-let systemTrendRange = 'realtime';
+let systemTrendRange = '1h';
 let notificationDirty = false;
 const THEME_STORAGE_KEY = 'mini_deploy-theme';
 const DISMISSED_NOTICE_STORAGE_KEY = 'mini_deploy-dismissed-notices';
@@ -437,6 +437,7 @@ function setView(view) {
   $('updatedAt')?.classList.toggle('terminal-status-hidden', activeView === 'terminal');
   clearServerRefresh();
   clearEventsRefresh();
+  if (activeView !== 'server') window.ServerOverview?.pause();
   if (activeView === 'server') {
     refreshServerStatus();
     window.DockerImages?.refresh();
@@ -876,6 +877,9 @@ function trendDots(points, key, className, label, width, height, pad, scale, opt
   const usableHeight = height - pad.top - pad.bottom;
   const range = Math.max(scale.max - scale.min, 1);
   const formatter = options.formatter || formatPercent;
+  const values = points.map(point => trendPointValue(point, key, options));
+  const peak = Math.max(...values.filter(value => value != null));
+  const peakIndex = values.indexOf(peak);
   return points.map((point, index) => {
     const value = trendPointValue(point, key, options);
     if (value == null) return '';
@@ -884,7 +888,7 @@ function trendDots(points, key, className, label, width, height, pad, scale, opt
     const tooltip = typeof options.tooltipFormatter === 'function'
       ? options.tooltipFormatter(point, value)
       : `${formatTrendTime(point)} · ${label} ${formatter(value)}`;
-    return `<g class="trend-point${index === points.length - 1 ? ' is-latest' : ''}" tabindex="0" aria-label="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">
+    return `<g class="trend-point${index === points.length - 1 ? ' is-latest' : ''}${peak > 0 && index === peakIndex ? ' is-peak' : ''}" tabindex="0" aria-label="${escapeHtml(tooltip)}" data-tooltip="${escapeHtml(tooltip)}">
       <circle class="trend-dot-hit" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9"></circle>
       <circle class="trend-dot ${className}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2"></circle>
     </g>`;
@@ -975,7 +979,7 @@ function renderTrendCard(points, config, availability = trendAvailability(points
       </article>
     `;
   }
-  const height = 236;
+  const height = 180;
   const pad = { top: 14, right: 14, bottom: 16, left: 38 };
   const width = config.realtime ? 480 : trendChartWidth(points, pad);
   const yTop = pad.top;
@@ -1026,39 +1030,46 @@ function renderTrendCard(points, config, availability = trendAvailability(points
 function renderSystemTrend(system = {}) {
   const chart = $('systemTrendChart');
   if (!chart) return;
-  const realtime = systemTrendRange === 'realtime';
+  const observation = window.ServerOverview?.source(system, systemTrendRange);
+  const container = Boolean(observation?.container);
+  const realtime = !container && systemTrendRange === 'realtime';
   const source = realtime ? system.realtime_history : system.history;
   const rawHistory = Array.isArray(source) ? source : [];
   const cutoff = rangeCutoffSeconds(systemTrendRange);
   const nowTs = Math.floor(Date.now() / 1000);
   const filtered = cutoff ? rawHistory.filter(point => Number(point?.ts) >= nowTs - cutoff) : rawHistory;
-  const points = filtered.slice().reverse();
-  const intervalSeconds = realtime ? 1 : system.history_interval_seconds;
+  const points = observation?.points || filtered.slice().reverse();
+  const intervalSeconds = observation?.intervalSeconds || (realtime ? 1 : system.history_interval_seconds);
   const timing = { intervalSeconds, nowSeconds: nowTs, lastSampleTs: rawHistory[0]?.ts };
-  const availability = ['cpu_percent', 'memory_percent', 'network_total_kbps'].map(key =>
-    trendAvailability(points, {key, percent: key !== 'network_total_kbps'}, timing));
-  const signature = JSON.stringify([systemTrendRange, intervalSeconds, points, availability]);
+  if (observation) timing.lastSampleTs = points.at(-1)?.ts;
+  const metricKeys = container ? ['cpu_percent', 'memory_percent'] : ['cpu_percent', 'memory_percent', 'network_total_kbps'];
+  if (observation && chart.observationSource === observation) return;
+  chart.observationSource = observation;
+  const availability = metricKeys.map(key =>
+    trendAvailability(points, {key, percent: key === 'memory_percent' || key === 'cpu_percent' && !container}, timing));
+  const signature = JSON.stringify([observation?.target, observation?.revision, systemTrendRange, intervalSeconds, points, availability]);
   if (chart.dataset.signature === signature) return;
   chart.dataset.signature = signature;
+  window.ServerOverview?.update(points, {realtime, intervalSeconds, container, ...observation});
   const intervalMinutes = Math.round(Number(system.history_interval_seconds || 1800) / 60);
-  const latest = points[points.length - 1] || rawHistory[0] || {};
+  const latest = points[points.length - 1] || (observation ? {} : rawHistory[0]) || {};
   const hint = $('systemTrendHint');
   const pointsPerDay = trendPointsPerDay(intervalMinutes || 30);
   if (hint) {
-    hint.textContent = realtime
-      ? `每秒采样 · 最近 60 个样本 · 已采集 ${points.length} 个${points.length ? ` · 最新 ${formatTrendTime(latest)}` : ''}`
+    hint.textContent = observation?.hint || (realtime
+      ? `最近 60 秒 · 每秒采样${points.length ? ` · ${points.length} 个样本` : ''}`
       : points.length
-      ? `每 ${intervalMinutes || 30} 分钟采样 · 1 天 ${pointsPerDay} 点 · 当前范围 ${points.length} 点 · 可左右滑动 · 最新 ${formatTrendTime(latest)}`
-      : `每 ${intervalMinutes || 30} 分钟采样一次 · 1 天约 ${pointsPerDay} 点 · 等待 CPU、内存、网络样本`;
+      ? `${points.length} 个样本 · 每 ${intervalMinutes || 30} 分钟采样`
+      : `每 ${intervalMinutes || 30} 分钟采样一次 · 1 天约 ${pointsPerDay} 点 · 等待 CPU、内存、网络样本`);
   }
 
   chart.classList.remove('skeleton-block');
-  chart.classList.toggle('realtime-trend', realtime);
+  chart.classList.toggle('realtime-trend', realtime || container);
   const markup = `
-    <div class="trend-card-grid">
-      ${renderTrendCard(points, { realtime, key: 'cpu_percent', className: 'cpu', label: 'CPU', subLabel: '处理器' }, availability[0])}
-      ${renderTrendCard(points, { realtime, key: 'memory_percent', className: 'memory', label: '内存', subLabel: '占用率' }, availability[1])}
-      ${renderTrendCard(points, {
+    <div class="trend-card-grid" data-container="${container}">
+      ${renderTrendCard(points, { realtime: realtime || container, percent: !container, key: 'cpu_percent', className: 'cpu', label: 'CPU', subLabel: container ? '100% = 1 个逻辑核 · 区间均值' : '处理器' }, availability[0])}
+      ${renderTrendCard(points, { realtime: realtime || container, key: 'memory_percent', className: 'memory', label: '内存', subLabel: container ? '相对容器内存上限 · 区间均值' : '占用率' }, availability[1])}
+      ${container ? '' : renderTrendCard(points, {
         realtime,
         key: 'network_total_kbps',
         className: 'network',
@@ -1074,7 +1085,7 @@ function renderSystemTrend(system = {}) {
   const template = document.createElement('template');
   template.innerHTML = markup;
   const cards = Array.from(chart.querySelectorAll('.trend-card'));
-  if (cards.length !== 3) {
+  if (cards.length !== metricKeys.length) {
     chart.replaceChildren(template.content);
     DashboardMotion.reading(chart.querySelector('.cpu .trend-card-head strong'), latest.cpu_percent, formatPercent);
     return;
@@ -1114,6 +1125,10 @@ function renderSystemTrend(system = {}) {
     if (atEnd) scroll.scrollLeft = scroll.scrollWidth;
   });
 }
+
+document.addEventListener('server-observation-change', () => {
+  if (activeView === 'server' && lastSystemPayload) renderSystemTrend(lastSystemPayload);
+});
 
 function renderCpuCores(cpu = {}) {
   const grid = $('cpuCoreGrid');
@@ -1609,7 +1624,7 @@ document.querySelectorAll('[data-trend-range]').forEach(button => {
   button.addEventListener('click', () => {
     systemTrendRange = button.dataset.trendRange || '24h';
     document.querySelectorAll('[data-trend-range]').forEach(item => item.classList.toggle('active', item === button));
-    if (activeView === 'server') refreshServerStatus();
+    if (activeView === 'server') renderSystemTrend(lastSystemPayload || {});
   });
 });
 $('saveNotificationBtn')?.addEventListener('click', saveNotificationConfig);

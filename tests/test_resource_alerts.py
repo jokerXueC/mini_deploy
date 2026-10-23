@@ -66,6 +66,18 @@ def test_hysteresis_stable_recovery_notifications_and_frozen_scene(monitor):
     assert events[0]['metadata']['process_snapshot']['processes'][0]['pid'] == 44
 
 
+def test_expired_sample_invalidates_previous_coverage_and_memory_baseline(monitor):
+    m, clock = monitor
+    feed(m, clock, at=10000)
+    assert m.coverage['server']['status'] == 'healthy' and m.resource_memory
+    clock[0] = 10300
+    resource_alerts.evaluate(m, [{**sample(10), 'sampled_ts': 10000}])
+    assert m.coverage['server']['status'] == 'unknown'
+    assert not m.resource_memory and not m.resource_state
+    feed(m, clock, at=10301)
+    assert m.coverage['server']['status'] == 'healthy'
+
+
 def test_memory_growth_requires_a_continuous_baseline_and_pressure_gate(monitor):
     m, clock = monitor
     for i in range(130):

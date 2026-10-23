@@ -130,7 +130,7 @@ class Inspector:
                         with path.open('rb') as stream:
                             stream.seek(max(0, path.stat().st_size - LIMIT))
                             sample = stream.read(LIMIT).decode('utf-8', 'replace')
-                        if re.search(r'\bsshd\[\d+\]:', sample):
+                        if re.search(r'\bsshd(?:-session)?\[\d+\]:', sample):
                             ssh.update(ready=True, backend='polling', logpath=str(path), detail=f'已识别 SSH 监听端口与 {path}')
                             break
             if not ssh['ready']:
@@ -185,6 +185,51 @@ def read_log(db, path, key):
                (key, json.dumps({'inode': [info.st_dev, info.st_ino], 'offset': position, 'discard': discard})))
     return lines, {'limited': position < info.st_size or discard, 'gap': bool(saved and not same),
                    'discard': discard, 'initial_tail': not same and offset > 0}
+
+
+def read_journal(db, runner, key, matches, now, limit):
+    """Read oldest pending entries and commit the cursor only after parsing the batch."""
+    saved = db.execute('SELECT value FROM cursors WHERE key=?', (key,)).fetchone()
+    since = max(now - RETENTION, float(saved['value']) - 1 if saved else now - 86400)
+    saved_cursor = db.execute('SELECT value FROM cursors WHERE key=?', (key + ':cursor',)).fetchone()
+    cursor = saved_cursor['value'] if saved_cursor else ''
+    base = ['journalctl', '--quiet', '--no-pager', '-n', f'+{limit}', '-o', 'json',
+            '--output-fields=MESSAGE,__REALTIME_TIMESTAMP,__CURSOR']
+    fallback = ['--since', '@' + str(int(since))]
+    gap = False
+    try:
+        output = runner([*base, *(['--after-cursor', cursor] if cursor else fallback), *matches])
+    except RuntimeError:
+        if not cursor:
+            raise
+        # A vacuumed journal cursor can no longer be sought; deduplication makes
+        # replay from the saved timestamp safe, including entries in that second.
+        output = runner([*base, *fallback, *matches])
+        gap = True
+    lines = output.splitlines()
+    records, latest, next_cursor = [], since, ''
+    for line in lines:
+        item = json.loads(line)
+        if not isinstance(item, dict):
+            raise ValueError('日志条目格式异常')
+        at = int(item.get('__REALTIME_TIMESTAMP', 0)) / 1e6
+        position = item.get('__CURSOR', '')
+        if not isinstance(position, str) or len(position) > 4096 or any(ord(char) < 32 for char in position):
+            raise ValueError('日志游标格式异常')
+        if position:
+            next_cursor = position
+        if 0 < at <= now + 60:
+            latest = max(latest, at)
+            records.append((item, at))
+    limited = len(lines) >= limit
+    if limited and not next_cursor:
+        raise ValueError('日志达到读取上限但未返回游标，保留原读取位置')
+    if next_cursor:
+        db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?)', (key + ':cursor', next_cursor))
+    elif gap:
+        db.execute('DELETE FROM cursors WHERE key=?', (key + ':cursor',))
+    db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?)', (key, str(latest if lines else max(latest, now - 1))))
+    return records, {'limited': limited, 'gap': gap}
 
 
 def parse_event(line, at=None):
@@ -264,7 +309,7 @@ class History:
             # Discover only the standard log root, never read an arbitrary configured business path.
             if '..' not in path.parts and path.is_relative_to(self.log_root) and safe_file(path):
                 lines, state = read_log(db, path, 'file:' + str(path))
-                limited = state['limited']
+                limited = state['limited'] or state['initial_tail'] or state['gap']
                 for _, line in lines:
                     event = parse_event(line)
                     if event:
@@ -275,25 +320,18 @@ class History:
                 if state['gap']:
                     detail += '；日志轮转或截断，可能存在采集空档'
             else:
-                saved = db.execute("SELECT value FROM cursors WHERE key='journal'").fetchone()
-                since = max(now - RETENTION, float(saved['value']) - 1 if saved else now - 86400)
                 try:
-                    output = self.run(['journalctl', '--quiet', '--no-pager', '-u', 'fail2ban.service',
-                                       '--since', '@' + str(int(since)), '-n', '1000', '-o', 'json'])
-                    lines = output.splitlines()
-                    limited = len(lines) >= 1000
-                    latest = since
-                    for line in lines:
-                        item = json.loads(line)
-                        at = int(item.get('__REALTIME_TIMESTAMP', 0)) / 1e6
-                        latest = max(latest, at)
+                    entries, state = read_journal(db, self.run, 'journal', ['-u', 'fail2ban.service'], now, 1000)
+                    limited = state['limited'] or state['gap']
+                    for item, at in entries:
                         message = item.get('MESSAGE', '')
                         event = parse_event(message, at) if isinstance(message, str) else None
                         if event:
                             records.append(event)
-                    db.execute("INSERT OR REPLACE INTO cursors VALUES ('journal',?)", (str(max(latest, now - 1)),))
-                    readable, detail = True, '读取 Fail2ban systemd 日志；首次最多回看 24 小时'
-                except (OSError, ValueError, RuntimeError):
+                    readable, detail = True, '增量读取 Fail2ban systemd 日志；首次从最近 24 小时开始补采'
+                    if state['gap']:
+                        detail += '；原游标不可用，已按时间恢复读取，可能存在空档'
+                except (OSError, ValueError, RuntimeError, TypeError, OverflowError):
                     detail = '未能读取 Fail2ban 文件或 systemd 日志；保留已采集历史，不代表没有攻击'
             for item in records:
                 if now - RETENTION <= item['ts'] <= now + 60:

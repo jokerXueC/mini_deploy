@@ -69,7 +69,9 @@ def test_automatic_poll_updates_existing_canvas_preserves_reading_and_stops_when
     monkeypatch.setattr(agent.time, 'time', lambda: clock[0])
     page.clock.install()
     polls = []
-    page.on('request', lambda req: polls.append(req.url) if '/performance/server?' in req.url else None)
+    # Track the report's 24h scope; the homepage resumes its separate 1h scope on close.
+    page.on('request', lambda req: polls.append(req.url)
+            if '/performance/server?' in req.url and 'period=24h' in req.url else None)
     page.goto(http_server.origin + '/ui?view=server')
     page.locator('#serverPerformanceOpen').click()
     frame = page.frame_locator('#serverPerformanceFrame')

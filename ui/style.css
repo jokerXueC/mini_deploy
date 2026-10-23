@@ -1066,9 +1066,6 @@ html[data-theme="light"] #serverView {
   --monitor-memory: #2563eb;
   --monitor-network: #b77910;
 }
-body:has(#serverView.active) .hero { margin: 22px 0 20px; align-items: center; }
-body:has(#serverView.active) .hero h1 { font-size: 32px; }
-body:has(#serverView.active) .hero p { margin-top: 8px; font-size: 13px; }
 #serverView .server-status-grid { gap: 12px; }
 #serverView .status-stat-card {
   min-height: 174px;
@@ -1170,7 +1167,6 @@ body:has(#serverView.active) .hero p { margin-top: 8px; font-size: 13px; }
   #serverView .resource-capacity { font-size: 12px; }
   #serverView .status-stat-card { min-height: 167px; }
   #serverView .status-mini-history { padding: 6px 10px; }
-  body:has(#serverView.active) .hero h1 { font-size: 27px; }
   .cpu-core-grid { grid-template-columns: repeat(auto-fit, minmax(34px, 1fr)); gap: 6px; }
   #cpuTopologyNote { margin-left: 0; }
 }

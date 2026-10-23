@@ -37,9 +37,14 @@
       el('performanceFeedback').textContent = `${data.points.length} 个时间点 · 保留最多 ${data.retention_days} 天`;
     } catch (error) { if (run === generation && error.name !== 'AbortError') { el('performanceCharts').replaceChildren(); el('performanceFeedback').textContent = error.message; } }
   }
+  function open(id, name) {
+    container = id; el('performanceContainer').textContent = name;
+    dialog.showModal(); load();
+  }
+  window.ContainerPerformance = {open};
   document.addEventListener('click', event => {
     const button = event.target.closest('[data-performance-container]');
-    if (button) { container = button.dataset.performanceContainer; el('performanceContainer').textContent = button.dataset.performanceName; dialog.showModal(); load(); }
+    if (button) open(button.dataset.performanceContainer, button.dataset.performanceName);
   });
   dialog.addEventListener('click', event => {
     if (event.target.closest('[data-performance-close]')) dialog.close();

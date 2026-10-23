@@ -62,6 +62,9 @@ def evaluate(monitor, samples, scene=None):
                 for reason, title, _, _, _ in RULES:
                     monitor.observe('server:' + reason, None, title, '采样缺失或过期', 'server')
                 monitor.resource_state.clear()
+                monitor.resource_memory.clear()
+                monitor.coverage['server'] = {'status': 'unknown', 'checked_at': monitor.clock(),
+                    'detail': '服务器采样缺失、过期或时间无效，不能确认当前资源状态。'}
                 continue
             previous = monitor.resource_last
             if previous is not None and at == previous:

@@ -98,8 +98,11 @@ SYSTEM = (
     "校验服务器或容器内配置使用 validate_config，启动停止服务或容器使用 manage_service/manage_container。"
     "用户要求保留服务器文件，不得删除或清理数据。受控模式不能执行任意命令，不得绕过。"
     "仅在本轮明确提供 execute_command 时，可通过通用命令调用容器内程序、数据库客户端等，无需逐个适配工具。"
-    "例如 docker exec 调用 psql 查询时，先核对目标容器，再提交完整命令和用途，由用户逐条确认。"
-    "通用命令不能因声称只读而跳过审批，不得索要自动放权；没有该工具时说明需要用户在权限中明确开启。"
+    "例如 docker exec 调用 psql 查询时，先核对目标容器，再提交完整命令和用途，由系统按权限执行或发起审批。"
+    "通用命令是否需要审批由系统规则和用户模式决定，不能靠声称只读跳过。"
+    "操作前确认模式逐条确认通用命令；自动模式下系统识别的只读命令直接执行，未知命令仍需确认。"
+    "命令因规则转为审批后等待用户，不尝试改写、编码、拆分命令或换工具绕过。"
+    "删除、清空、格式化和卸载操作会被阻止，不提供审批放行。"
     "优先使用受控读取、搜索和备份后编辑工具；不要用通用命令绕过拒绝、修改凭据、删除文件或清理数据。"
     "通用命令没有自动备份或回滚；超时或取消不证明远端程序终止。输出截断时不能声称已取得完整结果。"
     "操作失败、被拒绝、超时或权限不足时不要绕过限制或重复修改；如实说明并先检查状态。"
@@ -200,7 +203,7 @@ def complete(config, messages, tools=None, *, check=None, publish=None):
         messages = {401: "模型密钥无效，请检查 API Key。", 403: "模型服务拒绝访问，请检查权限。",
                     404: "模型接口或模型名称不存在，请检查地址与模型名。", 429: "模型服务限流或额度不足，请稍后重试。"}
         if tools and exc.code in {400, 422}:
-            messages[exc.code] = "模型服务拒绝工具调用请求，请核对模型支持情况；可切换「仅对话」继续使用。"
+            messages[exc.code] = "模型服务拒绝工具调用请求，请换用支持工具的模型；也可断开 SSH 后普通聊天。"
         message = "模型接口发生跳转，请填写最终接口地址。" if 300 <= exc.code < 400 else messages.get(
             exc.code, f"模型服务返回 HTTP {exc.code}，请检查模型服务状态。")
         exc.close()
@@ -332,7 +335,8 @@ class Manager:
             self._cleanup()
             record = self.permissions.get((owner, session_id))
             if record and record["config_hash"] == self._hash(self._config()):
-                return {"mode": record["mode"], "expires_in": max(0, int(record["expires"] - time.monotonic()))}
+                return {"mode": record["mode"], "expires_in": max(0, int(record["expires"] - time.monotonic())),
+                        **({'command_policy': 2} if record.get('command_policy') == 2 else {})}
             return {"mode": "approve", "expires_in": 0}
 
     def set_access(self, owner, session_id, data):
@@ -343,6 +347,8 @@ class Manager:
             raise AIError("授权确认须为明确的同意或拒绝。")
         if mode in {"auto", "command"} and data.get("consent") is not True:
             raise AIError("请明确确认当前 SSH 连接的操作范围后授权。")
+        if 'policy_version' in data and (type(data['policy_version']) is not int or data['policy_version'] != 2):
+            raise AIError('操作授权版本无效，请刷新后重试。')
         with self.lock:
             self._cleanup()
             if len(self.permissions) >= 48 and (owner, session_id) not in self.permissions:
@@ -351,7 +357,8 @@ class Manager:
                 if self._active(job) and job["owner"] == owner and job["session_id"] == session_id:
                     self._cancel_job(job)
             self.permissions[(owner, session_id)] = {"mode": mode, "config_hash": self._hash(self._config()),
-                                                    "expires": time.monotonic() + 1800}
+                "expires": time.monotonic() + 1800,
+                'command_policy': 2 if mode == 'auto' and data.get('policy_version') == 2 else 0}
             return self.access(owner, session_id)
 
     @staticmethod
@@ -387,7 +394,7 @@ class Manager:
                 raise AIError("审批已结束或已失效，未执行新的操作。", 409)
             if type(decision) is not bool:
                 raise AIError("请明确同意或拒绝本次操作。")
-            if (job["_cancel"].is_set() or job['permission'] not in {'approve', 'command'}
+            if (job["_cancel"].is_set() or job['permission'] not in {'approve', 'command', 'auto'}
                     or self.access(owner, job["session_id"])["mode"] != job['permission']):
                 raise AIError("授权已撤销，本次操作不会执行。", 409)
             self._check_task(str(key), self._config())
@@ -497,7 +504,7 @@ class Manager:
                     validate()
                 if action == 'restore':
                     if mode not in {'approve', 'auto', 'command'}:
-                        raise AIError('恢复需要修改权限，请选择“修改需确认”或授权自动操作。', 403)
+                        raise AIError('恢复需要修改权限，请选择“操作前确认”或授权自动操作。', 403)
                     identifiers = [data.get(k) for k in ('job_id', 'event_id')]
                     if any(not isinstance(v, str) or not v or len(v) > 128 for v in identifiers):
                         raise AIError('备份记录编号无效。')
@@ -554,6 +561,7 @@ class Manager:
             if action in {'restore', 'health'}:
                 self.jobs[key].update(history_id=archive_id, _operation_plan=operation_plan)
             record = self.permissions.get((owner, session_id))
+            self.jobs[key]['_commands_auto'] = bool(mode == 'auto' and record and record.get('command_policy') == 2)
             if mode in {"approve", "auto", "command"} and record:
                 self.jobs[key]["_access_expires"] = record["expires"]
             if conversation_id:
@@ -631,7 +639,7 @@ class Manager:
             safe_preview = self._safe_data(config, plan['preview'])
             self._event_update(event, preview=safe_preview)
             self._checkpoint(key)
-        if plan['write'] and job['permission'] in {'approve', 'command'}:
+        if plan.get('approval_required', plan['write'] and job['permission'] in {'approve', 'command'}):
             self._event_update(event, status='awaiting_approval', phase='approval')
             if not self._approval(key, config, plan, validate):
                 raise terminal_tools.ToolError('用户拒绝了本次操作，未执行。不要尝试绕过审批。')
@@ -720,7 +728,8 @@ class Manager:
         call_ids, write_failed = set(), False
         backend = job.get('_evidence_backend')
         tools = backend.schemas() if backend else terminal_tools.schemas(
-            writes=mode in {"approve", "auto", "command"}, commands=mode == 'command')
+            writes=mode in {"approve", "auto", "command"},
+            commands=mode in {'approve', 'command'} or job.get('_commands_auto', False))
         messages = [*messages]
         messages[0] = {**messages[0], "content": messages[0]["content"] +
             f"当前工具目标：{job['target']}。权限模式：{mode}。"
@@ -757,7 +766,17 @@ class Manager:
                     self.jobs[key]["events"].append(event)
                 try:
                     plan = backend.plan(name, json.loads(raw)) if backend else terminal_tools.plan(
-                        name, json.loads(raw), commands=mode == 'command')
+                        name, json.loads(raw), commands=mode in {'approve', 'command'} or job.get('_commands_auto', False))
+                    if plan['name'] == 'execute_command':
+                        policy = plan['command_policy']
+                        automatic = job.get('_commands_auto') and policy['action'] == 'auto'
+                        plan['approval_required'] = not automatic
+                        if automatic:
+                            plan['command'] = plan['auto_command']
+                        else:
+                            plan['impact'] = policy['reason'] + ' ' + plan['impact']
+                        self._event_update(event, policy={'action': 'auto' if automatic else 'confirm',
+                                                          'reason': policy['reason']})
                     if config["api_key"] and config["api_key"] in plan["command"]:
                         raise terminal_tools.ToolError("工具参数包含模型凭据，未执行。")
                     self._event_update(event, title=plan["title"], command=self._safe_text(config, plan["command"]),

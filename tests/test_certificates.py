@@ -119,6 +119,44 @@ def test_failed_first_activation_removes_new_configuration(setup_store, pem_pair
     assert not conf.exists()
 
 
+def test_config_changed_before_commit_is_preserved(setup_store):
+    store, _, conf, _, commands = setup_store
+    conf.write_text("external config")
+    with pytest.raises(certs.CertificateError, match="其他操作"):
+        store.commit_config(conf, "new config", "old config")
+    assert conf.read_text() == "external config" and not commands
+
+
+def test_failed_reload_does_not_overwrite_external_config(setup_store, monkeypatch):
+    store, _, conf, _, _ = setup_store
+    conf.write_text("old config")
+
+    def fail_with_external_change(command):
+        conf.write_text("external config")
+        raise certs.CertificateError("reload failed")
+
+    monkeypatch.setattr(certs, "run", fail_with_external_change)
+    with pytest.raises(certs.CertificateError, match="未覆盖"):
+        store.commit_config(conf, "new config", "old config")
+    assert conf.read_text() == "external config"
+
+
+def test_failed_reload_preserves_preexisting_empty_file(setup_store, monkeypatch):
+    store, _, conf, _, _ = setup_store
+    conf.write_text("")
+    calls = []
+
+    def fail_once(command):
+        calls.append(command)
+        if len(calls) == 1:
+            raise certs.CertificateError("invalid config")
+
+    monkeypatch.setattr(certs, "run", fail_once)
+    with pytest.raises(certs.CertificateError, match="已恢复"):
+        store.commit_config(conf, "new config", "")
+    assert conf.exists() and conf.read_text() == ""
+
+
 def test_wrong_domain_and_key_rejected_without_replacing_old_certificate(setup_store, pem_pair):
     store, project, conf, http, _ = setup_store
     store.operate(project, "upload", pem_pair, conf, http)

@@ -192,27 +192,26 @@ class Manager:
                 result['selected']['ban_details'] = observation.timed_bans(self._client('get', jail, 'banip', '--with-time'))
             except RuntimeError:
                 result['selected']['ban_details'] = {}
-        path = self.config_root / 'jail.d' / 'mini-deploy-panel.local'
-        if path.exists():
+        for name, field in ((JAIL, 'settings'), (SSH_JAIL, 'ssh_settings')):
+            path = self.config_root / 'jail.d' / f'{name}.local'
             trusted_path(path)
-            text = path.read_text(encoding='utf-8')
-            if text.startswith(MARKER):
-                config = configparser.ConfigParser(interpolation=None)
-                config.read_string(text)
-                result['settings'] = dict(config[JAIL])
-        path = self.config_root / 'jail.d' / f'{SSH_JAIL}.local'
-        if path.exists():
-            trusted_path(path)
-            parser = configparser.ConfigParser(interpolation=None)
-            content = path.read_text(encoding='utf-8')
-            if content.startswith(MARKER):
-                parser.read_string(content)
-                result['ssh_settings'] = dict(parser[SSH_JAIL])
+            if not path.exists():
+                continue
+            if path.stat().st_size > 64 * 1024:
+                raise ValueError(f'{path.name} 超过配置读取上限，原文件已保留')
+            try:
+                content = path.read_text(encoding='utf-8')
+                if content.startswith(MARKER):
+                    parser = configparser.ConfigParser(interpolation=None)
+                    parser.read_string(content)
+                    result[field] = dict(parser[name])
+            except (configparser.Error, KeyError, UnicodeError) as exc:
+                raise ValueError(f'{path.name} 防护配置格式异常，请核对配置；原文件已保留') from exc
         return result
 
     def start(self, data, client_ip):
         action = data.get('action')
-        if action not in {'configure', 'configure_ssh', 'disable', 'disable_ssh', 'ban', 'unban'} or data.get('confirmed') is not True:
+        if not isinstance(action, str) or action not in {'configure', 'configure_ssh', 'disable', 'disable_ssh', 'ban', 'unban'} or data.get('confirmed') is not True:
             raise ValueError('请确认本次 IP 防护操作')
         if not self.supported:
             raise ValueError('IP 防护需要在 Linux 主机上使用')
@@ -484,12 +483,12 @@ def evaluate(monitor, snapshot):
     history = snapshot.get('history', {})
     fresh = history.get('readable') and 0 <= monitor.clock() - history.get('checked_at', 0) <= 120
     bad = history.get('recent_bans', 0) >= 5
-    monitor.observe('security:ban-burst', bad if fresh else None, '短时间内出现多次 IP 封禁',
+    monitor.observe('security:ban-burst', bad if fresh and (bad or not history.get('limited')) else None, '短时间内出现多次 IP 封禁',
                     f"最近 10 分钟记录 {history.get('recent_bans', 0)} 次封禁，涉及 {history.get('recent_ips', 0)} 个 IP；请核对防护历史与规则，记录不一定都是自动封禁。",
                     'security', 'warning', immediate=True,
                     metadata={'reason': 'ban_burst', 'ban_count': history.get('recent_bans', 0), 'ip_count': history.get('recent_ips', 0)})
     with monitor.lock:
-        monitor.coverage['security'] = {'status': 'healthy' if fresh else 'unknown',
+        monitor.coverage['security'] = {'status': 'healthy' if fresh and not history.get('limited') else 'unknown',
                                         'checked_at': history.get('checked_at'), 'detail': history.get('detail', '等待防护日志采集')}
     if 'activity' in snapshot:
         activity = snapshot['activity']

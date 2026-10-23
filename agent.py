@@ -2888,6 +2888,9 @@ UI_ASSET_TYPES.update({'request-export.js': 'application/javascript; charset=utf
                        'request-export.css': 'text/css; charset=utf-8'})
 UI_ASSET_TYPES.update({'server-performance.js': 'application/javascript; charset=utf-8',
                        'server-performance-panel.css': 'text/css; charset=utf-8',
+                       'server-overview.js': 'application/javascript; charset=utf-8',
+                       'server-overview.css': 'text/css; charset=utf-8',
+                       'workspace.css': 'text/css; charset=utf-8',
                        'prometheus.js': 'application/javascript; charset=utf-8'})
 UI_ASSET_TYPES.update({
     f"previews/ssh-ai/icons/{name}.svg": "image/svg+xml"

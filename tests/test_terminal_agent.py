@@ -247,7 +247,7 @@ def test_default_opens_all_tools_but_never_modifies_without_operation_approval(a
     assert not executed and not ai_manager.permissions
     provided = model_server.calls[0][2]['tools']
     names = {t['name'] if protocol == 'anthropic' else t['function']['name'] for t in provided}
-    assert names == set(tools.TOOLS)
+    assert names == set(tools.TOOLS) | {'execute_command'}
     ai_manager.approve('owner', job['id'], pending['approval']['id'], decision)
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
     assert result['status'] == 'done' and len(executed) == 2 * int(decision)
@@ -296,15 +296,18 @@ def test_auto_requires_grant_and_background_followup_cannot_modify(ai_manager, m
     assert ai_manager.access('owner', 'different-ssh')['mode'] == 'approve'
 
 
-@pytest.mark.parametrize('mode', ['approve', 'command'])
+@pytest.mark.parametrize('mode', ['approve', 'command', 'auto'])
 @pytest.mark.parametrize('operation', ['cancel', 'revoke', 'disconnect', 'model', 'expire'])
 def test_pending_approval_stops_on_cancel_revocation_disconnect_model_or_expiry(ai_manager, model_server, operation, mode):
     ai_manager.save(ai_tests.config(model_server))
-    name, arguments = ('execute_command', {'command': 'docker ps', 'reason': '检查容器'}) if mode == 'command' else (
+    name, arguments = ('execute_command', {'command': "python3 -c 'print(1)'", 'reason': '检查环境'}) if mode in {'command', 'auto'} else (
         'restart_service', {'service': 'nginx'})
     model_server.content = lambda body, n: tool_response('openai', name, arguments)
     executed = []
-    job = submit(ai_manager, mode=mode, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
+    if mode == 'auto':
+        ai_manager.set_access('owner', 'ssh', {'mode': 'auto', 'consent': True, 'policy_version': 2})
+    job = submit(ai_manager, mode=None if mode == 'auto' else mode,
+                 execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
     pending = wait_status(ai_manager, 'owner', job['id'], {'awaiting_approval'})
     if operation == 'cancel':
         ai_manager.cancel('owner', job['id'])
@@ -439,7 +442,7 @@ def test_chat_only_omits_tools_and_incompatible_model_has_actionable_error(ai_ma
     ai_manager.set_access('owner', 'ssh', {'mode': 'readonly'})
     job = submit(ai_manager)
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
-    assert result['status'] == 'failed' and '仅对话' in result['detail']
+    assert result['status'] == 'failed' and '支持工具' in result['detail']
 
 
 def test_real_ssh_tool_channel_is_separate_cancelable_and_bounded(manager, peer):
@@ -534,7 +537,7 @@ def test_generic_plan_preserves_command_and_quotes_working_directory():
     assert shlex.split(plan['command']) == ['cd', '--', cwd, '&&', 'exec', 'sh', '-c', SQL_COMMAND]
 
 
-@pytest.mark.parametrize('mode,automatic', [('approve', False), ('auto', False), ('readonly', False), ('command', True)])
+@pytest.mark.parametrize('mode,automatic', [('auto', False), ('readonly', False), ('command', True)])
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
 def test_generic_commands_cannot_bypass_other_modes_or_background(ai_manager, model_server, mode, automatic, protocol):
     ai_manager.save(ai_tests.config(model_server, protocol))
@@ -550,21 +553,23 @@ def test_generic_commands_cannot_bypass_other_modes_or_background(ai_manager, mo
 
 @pytest.mark.parametrize('decision', [True, False])
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+@pytest.mark.parametrize('mode', ['approve', 'command'])
 def test_generic_command_real_ssh_requires_single_use_targeted_approval(
-        http_server, manager, peer, ai_manager, model_server, protocol, decision):
+        http_server, manager, peer, ai_manager, model_server, protocol, decision, mode):
     ai_manager.save(ai_tests.config(model_server, protocol))
     owner = ai.owner(http_server.cookie)
     session = ssh_tests.connect(manager, peer, owner)
     peer['exec_output'] = b'user_count\n42\n'
-    grant = {'session_id': session.id, 'mode': 'command', 'consent': True}
+    grant = {'session_id': session.id, 'mode': mode, 'consent': True}
     assert request(http_server, 'POST', '/terminal-ai/access', grant, csrf=False)[0] == 403
     assert request(http_server, 'POST', '/terminal-ai/access', {**grant, 'session_id': 'foreign'})[0] == 404
-    assert request(http_server, 'POST', '/terminal-ai/access', {**grant, 'consent': False})[0] == 400
+    if mode == 'command':
+        assert request(http_server, 'POST', '/terminal-ai/access', {**grant, 'consent': False})[0] == 400
     assert request(http_server, 'POST', '/terminal-ai/access', grant)[0] == 200
     model_server.content = lambda body, n: tool_response(protocol, 'execute_command', {
         'command': SQL_COMMAND, 'reason': '统计用户数'}) if n == 1 else answer(protocol)
     status, job = request(http_server, 'POST', '/terminal-ai/chat', ai_tests.chat_data(
-        ai_manager, session_id=session.id, permission='command'))
+        ai_manager, session_id=session.id, permission=mode))
     assert status == 200
     pending = wait_status(ai_manager, owner, job['id'], {'awaiting_approval'})
     assert pending['approval']['command'] == SQL_COMMAND and not peer['exec']
@@ -599,3 +604,68 @@ def test_generic_approval_deadline_does_not_execute(ai_manager, model_server):
             ai_manager.approve('owner', job['id'], pending['approval']['id'], True)
     result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
     assert not executed and not result.get('approval') and result['events'][0]['status'] == 'blocked'
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_new_auto_authorization_runs_common_query_without_approval(ai_manager, model_server, protocol):
+    ai_manager.save(ai_tests.config(model_server, protocol))
+    grant = ai_manager.set_access('owner', 'ssh', {'mode': 'auto', 'consent': True, 'policy_version': 2})
+    assert grant['command_policy'] == 2
+    model_server.content = lambda body, n: tool_response(protocol, 'execute_command', {
+        'command': SQL_COMMAND, 'reason': '统计用户数'}) if n == 1 else answer(protocol)
+    executed = []
+    job = submit(ai_manager, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0, 'output': '42'})
+    result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
+    assert result['status'] == 'done' and not result.get('approval') and len(executed) == 1
+    assert '-X' in executed[0]['command'] and 'BEGIN READ ONLY;' in executed[0]['command']
+    assert executed[0]['approval_required'] is False
+    assert result['events'][0]['policy']['action'] == 'auto'
+    assert 'execute_command' in json.dumps(model_server.calls[0][2]['tools'])
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+@pytest.mark.parametrize('decision', [True, False])
+def test_auto_unknown_command_always_waits_for_exact_approval(ai_manager, model_server, protocol, decision):
+    ai_manager.save(ai_tests.config(model_server, protocol))
+    ai_manager.set_access('owner', 'ssh', {'mode': 'auto', 'consent': True, 'policy_version': 2})
+    command = "python3 -c 'print(1)'"
+    model_server.content = lambda body, n: tool_response(protocol, 'execute_command', {
+        'command': command, 'reason': '检查运行环境'}) if n == 1 else answer(protocol)
+    executed = []
+    job = submit(ai_manager, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
+    pending = wait_status(ai_manager, 'owner', job['id'], {'awaiting_approval'})
+    assert not executed and pending['approval']['command'] == command
+    assert '需要确认' in pending['approval']['impact']
+    ai_manager.approve('owner', job['id'], pending['approval']['id'], decision)
+    result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
+    assert result['status'] == 'done' and len(executed) == int(decision)
+    if decision:
+        assert executed[0]['command'] == command
+
+
+@pytest.mark.parametrize('mode', ['approve', 'auto', 'command'])
+def test_destruction_is_blocked_even_with_authorization(ai_manager, model_server, mode):
+    ai_manager.save(ai_tests.config(model_server))
+    ai_manager.set_access('owner', 'ssh', {'mode': mode, 'consent': True, 'policy_version': 2})
+    model_server.content = lambda body, n: tool_response('openai', 'execute_command', {
+        'command': 'docker volume rm data', 'reason': '清理'}) if n == 1 else answer('openai')
+    executed = []
+    job = submit(ai_manager, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
+    result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
+    assert result['status'] == 'done' and not result.get('approval') and not executed
+    assert result['events'][0]['status'] == 'blocked' and '禁止' in result['events'][0]['result']
+
+
+def test_auto_background_and_forged_client_flags_cannot_expand_permissions(ai_manager, model_server):
+    ai_manager.save(ai_tests.config(model_server))
+    ai_manager.set_access('owner', 'ssh', {'mode': 'auto', 'consent': True, 'policy_version': 2})
+    model_server.content = lambda body, n: tool_response('openai', 'execute_command', {
+        'command': 'pwd', 'reason': '检查'}) if n == 1 else answer('openai')
+    executed = []
+    job = submit(ai_manager, automatic=True, execute=lambda plan, cancel: executed.append(plan) or {'exit_code': 0})
+    result = wait_status(ai_manager, 'owner', job['id'], {'done', 'failed'})
+    assert result['permission'] == 'readonly' and not executed and result['events'][0]['status'] == 'blocked'
+    assert 'execute_command' not in json.dumps(model_server.calls[0][2]['tools'])
+    for version in (True, 1, '2', 3):
+        with pytest.raises(ai.AIError):
+            ai_manager.set_access('owner', 'ssh', {'mode': 'auto', 'consent': True, 'policy_version': version})

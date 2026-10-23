@@ -475,7 +475,7 @@ def test_agent_permission_dialog_progress_and_actual_operation_approval(page, ht
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
     page.locator('#aiChatOpen').click()
-    permission = page.get_by_role('combobox', name='操作权限', exact=True)
+    permission = page.get_by_role('combobox', name='操作方式', exact=True)
     playwright.expect(permission).to_be_enabled()
     permission.click()
     page.get_by_role('option', name='自动操作', exact=True).click()
@@ -483,16 +483,11 @@ def test_agent_permission_dialog_progress_and_actual_operation_approval(page, ht
     playwright.expect(page.locator('#aiAccessConfirm')).to_be_disabled()
     assert all(p['mode'] != 'auto' for p in ai_manager.permissions.values())
     page.get_by_role('button', name='取消 AI 授权', exact=True).click()
-    playwright.expect(permission).to_contain_text('修改需确认')
-    permission.click()
-    page.get_by_role('option', name='只读检查', exact=True).click()
-    playwright.expect(page.locator('#aiPermission')).to_have_value('readonly')
-    playwright.expect(permission).to_be_enabled()
-    permission.click()
-    page.get_by_role('option', name='修改需确认', exact=True).click()
+    playwright.expect(permission).to_contain_text('操作前确认')
+    assert page.locator('#aiPermission option').evaluate_all('(items) => items.map(item => item.value)') == ['approve', 'auto']
     playwright.expect(page.locator('#aiPermission')).to_have_value('approve')
     playwright.expect(page.locator('#aiAccessDialog')).not_to_be_visible()
-    playwright.expect(permission).to_contain_text('修改需确认')
+    playwright.expect(permission).to_contain_text('操作前确认')
     page.locator('#aiQuestion').fill('检查容器状态，必要时重启 nginx')
     page.locator('#aiAskSend').click()
     playwright.expect(page.locator('.tai-approval')).to_be_visible(timeout=10000)
@@ -519,7 +514,7 @@ def test_agent_permission_dialog_progress_and_actual_operation_approval(page, ht
 
 
 @pytest.mark.parametrize('protocol,decision', [('openai', True), ('anthropic', False)])
-def test_generic_command_opt_in_and_per_command_approval(
+def test_default_generic_command_requires_per_command_approval(
         page, http_server, manager, peer, ai_manager, model_server, tmp_path, protocol, decision):
     model_server.content = lambda body, n: agent_tests.tool_response(protocol, 'execute_command', {
         'command': agent_tests.SQL_COMMAND, 'reason': '统计用户数'}) if n == 1 else agent_tests.answer(protocol)
@@ -533,24 +528,11 @@ def test_generic_command_opt_in_and_per_command_approval(
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
     page.locator('#aiChatOpen').click()
-    permission = page.get_by_role('combobox', name='操作权限', exact=True)
+    permission = page.get_by_role('combobox', name='操作方式', exact=True)
     playwright.expect(permission).to_be_enabled()
-    permission.click()
-    page.get_by_role('option', name='通用命令 · 逐条确认', exact=True).click()
-    playwright.expect(page.locator('#aiAccessDialog')).to_be_visible()
-    playwright.expect(page.locator('#aiAccessPolicy')).to_contain_text('无法保证“禁止删除”')
-    playwright.expect(page.locator('#aiAccessConfirm')).to_be_disabled()
-    assert not ai_manager.permissions
-    page.get_by_role('button', name='取消 AI 授权', exact=True).click()
     playwright.expect(page.locator('#aiPermission')).to_have_value('approve')
-    permission.click()
-    page.get_by_role('option', name='通用命令 · 逐条确认', exact=True).click()
-    page.set_viewport_size({'width': 390, 'height': 844})
-    page.screenshot(path=str(tmp_path / 'generic-access-mobile.png'))
-    page.locator('#aiAccessConsent').check()
-    page.locator('#aiAccessConfirm').click()
     playwright.expect(page.locator('#aiAccessDialog')).not_to_be_visible()
-    playwright.expect(page.locator('#aiPermission')).to_have_value('command')
+    page.set_viewport_size({'width': 390, 'height': 844})
     page.locator('#aiQuestion').fill('查询 aimore 数据库的用户数')
     page.locator('#aiAskSend').click()
     playwright.expect(page.locator('.tai-approval')).to_be_visible(timeout=10000)
@@ -565,9 +547,73 @@ def test_generic_command_opt_in_and_per_command_approval(
     playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)
     assert peer['exec'] == ([agent_tests.SQL_COMMAND.encode()] if decision else [])
     assert not peer['input']
+    page.locator('#aiPanelClose').click()
+    page.locator('#sshDisconnect').click()
+
+
+@pytest.mark.parametrize('protocol,decision', [('openai', True), ('anthropic', False)])
+def test_auto_generic_query_and_unknown_command_fallback(
+        page, http_server, manager, peer, ai_manager, model_server, tmp_path, protocol, decision):
+    def response(body, number):
+        if number == 1:
+            return agent_tests.tool_response(protocol, 'execute_command', {
+                'command': agent_tests.SQL_COMMAND, 'reason': '统计用户数'})
+        if number == 2:
+            return agent_tests.tool_response(protocol, 'execute_command', {
+                'command': "python3 -c 'print(1)'", 'reason': '检查运行环境'}, 'call_two')
+        if number == 3:
+            return agent_tests.tool_response(protocol, 'execute_command', {
+                'command': 'docker volume rm data', 'reason': '清理数据'}, 'call_three')
+        return agent_tests.answer(protocol)
+    model_server.content = response
+    settings_form(page, http_server, model_server, protocol)
+    page.locator('#aiSave').click()
+    playwright.expect(page.locator('#aiSettingsDialog')).not_to_be_visible()
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    playwright.expect(page.locator('#sshFingerprintDialog')).to_be_visible(timeout=10000)
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    page.locator('#aiChatOpen').click()
+    permission = page.get_by_role('combobox', name='操作方式', exact=True)
+    playwright.expect(permission).to_be_enabled()
     permission.click()
-    page.get_by_role('option', name='修改需确认', exact=True).click()
+    page.get_by_role('option', name='自动操作', exact=True).click()
+    playwright.expect(page.locator('#aiAccessDescription')).to_contain_text('通用查询命令')
+    playwright.expect(page.locator('#aiAccessPolicy')).to_contain_text('间接删除')
+    playwright.expect(page.locator('#aiAccessConfirm')).to_be_disabled()
+    assert not ai_manager.permissions
+    page.get_by_role('button', name='取消 AI 授权', exact=True).click()
     playwright.expect(page.locator('#aiPermission')).to_have_value('approve')
+    permission.click()
+    page.get_by_role('option', name='自动操作', exact=True).click()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.screenshot(path=str(tmp_path / 'auto-consent-mobile.png'))
+    page.locator('#aiAccessConsent').check()
+    page.locator('#aiAccessConfirm').click()
+    playwright.expect(page.locator('#aiAccessDialog')).not_to_be_visible()
+    playwright.expect(page.locator('#aiPermission')).to_have_value('auto')
+    assert next(iter(ai_manager.permissions.values()))['command_policy'] == 2
+    page.locator('#aiQuestion').fill('检查用户数量和运行环境')
+    page.locator('#aiAskSend').click()
+    playwright.expect(page.locator('.tai-approval')).to_be_visible(timeout=10000)
+    playwright.expect(page.locator('.tai-approval')).to_contain_text("python3 -c 'print(1)'")
+    playwright.expect(page.locator('.tai-approval')).to_contain_text('需要确认')
+    assert len(peer['exec']) == 1 and b'BEGIN READ ONLY;' in peer['exec'][0]
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / 'auto-fallback-mobile.png'))
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.screenshot(path=str(tmp_path / 'auto-fallback-desktop.png'), full_page=True)
+    page.get_by_role('button', name='同意执行' if decision else '拒绝', exact=True).click()
+    playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)
+    assert len(peer['exec']) == 1 + int(decision)
+    assert b'docker volume rm' not in b'\n'.join(peer['exec']) and not peer['input']
+    playwright.expect(page.locator('.tai-steps')).to_contain_text('禁止删除')
+    permission.click()
+    page.get_by_role('option', name='操作前确认', exact=True).click()
+    playwright.expect(page.locator('#aiPermission')).to_have_value('approve')
+    assert next(iter(ai_manager.permissions.values()))['command_policy'] == 0
     page.locator('#aiPanelClose').click()
     page.locator('#sshDisconnect').click()
 

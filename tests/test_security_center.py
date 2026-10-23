@@ -9,6 +9,7 @@ import pytest
 
 from security_center import Center, login_event
 from security_observation import History
+from test_security_observation import journal_reader
 
 
 @pytest.fixture
@@ -149,6 +150,25 @@ def test_incremental_file_logins_keep_partial_lines_and_read_only_snapshot(cente
     assert scanner.activity()['login_success_24h'] == 1 and log.read_text().strip() == line
     scanner.scan(facts('polling', logpath=str(log.parent / '../private.log')))
     assert scanner.activity()['total'] == 1 and not scanner.activity()['auth']['readable']
+
+
+def test_ssh_journal_backlog_drains_without_losing_same_second_logins(center):
+    scanner, state, _ = center
+    entries = [journal(state, f'Failed password for root from 198.51.100.{i % 250 + 1} port 42 ssh2', i)
+               for i in range(720)]
+    for item in entries:
+        item['__REALTIME_TIMESTAMP'] = entries[0]['__REALTIME_TIMESTAMP']
+    reader, original = journal_reader(entries), scanner.run
+    scanner.run = lambda args: reader(args) if args[0] == 'journalctl' else original(args)
+    scanner.scan(facts())
+    assert scanner.activity()['total'] == 500
+    assert scanner.activity()['auth']['limited']
+    scanner.scan(facts())
+    result = scanner.activity()
+    assert result['login_failure_24h'] == 720
+    assert not result['auth']['limited']
+    scanner.scan(facts())
+    assert scanner.activity()['total'] == 720
 
 
 def test_unified_activity_contains_fail2ban_and_never_erases_legacy_events(center):

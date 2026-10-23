@@ -125,6 +125,33 @@ def test_running_update_validates_reloads_and_rolls_back(store, monkeypatch):
     assert store.read("api")["spec"]["upstream"] == "http://api:8000"
 
 
+@pytest.mark.parametrize('operation', ['save', 'logging'])
+def test_failed_reload_keeps_external_gateway_configuration(store, monkeypatch, operation):
+    saved = store.save(spec())
+    entry = store.read('api')
+    path = store.directory('api') / 'conf/nginx.conf'
+    item = {'Id': 'a' * 64, 'State': {'Running': True, 'Status': 'running'}}
+    monkeypatch.setattr(store, 'inspect', lambda _: item)
+    calls = []
+
+    def reload(identifier):
+        calls.append(identifier)
+        path.write_text('# externally managed configuration\n', encoding='utf-8')
+        raise CertificateError('reload failed')
+
+    monkeypatch.setattr(store, 'reload', reload)
+    with pytest.raises(CertificateError, match='外部修改'):
+        if operation == 'save':
+            store.save(spec(upstream='http://new-api:8000'), saved['revision'])
+        else:
+            path.write_text(gateway.config(entry['spec'], details=False), encoding='utf-8')
+            store.upgrade_logging(entry, item)
+    assert path.read_text() == '# externally managed configuration\n' and len(calls) == 1
+    assert store.read('api') == entry
+    if operation == 'save':
+        assert (store.directory('api') / 'pending.json').exists()
+
+
 def test_failed_first_write_is_recoverable(store, monkeypatch):
     original = gateway.atomic_write
 

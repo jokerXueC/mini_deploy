@@ -637,17 +637,38 @@ class Discovery:
                 else:
                     self.call(["systemctl", "reload", "nginx"])
 
+            for path, original in zip(paths, originals):
+                certificates.trusted_path(path)
+                if path.read_bytes() != original:
+                    raise DiscoveryError("校验期间证书文件已被其他操作修改，未覆盖，请重新扫描")
+            if certificate_metadata(originals[0].decode("utf-8"))["fingerprint"] != fingerprint:
+                raise DiscoveryError("证书已被其他操作修改，未覆盖，请重新扫描")
+            if managed and metadata.read_text(encoding="utf-8") != metadata_text:
+                raise DiscoveryError("托管证书记录已变化，未覆盖，请重新扫描")
+            written = {}
+            updated_metadata = None
             try:
                 for index, content in enumerate((pem.encode(), key.encode())):
                     write(index, content)
+                    written[index] = content
                 if managed:
-                    certificates.atomic_write(metadata, json.dumps({**record, **details, "domain": record["domain"]}, ensure_ascii=False))
+                    updated_metadata = json.dumps({**record, **details, "domain": record["domain"]}, ensure_ascii=False)
+                    certificates.atomic_write(metadata, updated_metadata)
                 reload_service()
             except (OSError, ValueError) as exc:
                 try:
-                    for index, content in enumerate(originals):
-                        write(index, content)
-                    if metadata_text is not None:
+                    # A failed reload must not undo a concurrent renewal or administrator edit.
+                    for index, path in enumerate(paths):
+                        certificates.trusted_path(path)
+                        if path.read_bytes() != written.get(index, originals[index]):
+                            raise DiscoveryError("证书文件被其他操作修改，未覆盖该修改")
+                    if managed:
+                        certificates.trusted_path(metadata)
+                        if metadata.read_text(encoding="utf-8") not in {metadata_text, updated_metadata}:
+                            raise DiscoveryError("托管证书记录被其他操作修改，未覆盖该修改")
+                    for index in written:
+                        write(index, originals[index])
+                    if managed and updated_metadata is not None:
                         certificates.atomic_write(metadata, metadata_text)
                     reload_service()
                 except (OSError, ValueError) as rollback:

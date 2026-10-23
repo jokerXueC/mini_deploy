@@ -10,6 +10,74 @@ from test_security_observation import native_line
 from scripts.preview_security import examples as preview_examples
 
 
+def test_failed_refresh_marks_retained_results_unknown_and_recovers(page, http_server, monkeypatch, engine):
+    manager, _, _ = engine
+    manager.scan()
+    manager.observation = preview_examples()['observation']
+    monkeypatch.setattr(manager, 'request_scan', lambda: None)
+    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
+    page.goto(http_server.origin + '/ui?view=security')
+    playwright.expect(page.locator('#securityRiskCount')).to_have_text('3')
+    failed = False
+
+    def status_response(route):
+        if failed:
+            route.fulfill(status=503, json={'detail': '临时读取失败'})
+        else:
+            route.continue_()
+
+    page.route('**/security/center?*', status_response)
+    failed = True
+    page.locator('#ipSecurityRefresh').click()
+    playwright.expect(page.locator('#securitySummaryNote')).to_contain_text('临时读取失败')
+    playwright.expect(page.locator('#securityRiskCount')).to_have_text('—')
+    playwright.expect(page.locator('#securityRisks .security-risk')).to_have_count(3)
+    page.locator('#securityProtection > summary').click()
+    playwright.expect(page.locator('#ipSecuritySetup')).to_be_disabled()
+    failed = False
+    page.locator('#ipSecurityRefresh').click()
+    playwright.expect(page.locator('#securityRiskCount')).to_have_text('3')
+    playwright.expect(page.locator('#ipSecuritySetup')).to_be_enabled()
+
+
+@pytest.mark.parametrize('lost_submission', [False, True])
+def test_job_poll_retries_read_failure_without_resubmitting_operation(page, http_server, monkeypatch, engine, lost_submission):
+    manager, _, _ = engine
+    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
+    page.goto(http_server.origin + '/ui?view=security')
+    playwright.expect(page.locator('#ipSecurityStatus')).to_have_text('Fail2ban 运行中')
+    page.clock.install()
+    posts = []
+    polls = []
+
+    def job_response(route):
+        if route.request.method == 'POST':
+            posts.append(route.request.post_data_json)
+            route.fulfill(status=503 if lost_submission else 202, json={'job': {'state': 'running'}})
+        elif 'job=1' in route.request.url:
+            polls.append(route.request.url)
+            if len(polls) == 1:
+                route.fulfill(status=503, json={'detail': '临时读取失败'})
+            else:
+                route.fulfill(json={'job': {'state': 'succeeded', 'message': '操作验证完成'}})
+        else:
+            route.continue_()
+
+    page.route('**/security/center?*', job_response)
+    page.locator('#securityProtection > summary').click()
+    page.locator('#ipSecuritySetup').click()
+    page.locator('#confirmOkBtn').click()
+    if lost_submission:
+        playwright.expect(page.locator('#ipSecurityFeedback')).to_contain_text('提交结果暂未确认')
+        page.clock.fast_forward(1001)
+    playwright.expect(page.locator('#ipSecurityFeedback')).to_contain_text('正在重新读取结果')
+    playwright.expect(page.locator('#ipSecuritySetup')).to_be_disabled()
+    page.clock.fast_forward(5001)
+    playwright.expect(page.locator('#ipSecurityFeedback')).to_have_text('操作验证完成')
+    playwright.expect(page.locator('#ipSecuritySetup')).to_be_enabled()
+    assert len(posts) == 1 and len(polls) == 2
+
+
 @pytest.mark.parametrize('width', [1440, 390])
 def test_ban_confirmations_admin_protection_and_pause(page, http_server, monkeypatch, engine, tmp_path, width):
     manager, state, _ = engine

@@ -131,6 +131,67 @@ def test_journal_collection_persists_with_time_and_source_limits(tmp_path):
     assert history.snapshot()['total'] == 1
 
 
+def journal_reader(entries):
+    def run(args):
+        if '--after-cursor' in args:
+            cursor = args[args.index('--after-cursor') + 1]
+            offset = next(i + 1 for i, item in enumerate(entries) if item['__CURSOR'] == cursor)
+            pending = entries[offset:]
+        else:
+            since = float(args[args.index('--since') + 1].lstrip('@'))
+            pending = [item for item in entries if int(item['__REALTIME_TIMESTAMP']) / 1e6 >= since]
+        count = args[args.index('-n') + 1]
+        selected = pending[:int(count)] if count.startswith('+') else pending[-int(count):]
+        return '\n'.join(json.dumps(item) for item in selected)
+    return run
+
+
+def test_journal_backlog_drains_across_restarts_without_skipping_equal_timestamps(tmp_path):
+    now = time.time() - 1
+    entries = [{'__CURSOR': f'entry-{i}', '__REALTIME_TIMESTAMP': str(int(now * 1e6)),
+                'MESSAGE': native_line(ip=f'2001:db8::{i + 1:x}')}
+               for i in range(1200)]
+    reader = journal_reader(entries)
+    history = security.History(tmp_path / 'data', runner=reader, log_root=tmp_path / 'missing')
+    assert history.collect('STDOUT')['limited']
+    assert history.snapshot()['total'] == 1000
+    restored = security.History(tmp_path / 'data', runner=reader, log_root=tmp_path / 'missing')
+    assert not restored.collect('STDOUT')['limited']
+    assert restored.snapshot()['total'] == 1200
+    restored.collect('STDOUT')
+    assert restored.snapshot()['total'] == 1200
+
+
+def test_journal_vacuum_falls_back_to_time_and_malformed_batch_keeps_cursor(tmp_path):
+    now = time.time() - 1
+    entries = [{'__CURSOR': 'first', '__REALTIME_TIMESTAMP': str(int(now * 1e6)), 'MESSAGE': native_line()}]
+    reader = journal_reader(entries)
+    history = security.History(tmp_path / 'data', runner=reader, log_root=tmp_path / 'missing')
+    history.collect('STDOUT')
+    entries.append({'__CURSOR': 'second', '__REALTIME_TIMESTAMP': str(int(now * 1e6)),
+                    'MESSAGE': native_line(ip='198.51.100.99')})
+    def vacuumed(args):
+        if '--after-cursor' in args:
+            raise RuntimeError('cursor no longer available')
+        return reader(args)
+    history.run = vacuumed
+    assert history.collect('STDOUT')['limited']
+    assert history.snapshot()['total'] == 2
+    history.run = lambda _: json.dumps(entries[1]) + '\nnull'
+    assert not history.collect('STDOUT')['readable']
+    with history.connection(readonly=True) as db:
+        assert db.execute("SELECT value FROM cursors WHERE key='journal:cursor'").fetchone()['value'] == 'second'
+    assert history.snapshot()['total'] == 2
+
+
+def test_new_openssh_session_process_is_detected_in_file_logs(tmp_path):
+    (tmp_path / 'auth.log').write_text('Oct 22 10:00:00 host sshd-session[43]: Failed password for root from 198.51.100.2 port 5000 ssh2\n')
+    inspector = security.Inspector(
+        runner=lambda _: 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=10,fd=3))',
+        which=lambda _: None, log_root=tmp_path)
+    assert inspector.scan()['ssh']['backend'] == 'polling'
+
+
 def test_oversized_appended_line_makes_progress_and_does_not_parse_embedded_events(tmp_path):
     log = tmp_path / 'fail2ban.log'
     log.write_text(native_line())

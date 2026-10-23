@@ -21,9 +21,13 @@
   <link rel="stylesheet" href="ui/ssh-file-manager.css">
   <link rel="stylesheet" href="ui/request-export.css">
   <link rel="stylesheet" href="ui/server-performance-panel.css">
+  <link rel="stylesheet" href="ui/server-overview.css">
   <link rel="stylesheet" href="ui/vendor/xterm.css">
+  <link rel="stylesheet" href="ui/panel-ai.css">
+  <link rel="stylesheet" href="ui/ip-security.css">
+  <link rel="stylesheet" href="ui/workspace.css">
 </head>
-<body>
+<body class="panel-workspace">
   <main class="page">
     <div class="top-bar">
       <a class="back-pill" href="ui">服务器面板</a>
@@ -144,7 +148,7 @@
         <div id="aiResizeHandle" class="tai-resize-handle" role="separator" aria-label="调整终端与 AI 对话宽度" aria-orientation="vertical" aria-controls="aiPanel" tabindex="0" title="左右拖动调整宽度，双击恢复默认" hidden></div>
         <aside id="aiPanel" class="tai-panel" aria-label="AI 诊断助手" hidden>
           <div class="tai-panel-head"><div><h2><i class="tai-icon" data-ai-icon="sparkles"></i>AI 助手</h2><button id="aiPanelModel" type="button" class="tai-model">配置模型</button></div><div class="tai-panel-actions"><button id="aiHistoryOpen" class="toolbar-icon" type="button" aria-label="对话历史" title="对话历史"><i class="tai-icon" data-ai-icon="message-square"></i></button><button id="aiNewChat" class="toolbar-icon" type="button" aria-label="新建对话" title="新建对话"><i class="tai-icon" data-ai-icon="plus"></i></button><button id="aiPanelExpand" class="toolbar-icon" type="button" aria-label="放大 AI 对话" title="放大 AI 对话" aria-expanded="false" aria-controls="aiExpandedDialog"><i class="tai-icon" data-ai-icon="maximize-2"></i></button><button id="aiPanelClose" class="toolbar-icon" type="button" aria-label="收起 AI 对话" title="收起 AI 对话"><i class="tai-icon" data-ai-icon="panel-right-close"></i></button></div></div>
-          <div class="tai-access"><label for="aiPermission">操作权限</label><select id="aiPermission" aria-label="操作权限"><option value="chat">仅对话</option><option value="readonly">只读检查</option><option value="approve" selected>修改需确认</option><option value="auto">自动操作</option><option value="command">通用命令 · 逐条确认</option></select><button id="aiHealthCheck" class="toolbar-icon" type="button" aria-label="服务器只读体检" title="服务器只读体检"><i class="tai-icon" data-ai-icon="scan-text"></i></button></div>
+          <div class="tai-access"><label for="aiPermission">操作方式</label><select id="aiPermission" aria-label="操作方式"><option value="approve" selected>操作前确认</option><option value="auto">自动操作</option></select><button id="aiHealthCheck" class="toolbar-icon" type="button" aria-label="服务器只读体检" title="服务器只读体检"><i class="tai-icon" data-ai-icon="scan-text"></i></button></div>
           <div class="tai-watch"><span id="aiScopeLabel">对话</span><label><span>跟进新输出</span><input id="aiAuto" type="checkbox" role="switch" aria-label="跟进新输出"><span class="tai-switch" aria-hidden="true"></span></label></div>
           <div id="aiHistoryBar" class="tai-history-bar" hidden><span id="aiHistoryCaption"></span><div><button id="aiHistoryOlder" class="tai-text-button" type="button" hidden>更早记录</button><button id="aiHistoryLatest" class="tai-text-button" type="button">最新记录</button></div></div>
           <div id="aiMessages" class="tai-messages" aria-live="polite"><div id="aiEmpty" class="tai-empty"><i class="tai-icon" data-ai-icon="sparkles"></i><strong>想排查什么问题？</strong><p>例如：这段报错是什么原因？</p></div></div>
@@ -447,7 +451,7 @@
         </article>
         <article class="status-stat-card resource-card">
           <div class="status-card-main">
-            <div class="resource-heading"><span class="stat-title">内存</span><span class="resource-tag">MEMORY</span></div>
+            <div class="resource-heading"><span class="stat-title">内存</span></div>
             <div id="memoryCapacity" class="resource-capacity">容量未知</div>
             <div class="resource-value" id="memoryValue">-</div>
             <div class="resource-sub" id="memorySub">-</div>
@@ -458,7 +462,7 @@
         </article>
         <article class="status-stat-card resource-card">
           <div class="status-card-main">
-            <div class="resource-heading"><span class="stat-title">磁盘</span><span class="resource-tag">STORAGE</span></div>
+            <div class="resource-heading"><span class="stat-title">磁盘</span></div>
             <div id="diskCapacity" class="resource-capacity">容量未知</div>
             <div class="resource-value" id="diskValue">-</div>
             <div class="resource-sub" id="diskSub">/</div>
@@ -469,7 +473,7 @@
         </article>
         <article class="status-stat-card resource-card">
           <div class="status-card-main">
-            <div class="resource-heading"><span class="stat-title">网络</span><span class="resource-tag">NETWORK</span></div>
+            <div class="resource-heading"><span class="stat-title">网络</span></div>
             <div class="resource-capacity">实时吞吐</div>
             <div class="resource-value" id="networkValue">-</div>
             <div class="resource-sub" id="networkSub">RX - / TX -</div>
@@ -500,13 +504,14 @@
       <section class="panel system-trend-panel">
         <div class="panel-head">
           <div>
-            <h2>核心资源趋势</h2>
+            <h2>资源观测</h2>
             <p id="systemTrendHint">等待资源采样</p>
           </div>
           <div class="trend-head-actions">
             <button id="serverPerformanceOpen" class="ghost-button compact-action" type="button"><img src="ui/previews/ssh-ai/icons/eye.svg" alt="">24 小时性能</button>
             <div class="trend-range-controls" aria-label="趋势范围">
-              <button class="trend-range active" type="button" data-trend-range="realtime">实时</button>
+              <button class="trend-range" type="button" data-trend-range="realtime">实时</button>
+              <button class="trend-range active" type="button" data-trend-range="1h">1h</button>
               <button class="trend-range" type="button" data-trend-range="24h">24h</button>
               <button class="trend-range" type="button" data-trend-range="6h">6h</button>
               <button class="trend-range" type="button" data-trend-range="7d">7d</button>
@@ -514,6 +519,41 @@
             </div>
           </div>
         </div>
+        <div class="observation-toolbar">
+          <label class="observation-target">观测对象<select id="observationTarget" aria-label="观测对象"><option value="">服务器整体</option></select></label>
+          <div class="observation-metrics" role="group" aria-label="摘要指标">
+            <button type="button" data-observation-metric="cpu_percent" aria-pressed="true">CPU</button>
+            <button type="button" data-observation-metric="memory_percent" aria-pressed="false">内存</button>
+            <button type="button" data-observation-metric="network_total_kbps" aria-pressed="false">网络</button>
+          </div>
+          <span id="observationStatus" class="muted" role="status"></span>
+        </div>
+        <div class="resource-observation">
+          <section class="load-map" aria-labelledby="loadMapTitle">
+            <div class="load-map-heading"><h3 id="loadMapTitle">异常定位时间轴</h3><span id="loadMapRange">等待采样</span></div>
+            <div class="load-map-scroll" tabindex="0" aria-label="资源时间轴">
+              <div class="load-map-time">
+              <div id="loadMap" class="load-map-grid" aria-label="按时间对齐的资源采样"></div>
+              <div class="load-map-axis"><span id="loadMapStart">—</span><span id="loadMapEnd">—</span></div>
+              </div>
+            </div>
+            <div class="load-map-footer"><div class="load-map-legend"><span>低</span><i></i><i></i><i></i><i></i><span>高</span><span class="load-map-high"><i></i>高占用</span></div><span id="loadMapDetail" class="load-map-detail">等待资源采样</span></div>
+          </section>
+          <aside class="load-summary" aria-label="所选范围摘要">
+            <div class="load-summary-primary"><span id="loadAverageLabel">CPU 平均占用</span><strong id="loadAverage">—</strong><small id="loadSampleCount">等待采样</small></div>
+            <div class="load-summary-row"><span><i class="load-marker peak"></i><span id="loadPeakLabel">CPU 峰值</span></span><strong id="loadPeak">—</strong></div>
+            <div class="load-summary-row"><span><i class="load-marker memory"></i>最近采样</span><strong id="loadLatest">—</strong></div>
+            <div class="load-summary-row"><span><i class="load-marker"></i><span id="loadHighLabel">CPU ≥ 80%</span></span><strong id="loadHighCount">—</strong></div>
+            <button id="observationLocate" class="load-summary-link" type="button">定位峰值 <img src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button>
+            <button id="loadHistoryOpen" class="load-summary-link" type="button">查看历史与进程现场 <img src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button>
+          </aside>
+        </div>
+        <section id="observationEvidence" class="observation-evidence" hidden aria-labelledby="observationEvidenceTitle">
+          <div class="evidence-heading"><div><h3 id="observationEvidenceTitle">所选时段</h3><p id="observationEvidenceRange"></p></div><button id="observationEvidenceClose" type="button" class="ghost-button compact-action" aria-label="关闭时段详情">收起</button></div>
+          <div id="observationEvidenceMetrics" class="evidence-metrics"></div>
+          <div class="evidence-columns"><section><div class="evidence-scene-heading"><h4>已保存的进程现场</h4><select id="observationScene" aria-label="进程现场采样时间" hidden></select></div><div id="observationProcesses" aria-live="polite"></div></section><section><h4>同时段事件</h4><div id="observationEvents" aria-live="polite"></div></section></div>
+          <p class="evidence-notice">现场与事件仅表示同时发生，不能据此确认原因。短时进程可能未被采集。</p>
+        </section>
         <div id="systemTrendChart" class="system-trend-chart skeleton-block"></div>
       </section>
 
@@ -690,6 +730,7 @@
 
   <script src="ui/motion.js"></script>
   <script src="ui/selects.js"></script>
+  <script src="ui/server-overview.js"></script>
   <script src="ui/app.js"></script>
   <script src="ui/operations.js"></script>
   <script src="ui/performance.js"></script>
@@ -700,9 +741,7 @@
   <script src="ui/monitoring.js"></script>
   <script src="ui/prometheus.js"></script>
   <script src="ui/docker-images.js"></script>
-  <link rel="stylesheet" href="ui/panel-ai.css">
   <script src="ui/panel-ai.js"></script>
-  <link rel="stylesheet" href="ui/ip-security.css">
   <script src="ui/ip-security.js"></script>
   <script src="ui/docker-mirrors.js"></script>
   <script src="ui/request-gateway.js"></script>

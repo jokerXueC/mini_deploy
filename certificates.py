@@ -168,13 +168,18 @@ class CertificateStore:
 
     def commit_config(self, path: Path, content: str, previous: str) -> None:
         trusted_path(path.parent)
+        if self.config(path) != previous:
+            raise CertificateError("Nginx 配置已被其他操作修改，请重新读取后操作")
+        existed = path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(path, content)
         try:
             run(self.command("test"))
             run(self.command("reload"))
         except CertificateError as exc:
-            if previous:
+            if not path.exists() or self.config(path) != content:
+                raise CertificateError("Nginx 加载失败且配置被其他操作修改，未覆盖该修改，请检查服务") from exc
+            if existed:
                 atomic_write(path, previous)
             else:
                 path.unlink()
@@ -236,13 +241,14 @@ class CertificateStore:
                 candidate.rmdir()
                 raise
             new_record = {**details, "revision": revision, "label": label}
+            new_config = self.https_config(project, new_record, http) if active else ""
             if active:
-                self.commit_config(conf_path, self.https_config(project, new_record, http), previous)
+                self.commit_config(conf_path, new_config, previous)
             try:
                 atomic_write(metadata, json.dumps(new_record, ensure_ascii=False))
             except Exception:
                 if active:
-                    self.commit_config(conf_path, previous, self.config(conf_path))
+                    self.commit_config(conf_path, previous, new_config)
                 raise
             # Previous revisions remain private recovery material until explicit deletion.
             return

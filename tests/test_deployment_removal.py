@@ -155,7 +155,7 @@ def test_old_queue_and_history_never_enter_monitoring_state(runtime):
     assert not hasattr(agent, "_restore_queued_jobs")
 
 
-def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
+def test_startup_starts_monitoring_and_maintenance_without_deployment(runtime, monkeypatch):
     original = json.dumps({"queued_jobs": [{"project_key": "api"}], "system_metrics": []}).encode()
     agent.STATE_FILE.write_bytes(original)
     started = []
@@ -168,7 +168,8 @@ def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
             started.append(self.target.__name__)
 
         def join(self, timeout):
-            assert timeout == (5 if self.target is agent.docker_events.run else 10)
+            short_shutdown = {agent.docker_events.run, agent._docker_image_cleanup_sampler, agent._security_sampler}
+            assert timeout == (5 if self.target in short_shutdown else 10)
 
     class Server:
         def __init__(self, address, handler):
@@ -186,7 +187,8 @@ def test_startup_starts_only_monitoring_tasks(runtime, monkeypatch):
     monkeypatch.setattr(agent.sys, "argv", ["agent.py"])
     agent.main()
     assert started == ["_realtime_metric_sampler", "_system_metric_sampler", '_server_performance_sampler',
-                       "_docker_log_metric_sampler", "_health_check_sampler", "run", "_certificate_discovery_sampler", "run"]
+                       "_docker_log_metric_sampler", "_health_check_sampler", "run", "_docker_image_cleanup_sampler",
+                       "_certificate_discovery_sampler", "_security_sampler", "run"]
     assert agent.STATE_FILE.read_bytes() == original
 
 

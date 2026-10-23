@@ -53,7 +53,7 @@ def test_long_options_and_moving_ai_panel_keep_menu_visible(browser_page, tmp_pa
         'configured': True, 'secure': True, 'http_enabled': True,
         'protocol': 'openai', 'model': 'test-model', 'base_url': 'https://model.example/v1', 'csrf_token': 'test'}))
     page.route('**/terminal-ai/access*', lambda route: route.fulfill(json={
-        'mode': route.request.post_data_json['mode'] if route.request.method == 'POST' else 'readonly'}))
+        'mode': route.request.post_data_json['mode'] if route.request.method == 'POST' else 'approve'}))
     page.evaluate("window.SSHTerminal.context = () => ({session_id:'mock-session', target:'test-server', cursor:0})")
     page.locator('#terminalViewTab').click()
     page.locator('#aiSettingsOpen').click()
@@ -71,8 +71,8 @@ def test_long_options_and_moving_ai_panel_keep_menu_visible(browser_page, tmp_pa
     page.locator('#aiPermission-button').click()
     menu = assert_menu_fits(page, single_line=True)
     assert menu.evaluate('(node) => node.parentElement.id') == 'aiExpandedDialog'
-    page.get_by_role('option', name='仅对话', exact=True).click()
-    playwright.expect(page.locator('#aiPermission')).to_have_value('chat')
+    page.get_by_role('option', name='操作前确认', exact=True).click()
+    playwright.expect(page.locator('#aiPermission')).to_have_value('approve')
     page.locator('#aiPermission-button').click()
     page.screenshot(path=str(tmp_path / f'ai-expanded-menu-{width}.png'))
     page.keyboard.press('Escape')

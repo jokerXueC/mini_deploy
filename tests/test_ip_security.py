@@ -275,6 +275,28 @@ def test_increment_rejects_old_fail2ban_before_writing(engine):
     assert not root.exists()
 
 
+@pytest.mark.parametrize('jail', [security.JAIL, security.SSH_JAIL])
+@pytest.mark.parametrize('content', ['not an ini file', '[wrong-section]\nenabled = true', '[mini-deploy-panel]\na=1\na=2'])
+def test_corrupt_owned_configuration_returns_json_without_overwriting(http_server, monkeypatch, engine, jail, content):
+    manager, _, root = engine
+    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
+    path = root / 'jail.d' / f'{jail}.local'
+    path.parent.mkdir(parents=True)
+    original = (security.MARKER + '\n' + content).encode()
+    path.write_bytes(original)
+    code, body = request(http_server, 'GET', '/security/center')
+    assert code == 503 and '配置格式异常' in body['detail']
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize('action', [[], {}, None, 123])
+def test_malformed_action_is_rejected_without_starting_a_job(http_server, monkeypatch, engine, action):
+    manager, state, _ = engine
+    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
+    assert request(http_server, 'POST', '/security/center', {'action': action, 'confirmed': True})[0] == 400
+    assert manager.worker is None and not state['commands']
+
+
 def test_background_scan_reports_unknown_firewall_without_claiming_enforcement(engine):
     manager, _, _ = engine
     manager.scan()
@@ -295,5 +317,8 @@ def test_security_alert_uses_existing_notification_mute_and_retry(engine, tmp_pa
     assert monitor.next_notification(True)[0] == 'security:ban-burst'
     security.evaluate(monitor, {'history': {'readable': False, 'checked_at': now, 'recent_bans': 0}})
     assert monitor.snapshot()['alerts'][0]['stale']
+    security.evaluate(monitor, {'history': {'readable': True, 'limited': True, 'checked_at': now, 'recent_bans': 0}})
+    assert monitor.snapshot()['alerts'][0]['stale']
+    assert monitor.coverage['security']['status'] == 'unknown'
     security.evaluate(monitor, {'history': {'readable': True, 'checked_at': now, 'recent_bans': 0}})
     assert not monitor.snapshot()['alerts']

@@ -1,6 +1,6 @@
 {
   "name": "mini_deploy",
-  "program_update_contract": 1,
+  "program_update_contract": 2,
   "state_schema": 1,
   "python_min": [3, 10]
 }

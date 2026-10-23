@@ -14,16 +14,20 @@ from scripts.local_ssh import configure  # noqa: E402
 from scripts.preview_operations import Handler as OperationsHandler  # noqa: E402
 
 
-def seed(home, now=None, seconds=86400):
+def seed(home, now=None, seconds=86400, *, recent_episode=False):
     now = int(time.time() if now is None else now)
     history = server_performance.History(home)
     for i in range(seconds):
-        if 37000 < i < 37300:  # Deliberate monitoring gap for the report.
+        if 37000 < i < 37300 or recent_episode and seconds - 2400 < i < seconds - 2310:
             continue
-        cpu = max(0, 30 + math.sin(i / 2400) * 16 + (60 if 44000 < i < 45000 else 0))
+        busy = 44000 < i < 45000 or recent_episode and seconds - 1260 < i < seconds - 1020
+        cpu = min(100, max(0, 30 + math.sin(i / 2400) * 16 + (60 if busy else 0)))
+        if recent_episode and busy:
+            cpu = 94 + 2 * math.sin((i - seconds + 1260) / 240 * math.pi)
+        memory = 94 if recent_episode and busy else 62 + math.sin(i / 5200) * 8
         server = {'cpu_percent': cpu, 'cpu': {'model': '演示 CPU', 'logical_count': 8, 'physical_cores': 4},
             'load': {'one': cpu / 18, 'five': cpu / 22, 'fifteen': cpu / 24},
-            'memory': {'percent': 62 + math.sin(i / 5200) * 8, 'used_mb': 8192 * (.62 + math.sin(i / 5200) * .08),
+            'memory': {'percent': memory, 'used_mb': 8192 * memory / 100,
                        'total_mb': 8192, 'swap': {'percent': 12 + math.sin(i / 8000) * 4, 'total_mb': 2048, 'used_mb': 256}},
             'disk': {'percent': 42 + i / seconds * 2, 'total_gb': 80, 'used_gb': 33.6 + i / seconds * 1.6,
                      'path': '/', 'inode': {'percent': 17 + i / seconds * 1.5}},
@@ -34,7 +38,6 @@ def seed(home, now=None, seconds=86400):
                  'await_ms': 1.2 + abs(math.sin(i / 650)) * 3.5, 'busy_percent': 15 + abs(math.sin(i / 1800)) * 40}]}}
         history.observe(server, now - seconds + i)
         if i % 30 == 0:
-            busy = 44000 < i < 45000
             history.record_context({'at': now - seconds + i, 'available': True, 'scanned': 126, 'readable': 126,
                 'blocked_count': 2 if busy else 0, 'zombie_count': 0, 'new_baselines': 0, 'warnings': [],
                 'scan_ms': 3.6, 'processes': [
@@ -43,7 +46,7 @@ def seed(home, now=None, seconds=86400):
                      'rss_mib': 1600 if busy else 850, 'memory_percent': 19.5 if busy else 10.4,
                      'cpu_change': 36.2 if busy else .5, 'rss_change_mib': 128 if busy else 1.2,
                      'read_kib_s': 220, 'write_kib_s': 2400 if busy else 120, 'interval_seconds': 5,
-                     'service': '', 'container': 'aimore-cloud', 'container_id': 'a' * 64,
+                     'service': '', 'container': 'api-server' if recent_episode else 'aimore-cloud', 'container_id': 'a' * 64,
                      'container_state': 'running', 'container_health': 'healthy', 'executable': '/usr/local/bin/python3'},
                     {'pid': 1832, 'start_ticks': 1300, 'ppid': 1, 'name': 'postgres', 'uid': 999, 'user': 'postgres',
                      'state': 'D' if busy else 'S', 'threads': 1, 'cpu_percent': 22.5, 'host_cpu_percent': 2.81,

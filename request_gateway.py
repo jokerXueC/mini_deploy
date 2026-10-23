@@ -267,6 +267,10 @@ class Store:
         except (ValueError, OSError) as exc:
             if committed:
                 raise CertificateError("配置已保存，但事务清理未完成，请刷新后重试") from exc
+            trusted_path(path)
+            current = path.read_text(encoding="utf-8") if path.exists() else None
+            if current not in (previous, config(spec)):
+                raise CertificateError("保存失败且网关配置被外部修改，未覆盖该修改；恢复记录已保留，请核对配置") from exc
             if previous is not None:
                 atomic_write(path, previous)
                 os.chmod(path, 0o644)
@@ -340,6 +344,9 @@ class Store:
             if item and item["State"].get("Running"):
                 self.reload(item["Id"])
         except (ValueError, OSError) as exc:
+            trusted_path(path)
+            if not path.exists() or path.read_text(encoding="utf-8") not in (previous, config(spec)):
+                raise CertificateError("日志格式更新失败且网关配置被外部修改，未覆盖，请核对容器配置") from exc
             atomic_write(path, previous)
             os.chmod(path, 0o644)
             if item and item["State"].get("Running"):
