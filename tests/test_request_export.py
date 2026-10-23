@@ -23,6 +23,19 @@ def table(raw):
     return list(csv.DictReader(io.StringIO(raw.decode('utf-8-sig'))))
 
 
+def test_pruned_details_export_independent_retained_statistics(tmp_path):
+    history = request_history.History(tmp_path, max_rows=1)
+    ingest(history, [line('/api/1'), line('/api/2')])
+    stream, meta = export.snapshot(history, {}, now=NOW)
+    with stream:
+        assert meta['count'] == 1 and sum(item['count'] for item in meta['rollups']) == 2
+        output, _, _ = export.build(stream, meta)
+        with output, zipfile.ZipFile(output) as archive:
+            assert sum(int(row['请求次数']) for row in table(archive.read('retained-statistics.csv'))) == 2
+            assert len(table(archive.read('requests.csv'))) == 1
+    assert any('明细已部分过期' in warning for warning in meta['warnings'])
+
+
 def test_export_all_sources_all_pages_and_rows_with_consistent_snapshot(tmp_path):
     history = request_history.History(tmp_path)
     ingest(history, [line(f'/route-{n}') for n in range(110)] + [line('/busy') for _ in range(1001)])

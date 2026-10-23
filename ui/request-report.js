@@ -11,6 +11,7 @@
   $('notice').textContent = `${data.notice} ${labels[filter.status] || ''}${filter.search ? ' · 查找：' + filter.search : ''}`;
   for (const text of data.warnings || []) { const p = document.createElement('p'); p.textContent = text; $('warnings').append(p); }
   $('downloads').hidden = !data.package;
+  $('rollupsTab').hidden = $('rollupsDownload').hidden = !data.rollups?.length;
   $('threshold').textContent = ms(filter.slow_ms || 1000);
   $('generated').textContent = `导出时间：${data.generated_at} · 共 ${count(data.count)} 条原始记录 · ${count(data.groups.length)} 类地址`;
   const totals = data.totals;
@@ -75,9 +76,9 @@
     ['count', '次数', count], ['success_rate', '成功率', percent], ['errors', '失败', count], ['slow_count', '慢请求', count],
     ['average', '平均耗时', ms], ['p95', 'P95', ms], ['p99', 'P99', ms], ['upstream_average', '平均上游', ms]];
   function render() {
-    const selected = view === 'routes' ? columns : [['at', '区间起点 (UTC)', String], ...columns.slice(4)];
-    const term = view === 'routes' ? $('search').value.trim().toLowerCase() : '';
-    const items = (view === 'routes' ? data.groups : data.timeline).filter(item => !term || `${item.source_name} ${item.host} ${item.path}`.toLowerCase().includes(term))
+    const selected = view !== 'timeline' ? columns : [['at', '区间起点 (UTC)', String], ...columns.slice(4)];
+    const term = view !== 'timeline' ? $('search').value.trim().toLowerCase() : '';
+    const items = (view === 'routes' ? data.groups : view === 'rollups' ? data.rollups || [] : data.timeline).filter(item => !term || `${item.source_name} ${item.host} ${item.path}`.toLowerCase().includes(term))
       .slice().sort((a, b) => {
         if (a[sort] == null) return b[sort] == null ? 0 : 1;
         if (b[sort] == null) return -1;
@@ -95,17 +96,18 @@
       const tr = document.createElement('tr');
       for (const [key, , format] of selected) {
         const td = document.createElement('td'); td.textContent = format(item[key]);
-        if (key === 'path') { const small = document.createElement('small'); small.textContent = `${item.path_count} 个原始路径${item.upstream_addresses.length ? ' · ' + item.upstream_addresses.join(', ') : ''}`; td.append(small); }
+        if (key === 'path' && view !== 'rollups') { const small = document.createElement('small'); small.textContent = `${item.path_count} 个原始路径${item.upstream_addresses.length ? ' · ' + item.upstream_addresses.join(', ') : ''}`; td.append(small); }
         tr.append(td);
       }
       $('table').append(tr);
     }
     if (!items.length) { const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = selected.length; td.textContent = '暂无匹配数据'; tr.append(td); $('table').append(tr); }
-    $('tableCount').textContent = `${count(items.length)} ${view === 'routes' ? '类地址' : '个区间'}`;
+    $('tableCount').textContent = `${count(items.length)} ${view !== 'timeline' ? '类地址' : '个区间'}`;
     $('pageCount').textContent = `第 ${page + 1} / ${Math.max(1, Math.ceil(items.length / 50))} 页`;
     $('previous').disabled = !page; $('next').disabled = (page + 1) * 50 >= items.length;
-    $('routesTab').setAttribute('aria-selected', String(view === 'routes')); $('timelineTab').setAttribute('aria-selected', String(view === 'timeline')); $('search').hidden = view !== 'routes';
+    for (const type of ['routes', 'timeline', 'rollups']) $(type + 'Tab').setAttribute('aria-selected', String(view === type));
+    $('search').hidden = view === 'timeline'; $('rollupsNotice').hidden = view !== 'rollups';
   }
-  for (const type of ['routes', 'timeline']) $(type + 'Tab').addEventListener('click', () => { view = type; page = 0; sort = type === 'routes' ? 'count' : 'at'; descending = type === 'routes'; render(); });
+  for (const type of ['routes', 'timeline', 'rollups']) $(type + 'Tab').addEventListener('click', () => { view = type; page = 0; sort = type !== 'timeline' ? 'count' : 'at'; descending = type !== 'timeline'; render(); });
   $('search').addEventListener('input', () => { page = 0; render(); }); $('previous').addEventListener('click', () => { page--; render(); }); $('next').addEventListener('click', () => { page++; render(); }); render();
 })();

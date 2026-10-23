@@ -126,14 +126,32 @@ def snapshot(history, options, *, now=None):
                 stream.write((json.dumps(item, ensure_ascii=False, separators=(',', ':')) + '\n').encode())
                 count += 1
                 used.add(row['source'])
+            rollups = []
+            if not options['search'] and options['status'] == 'all':
+                for source in sources:
+                    if options['key'] and source['key'] != options['key']:
+                        continue
+                    for group in history.rollups(source['key'], since, now, db=db):
+                        used.add(source['key'])
+                        rollups.append({**group, 'source_name': source['name'],
+                            'duration_count': group['durationCount'],
+                            'average': group['durationSum'] / group['durationCount'] if group['durationCount'] else None,
+                            'upstream_average': group['upstreamSum'] / group['upstreamCount'] if group['upstreamCount'] else None,
+                            'success_rate': group['successes'] / group['count'] * 100,
+                            'slow_count': sum(n for bound, n in group['histogram'].items() if float(bound) >= options['slow_ms'])})
+                        rollups[-1].pop('histogram', None)
         selected_sources = [s for s in sources if s['key'] == options['key'] or not options['key'] and s['key'] in used]
         warnings = []
+        if sum(group['count'] for group in rollups) > count:
+            warnings.append('明细已部分过期；保留统计独立保存，次数可能多于明细。P95/P99 和慢请求采用约 10% 桶宽估计，时间边界按分钟。')
         for source in selected_sources:
             name = source['name']
             if source.get('error'):
                 warnings.append(f"{name}：{source['error']}")
             if source.get('limited'):
                 warnings.append(f'{name}：采集曾达到单批上限，可能存在缺口。')
+            if source.get('rollups_limited'):
+                warnings.append(f'{name}：保留统计曾达到容量上限，较早部分已过期。')
             if source.get('checked') and now - source['checked'] > 60:
                 warnings.append(f'{name}：采集延迟，近期数据可能不完整。')
         stream.seek(0)
@@ -141,6 +159,7 @@ def snapshot(history, options, *, now=None):
             'scope': '全部入口已保留历史' if not options['key'] else names.get(options['key'], options['key']),
             'kind': 'history', 'retention_days': history.retention / 86400,
             'sources': [{'key': s['key'], 'name': s['name']} for s in selected_sources], 'warnings': warnings,
+            'rollups': rollups,
             'notice': '仅包含导出时已采集且仍保留的请求，无法补回过期、未采集或正在进行中的请求。筛选选择整类地址，明细和统计包含该类全部记录。',
             'filters': options}
     except Exception:
@@ -318,6 +337,9 @@ def build(stream, metadata, format='zip'):
                         write_csv(target, DETAIL_FIELDS, rows(stream))
                     with archive.open('routes.csv', 'w') as target:
                         write_csv(target, GROUP_FIELDS, data['groups'])
+                    if data.get('rollups'):
+                        with archive.open('retained-statistics.csv', 'w') as target:
+                            write_csv(target, GROUP_FIELDS, data['rollups'])
                     with archive.open('timeline.csv', 'w') as target:
                         write_csv(target, [('at', '时间区间起点 (UTC)'), *GROUP_FIELDS[4:-1]], data['timeline'])
                     archive.writestr('report.html', report(data))

@@ -16,7 +16,7 @@ from test_verify_backup import ArchiveEntry, DATA_HOME, _build_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = (ROOT / "install.sh").read_text(encoding="utf-8")
-MANIFEST = INSTALLER[INSTALLER.index("RELEASE_ENTRIES=("):INSTALLER.index("\n)") + 3]
+MANIFEST = 'RELEASE_ENTRIES=(' + ' '.join(json.loads((ROOT / 'release.json').read_text(encoding='utf-8'))['program_entries']) + ')\n'
 
 
 def function(name):

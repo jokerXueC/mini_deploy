@@ -188,7 +188,7 @@ def test_cpu_text_is_stable_while_bars_and_chart_receive_new_samples(dashboard):
     page.goto(f"{origin}/ui")
     playwright.expect(page.locator("#updatedAt")).to_contain_text("服务器刷新于")
     page.clock.install()
-    page.evaluate("activeView = 'requests'; clearServerRefresh()")
+    page.evaluate("activeView = 'requests'; systemTrendRange = 'realtime'; clearServerRefresh()")
 
     def sample(cpu, offset):
         page.evaluate("""([cpu, offset]) => {
@@ -227,7 +227,7 @@ def test_server_hardware_logical_views_and_statistics(dashboard, width, count):
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(f'{origin}/ui?view=server')
     playwright.expect(page.locator('#updatedAt')).to_contain_text('服务器刷新于')
-    page.evaluate("activeView = 'requests'; clearServerRefresh()")
+    page.evaluate("activeView = 'requests'; systemTrendRange = 'realtime'; clearServerRefresh()")
 
     def sample(offset):
         page.evaluate("""([count, offset]) => {

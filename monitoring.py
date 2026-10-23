@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import socket
 import ssl
@@ -23,6 +24,8 @@ DEFAULTS = {"sustain_seconds": 60, "repeat_seconds": 3600, "recovery": True,
             "slow_ms": 3000, "certificate_days": 14, **resource_alerts.DEFAULTS}
 MAX_TARGETS = 50
 MAX_EVENTS = 1000
+MAX_DIAGNOSTIC_EVENTS = 1000
+INCIDENT_EVENT_KINDS = frozenset({'alert', 'recovery', 'recovered', 'resolved', 'disappeared', 'container_missing', 'container_disappeared'})
 EVENT_RETENTION_SECONDS = 30 * 86400
 
 
@@ -58,6 +61,97 @@ class NoRedirect(HTTPRedirectHandler):
 OPENER = build_opener(ProxyHandler({}), NoRedirect())
 
 
+def probe_options(data, previous=None):
+    previous = previous or {}
+    options = copy.deepcopy(previous.get('probe', {}))
+    if previous.get('url'):
+        old, new = urlsplit(previous['url']), urlsplit(normalize_url(data.get('url')))
+        if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+            options.pop('headers', None)
+            options.pop('body', None)
+    value = data.get('probe')
+    if value is None:
+        return options
+    if not isinstance(value, dict):
+        raise ValueError('接口检查参数无效')
+    method = value.get('method', 'GET')
+    if method not in {'GET', 'HEAD', 'POST'}:
+        raise ValueError('检查方法仅支持 GET、HEAD、POST')
+    headers = value.get('headers')
+    if headers is None:
+        headers = options.get('headers', {})
+    if not isinstance(headers, dict) or len(headers) > 20:
+        raise ValueError('请求头最多 20 项')
+    for name, content in headers.items():
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,64}', name)
+                or name.lower() in {'host', 'content-length', 'transfer-encoding', 'connection', 'proxy-authorization'}
+                or not isinstance(content, str) or len(content) > 2048
+                or any(ord(c) < 32 or ord(c) > 255 for c in content)):
+            raise ValueError('请求头名称或内容无效')
+    body = value.get('body')
+    body = options.get('body', '') if body is None else body
+    if not isinstance(body, str) or len(body.encode()) > 4096 or method != 'POST' and body:
+        raise ValueError('请求体仅支持 POST，最多 4 KiB')
+    expected = value.get('expected_status', [])
+    if not isinstance(expected, list) or len(expected) > 20 or any(type(code) is not int or not 100 <= code <= 599 for code in expected):
+        raise ValueError('预期状态码必须是 100 到 599 的数字列表')
+    assertion = value.get('assertion', {})
+    if not isinstance(assertion, dict) or assertion and assertion.get('kind') not in {'json', 'contains'}:
+        raise ValueError('响应校验类型无效')
+    if assertion:
+        if method == 'HEAD':
+            raise ValueError('HEAD 请求没有响应体，无法校验内容')
+        if assertion['kind'] == 'json':
+            path = assertion.get('path', '')
+            if not isinstance(path, str) or not re.fullmatch(r'[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){0,15}', path):
+                raise ValueError('JSON 字段示例：data.ready')
+            expected_value = assertion.get('value')
+            if type(expected_value) not in {str, int, float, bool, type(None)}:
+                raise ValueError('JSON 预期值必须为字符串、数字、布尔值或 null')
+            if isinstance(expected_value, float) and not math.isfinite(expected_value):
+                raise ValueError('JSON 数字必须有限')
+        elif not isinstance(assertion.get('value'), str) or not assertion['value']:
+            raise ValueError('请填写需要包含的文本')
+        if len(json.dumps(assertion, ensure_ascii=False)) > 2048:
+            raise ValueError('响应校验内容过长')
+    return {'method': method, 'headers': dict(headers), 'body': body,
+            'expected_status': expected, 'assertion': assertion}
+
+
+def public_target(target):
+    result = copy.deepcopy(target)
+    if 'probe' in result:
+        options = result['probe']
+        options['has_headers'] = bool(options.pop('headers', {}))
+        options['has_body'] = bool(options.pop('body', ''))
+    return result
+
+
+def validate_response(response, assertion):
+    if not assertion:
+        return True
+    # Fixed-length bounded reads with an absolute deadline; never store response bodies.
+    deadline, body = time.monotonic() + 5, bytearray()
+    while len(body) <= 65536:
+        if time.monotonic() >= deadline:
+            raise TimeoutError('response deadline')
+        block = response.read1(min(4096, 65537 - len(body)))
+        if not block:
+            break
+        body.extend(block)
+    if len(body) > 65536:
+        return False
+    if assertion['kind'] == 'contains':
+        return assertion['value'] in body.decode('utf-8', errors='replace')
+    try:
+        value = json.loads(body)
+        for part in assertion['path'].split('.'):
+            value = value[int(part)] if isinstance(value, list) and part.isdigit() else value[part]
+        return type(value) is type(assertion['value']) and value == assertion['value']
+    except (ValueError, KeyError, IndexError, TypeError, UnicodeError):
+        return False
+
+
 def certificate_probe(url, timeout=5):
     parts = urlsplit(url)
     if parts.scheme != "https":
@@ -86,19 +180,33 @@ def certificate_probe(url, timeout=5):
 def probe(target, check_certificate=True):
     started = time.monotonic()
     result = {"checked_at": time.time(), "status": "failed", "code": None}
+    options = target.get('probe') or {}
+    assertion_ok = not options.get('assertion')
     try:
-        request = Request(target["url"], headers={"User-Agent": "mini_deploy-monitor"}, method="GET")
+        request = Request(target["url"], headers={"User-Agent": "mini_deploy-monitor", **options.get('headers', {})},
+                          method=options.get('method', 'GET'),
+                          data=options.get('body', '').encode() if options.get('method') == 'POST' else None)
         with OPENER.open(request, timeout=5) as response:
             result["code"] = response.status
+            assertion_ok = validate_response(response, options.get('assertion'))
     except HTTPError as exc:
         result["code"] = exc.code
-        exc.close()
+        try:
+            assertion_ok = validate_response(exc, options.get('assertion'))
+        except (OSError, ValueError):
+            assertion_ok = False
+        finally:
+            exc.close()
     except (OSError, URLError, ValueError) as exc:
         result["detail"] = f"连接失败（{type(exc).__name__}），请检查网站、网络或证书"
     code = result["code"]
     if code is not None:
-        result["status"] = "healthy" if 200 <= code < 400 else "failed"
+        codes = options.get('expected_status')
+        accepted = code in codes if codes else 200 <= code < 400
+        result["status"] = "healthy" if accepted and assertion_ok else "failed"
         result["detail"] = f"HTTP {code}" + ("（重定向，未跟随）" if 300 <= code < 400 else "")
+        if not assertion_ok:
+            result['detail'] += ' · 响应内容未通过校验（或超过 64 KiB 校验范围）'
     result["duration_ms"] = round((time.monotonic() - started) * 1000, 2)
     if check_certificate:
         result["certificate"] = certificate_probe(target["url"])
@@ -128,7 +236,7 @@ class Monitor:
             self.targets = data.get("targets", {})
             self.results = data.get("results", {})
             self.incidents = data.get("incidents", {})
-            self.events = data.get("events", [])[-MAX_EVENTS:]
+            self.events = data.get("events", [])
             self.settings.update(data.get("settings", {}))
             self.muted_until = data.get("muted_until", 0)
             self.delivery = data.get("delivery", {})
@@ -143,7 +251,15 @@ class Monitor:
 
     def _prune_events(self):
         cutoff = self.clock() - EVENT_RETENTION_SECONDS
-        self.events = [item for item in self.events if item.get("at_ts", self.clock()) >= cutoff][-MAX_EVENTS:]
+        # Routine container/audit traffic must not evict incident history.
+        retained, counts = [], {True: 0, False: 0}
+        for item in reversed(self.events):
+            incident = item.get('kind') in INCIDENT_EVENT_KINDS
+            limit = MAX_EVENTS if incident else MAX_DIAGNOSTIC_EVENTS
+            if item.get('at_ts', self.clock()) >= cutoff and counts[incident] < limit:
+                retained.append(item)
+                counts[incident] += 1
+        self.events = list(reversed(retained))
 
     def flush(self):
         with self.lock:
@@ -174,7 +290,7 @@ class Monitor:
                 cert["stale"] = now - cert.get("checked_at", 0) > 7200
                 if cert.get("expires_at"):
                     cert["days_remaining"] = math.floor((cert["expires_at"] - now) / 86400)
-                targets.append({**target, "result": result})
+                targets.append({**public_target(target), "result": result})
             self._prune_events()
             alerts = [{**v, "id": k, "muted": self.muted_until > now,
                        "stale": bool(v.get("sample_unknown")) or now - v.get("last_sample", 0) > 120,
@@ -236,11 +352,14 @@ class Monitor:
                 if not key and len(self.targets) >= MAX_TARGETS:
                     raise ValueError(f"最多监测 {MAX_TARGETS} 个地址")
                 key = key or secrets.token_hex(8)
+                options = probe_options(data, self.targets.get(key))
                 if key in self.targets:
                     self._forget(key)
                 self.targets[key] = {"key": key, "url": url, "enabled": True,
                                      "name": str(data.get("name") or urlsplit(url).netloc)[:80],
                                      "revision": secrets.token_hex(8)}
+                if options:
+                    self.targets[key]['probe'] = options
                 self.due[key] = 0
             elif action in {"remove", "toggle", "check"}:
                 if key not in self.targets:

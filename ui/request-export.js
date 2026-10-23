@@ -23,7 +23,7 @@
     const range = historic ? scope === 'filtered' ? $('requestPeriod').selectedOptions[0].textContent : '全部仍保留的数据，最多 7 天' : `近期日志样本，最多 ${snapshot.limit} 条`;
     const filter = scope === 'filtered' ? ` · ${$('requestStatus').selectedOptions[0].textContent}${snapshot.search ? ' · 查找：' + snapshot.search : ''}` : '';
     $('requestExportRange').textContent = `${range}${filter}。${historic ? '导出覆盖所有分页和全部明细。' : '已有代理日志不保存完整历史。'}${scope === 'filtered' ? '筛选按整类地址导出，包含该类的全部明细。' : ''}`;
-    $('requestExportFeedback').textContent = '时间使用 UTC；不包含认证头、Cookie、查询参数或请求体。';
+    $('requestExportFeedback').textContent = '时间使用 UTC；不包含认证头、Cookie、查询参数或请求体。未筛选的报告与 ZIP 另含独立保留统计。';
   }
   function controls() {
     ['requestExportPreview', 'requestExportDownload', 'requestExportScope'].forEach(id => $(id).disabled = busy);

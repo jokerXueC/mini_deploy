@@ -200,6 +200,46 @@ def test_actual_http_probe_reports_redirect_and_errors():
         worker.join(5)
 
 
+@pytest.mark.parametrize('width,theme', [(390, 'light'), (1440, 'dark')])
+def test_advanced_probe_form_is_optional_responsive_and_masks_saved_headers(http_server, runtime, width, theme):
+    playwright = pytest.importorskip('playwright.sync_api')
+    with playwright.sync_playwright() as browser_runtime:
+        browser = browser_runtime.chromium.launch()
+        try:
+            context = browser.new_context(viewport={'width': width, 'height': 960})
+            context.add_cookies([{'name': agent.COOKIE_NAME, 'value': http_server.cookie, 'url': http_server.origin}])
+            page = context.new_page()
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script(f"if (window === top) localStorage.setItem('mini_deploy-theme', '{theme}')")
+            page.goto(http_server.origin + '/ui?view=events')
+            page.locator('#monitorWebsiteSection > summary').click()
+            playwright.expect(page.locator('#monitorHeaders')).to_be_hidden()
+            page.locator('.monitor-probe-options > summary').click()
+            page.locator('#monitorUrl').fill('https://api.example.com/health')
+            page.locator('#monitorHeaders').fill('{"Authorization":"Bearer test-private"}')
+            page.locator('#monitorExpected').fill('200')
+            page.locator('#monitorAssertion').select_option('json', force=True)
+            page.locator('#monitorJsonPath').fill('data.ready')
+            page.locator('#monitorValue').fill('true')
+            page.locator('.monitor-probe-options').scroll_into_view_if_needed()
+            page.screenshot(path=str(runtime / f'advanced-probe-{width}.png'), animations='disabled')
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            page.locator('#monitorSave').click()
+            playwright.expect(page.locator('#monitorTargets')).to_contain_text('api.example.com')
+            target = next(iter(agent._monitor().targets.values()))
+            assert target['probe']['assertion'] == {'kind': 'json', 'path': 'data.ready', 'value': True}
+            response = page.request.get(http_server.origin + '/monitoring').text()
+            assert 'test-private' not in response
+            page.locator('.monitor-actions summary').click()
+            page.locator('[data-monitor-action="edit"]').click()
+            playwright.expect(page.locator('#monitorHeaders')).to_have_value('')
+            playwright.expect(page.locator('#monitorHeaders')).to_have_attribute('placeholder', '已保存；留空保持，填写 JSON 替换')
+            assert not errors
+        finally:
+            browser.close()
+
+
 def test_actual_tls_valid_untrusted_and_wrong_hostname(tmp_path, monkeypatch):
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
@@ -389,7 +429,7 @@ def test_actual_monitor_ui_add_edit_pause_remove_and_certificates(http_server, r
             page.locator('[data-monitor-action="remove"]').click()
             playwright.expect(page.locator("#confirmMessage")).to_contain_text("服务器文件")
             page.locator("#confirmOkBtn").click()
-            playwright.expect(page.locator("#monitorTargets")).to_contain_text("暂无监测网站")
+            playwright.expect(page.locator("#monitorTargets")).to_contain_text("暂无监测地址")
             assert not monitor.targets
             assert not errors
         finally:

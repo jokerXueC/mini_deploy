@@ -1,6 +1,19 @@
 {
   "name": "mini_deploy",
-  "program_update_contract": 2,
+  "program_update_contract": 3,
   "state_schema": 1,
-  "python_min": [3, 10]
+  "python_min": [3, 10],
+  "program_entries": [
+    "agent.py", "http_limits.py", "host_swap.py", "ip_security.py", "login_guard.py", "basic_protection.py",
+    "security_observation.py", "security_center.py", "cpu_metrics.py", "server_operations.py",
+    "performance_metrics.py", "server_performance.py", "server_processes.py", "resource_alerts.py",
+    "prometheus_metrics.py", "panel_maintenance.py", "release.json", "certificates.py", "certificate_discovery.py",
+    "nginx_runtime.py", "nginx_install.py", "nginx_requests.py", "caddy_requests.py", "request_gateway.py",
+    "request_history.py", "request_export.py", "gateway_connections.py", "monitoring.py", "container_monitoring.py",
+    "docker_events.py", "docker_mirrors.py", "ssh_terminal.py", "ssh_files.py", "ssh_file_manager.py",
+    "terminal_ai.py", "panel_diagnostics.py", "terminal_model_io.py", "terminal_tools.py", "terminal_command_policy.py",
+    "terminal_history.py", "requirements-ssh.txt", "install.sh", "env.example", "server.env.example", "LICENSE",
+    "THIRD_PARTY_NOTICES.md", "ui", "examples/nginx.compose.yml", "systemd/mini-deploy-agent.service",
+    "scripts/bootstrap_server.sh", "scripts/backup-installation.sh", "scripts/doctor.sh", "scripts/verify_backup.py"
+  ]
 }

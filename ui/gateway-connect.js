@@ -1,6 +1,6 @@
 window.GatewayConnect = (() => {
   let sources = [], inspected = null, plan = null, version = 0, busy = false, baseHelp = [];
-  let candidates = [];
+  let candidates = [], recovery = null;
   const panel = $('gatewayConnectPanel'), feedback = $('gatewayConnectFeedback');
   const sourceIds = ['connectKind', 'connectMode', 'connectContainer', 'connectConfig'];
   const valueIds = ['connectRoute', 'connectExisting', 'connectKey', 'connectPort', 'connectNetwork', 'connectInternal', 'connectProbe', 'connectImage'];
@@ -105,13 +105,20 @@ window.GatewayConnect = (() => {
       results.forEach((result, index) => {
         for (const route of result?.routes || []) candidates.push({result, route, label: sources[index].label});
       });
-      feedback.textContent = '选择后端入口后检查接入方案，确认后才会修改转发配置。';
+      feedback.textContent = recovery
+        ? `${recovery.connection.site} 原接入已失效。请选择当前需要记录的规则，确认新方案后恢复采集；旧历史仍可在原入口查看。`
+        : '选择后端入口后检查接入方案，确认后才会修改转发配置。';
       renderCandidates();
       $('connectDiscoveryNotice').textContent = failures.length ? `部分来源未能读取：${failures.join('；')}` : '';
     });
     if (current === version && !panel.hidden) {
       const available = [...$('connectService').options].filter(option => option.value && !option.disabled);
-      if (available.length === 1) { $('connectService').value = available[0].value; await selectCandidate(); }
+      const matching = recovery ? available.filter(option => {
+        const item = candidates[Number(option.value)], old = recovery.connection.source;
+        return item.route.site === recovery.connection.site && old &&
+          ['kind', 'mode', 'container', 'config_path'].every(key => (item.result.source[key] || '') === (old[key] || ''));
+      }) : available;
+      if (matching.length === 1) { $('connectService').value = matching[0].value; await selectCandidate(); }
     }
   }
 
@@ -191,10 +198,11 @@ window.GatewayConnect = (() => {
     }
   }
 
-  $('gatewayConnectOpen').addEventListener('click', () => {
+  async function openConnect(entry = null) {
     if (busy) return;
+    recovery = entry;
     panel.hidden = false;
-    $('gatewayConnectTitle').textContent = '接入后端请求';
+    $('gatewayConnectTitle').textContent = entry ? '重新接入请求记录' : '接入后端请求';
     $('gatewayConnectFields').hidden = false;
     $('connectHelp').hidden = false;
     $('requestGatewayManager').hidden = true;
@@ -203,8 +211,9 @@ window.GatewayConnect = (() => {
     $('connectSourceAdvanced').open = false;
     $('connectHelp').open = false;
     $('requestGatewayForm').hidden = true;
-    discover();
-  });
+    await discover();
+  }
+  $('gatewayConnectOpen').addEventListener('click', () => openConnect());
   $('gatewayConnectClose').addEventListener('click', () => { if (!busy) { invalidate(true); panel.hidden = true; } });
   $('connectDiscover').addEventListener('click', discover);
   $('connectDetected').addEventListener('change', () => {
@@ -320,24 +329,27 @@ window.GatewayConnect = (() => {
   async function disconnect(entry) {
     if (busy) return;
     const expired = entry.connection.config_state === 'changed';
+    let released = false;
     panel.hidden = false;
     $('gatewayConnectTitle').textContent = '停止网站记录';
     $('gatewayConnectFields').hidden = true;
     $('connectHelp').hidden = true;
     await work('等待确认撤销…', async () => {
-      const confirmed = await showConfirmDialog({title: expired ? '解除失效接入记录' : '停止网站请求记录',
-        message: expired ? `${entry.connection.site} 的代理配置已变化。检查确认当前配置不再引用此网关后，仅解除面板保存的旧接入记录，保留当前业务配置、容器和请求历史。之后可重新检测并接入。`
+      const confirmed = await showConfirmDialog({title: expired ? '重新接入请求记录' : '停止网站请求记录',
+        message: expired ? `${entry.connection.site} 的代理配置已变化。检查确认当前配置不再引用此网关后，解除旧接入并重新检测当前规则，保留当前业务配置、容器和请求历史。确认新方案后才修改转发配置。`
           : `恢复 ${entry.connection.site} 原有访问路径。${entry.connection.source?.kind === 'nginx' ? 'Nginx 将重载。' : '代理配置将重新应用，已有连接可能短暂中断。'} 网站继续提供服务，采集容器保留。`,
-        confirmText: expired ? '解除旧接入' : '停止记录', danger: !expired});
+        confirmText: expired ? '检测当前规则' : '停止记录', danger: !expired});
       if (!confirmed) { panel.hidden = true; return; }
       try {
         const result = await postJsonBody('gateway-connections', {action: expired ? 'release' : 'disconnect', key: entry.key, token: entry.connection.token, confirmed: true});
+        released = expired;
         invalidate(true);
         feedback.textContent = result.notice || '原入口规则已恢复。网关仍保留，可按需停止或删除。';
       } finally { await window.RequestGateway.refresh(); }
       panel.hidden = true;
       window.NginxRequests?.refresh();
     });
+    if (released) await openConnect(entry);
   }
   return {disconnect, isBusy: () => busy};
 })();

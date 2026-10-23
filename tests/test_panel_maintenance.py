@@ -180,8 +180,25 @@ def test_stage_refuses_changed_remote_or_contract_and_missing_release(panel, mon
 
 def test_release_manifest_matches_installer_and_protects_non_program_paths():
     installer = (ROOT / 'install.sh').read_text(encoding='utf-8')
-    manifest = installer.split('RELEASE_ENTRIES=(', 1)[1].split(')', 1)[0].split()
+    manifest = json.loads((ROOT / 'release.json').read_text(encoding='utf-8'))['program_entries']
+    assert 'mapfile -t RELEASE_ENTRIES' in installer and '"$SOURCE_DIR/release.json"' in installer
     assert set(manifest) == set(pm.ENTRIES)
     for entry in pm.ENTRIES:
         assert (ROOT / entry).exists()
     assert not pm.allowed('projects.json') and not pm.allowed('sites.json')
+
+
+def test_every_local_python_import_is_shipped():
+    import ast
+    shipped = {Path(entry).stem for entry in pm.ENTRIES if entry.endswith('.py')}
+    local = {path.stem for path in ROOT.glob('*.py')}
+    for entry in pm.ENTRIES:
+        if not entry.endswith('.py'):
+            continue
+        tree = ast.parse((ROOT / entry).read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            names = ([node.module] if isinstance(node, ast.ImportFrom) else
+                     [alias.name for alias in node.names] if isinstance(node, ast.Import) else [])
+            for name in names:
+                module = (name or '').split('.')[0]
+                assert module not in local or module in shipped, (entry, module)

@@ -104,7 +104,7 @@ window.NginxRequests = (() => {
         group.items.some(item => matchesSearch(item, term));
     });
     $('requestSampleSummary').textContent = historyResult
-      ? `时段内已保存 ${historyResult.total_requests} 条 · ${historyResult.total_groups} 类请求 · 本页 ${groups.length} 类 · 明细取最近 30 条 · 2xx / 3xx 计为成功`
+      ? `时段内${historyResult.aggregate_mode ? '累计' : '已保存'} ${historyResult.total_requests} 条 · ${historyResult.total_groups} 类请求 · 本页 ${groups.length} 类 · 明细取最近 30 条 · 2xx / 3xx 计为成功`
       : records.length
       ? `本次读取 ${records.length} 条 · 显示 ${groups.length} ${tree ? '类请求（疑似 ID 已合并）' : '个地址'} · 2xx / 3xx 计为成功` : '';
     if (status === 'slow') $('requestSampleSummary').textContent += ` · 慢请求 ≥ ${formatDuration(slowMs)}，汇总为整类，明细仅显示慢请求`;
@@ -305,15 +305,18 @@ window.NginxRequests = (() => {
             : entry ? `自定义入口 · ${entry.name} · 仅记录经过该入口的请求` : '尚未开启后端请求记录'
         : `正在查看已有${backend === 'caddy' ? ' Caddy' : ' Nginx'}日志${result.container ? ` · ${result.container}` : ''}`;
       $('requestStopMonitoring').hidden = !entry?.connection || entry.connection.state === 'not_connected';
-      $('requestStopMonitoring').textContent = entry?.connection?.config_state === 'changed' ? '解除失效接入' : attached ? '停止记录' : '恢复原入口';
+      $('requestStopMonitoring').textContent = entry?.connection?.config_state === 'changed' ? '重新接入' : attached ? '停止记录' : '恢复原入口';
       notice.textContent = result.notice || '';
       if (historyResult) {
         const checked = result.checked_at ? new Date(result.checked_at * 1000).toLocaleTimeString('zh-CN') : '';
         notice.textContent = `${checked ? `最近检查 ${checked}` : '等待首次后台采集'} · 最多保留 7 天（受容量限制）。`;
         notice.textContent += result.latest_at ? ` 最后一条请求：${new Date(result.latest_at * 1000).toLocaleString('zh-CN')}。` : ' 尚未保存请求。';
-        if (result.error) notice.textContent += ` ${result.error}。`;
+        if (collectionError) notice.textContent += ` ${collectionError}。`;
         if (result.checked_at && Date.now() / 1000 - result.checked_at > 60) notice.textContent += ' 采集延迟，当前统计可能不完整。';
         if (result.limited_at) notice.textContent += ' 曾达到单批采集上限，可能存在缺口。';
+        if (result.pending) notice.textContent += ' 正在分批补采，统计会继续更新。';
+        if (result.aggregate_mode) notice.textContent += ` ${result.notice}`;
+        if (result.rollups_limited_at) notice.textContent += ' 统计汇总曾达到容量上限，较早部分已过期。';
         if (result.earliest_at) notice.textContent += ` 当前最早记录：${new Date(result.earliest_at * 1000).toLocaleString('zh-CN')}。`;
         if (!result.total_requests && result.retained_requests) notice.textContent += ` 当前时段无匹配记录，此入口仍保留 ${result.retained_requests} 条历史，可切换时段或筛选查看。`;
         if (!entry && $('requestGatewayKey').value) source.textContent = '已保存的历史记录 · 原采集入口不可用';

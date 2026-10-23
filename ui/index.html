@@ -360,6 +360,18 @@
         <div class="panel-head"><div><h2>网站与接口监测</h2><p id="monitorSummary">每 30 秒检查访问状态与响应耗时，HTTPS 自动检查证书</p></div><button id="monitorNotify" class="ghost-button compact-action" type="button">设置通知</button></div>
         <form id="monitorForm" class="monitor-add-form">
           <label class="field"><span>网站或接口地址</span><input id="monitorUrl" required maxlength="2048" placeholder="https://example.com 或 http://192.168.1.10:8080/health" autocomplete="off"></label>
+            <details class="monitor-probe-options"><summary>高级检查</summary>
+              <div class="monitor-probe-grid">
+                <label class="field"><span>请求方法</span><select id="monitorMethod"><option>GET</option><option>HEAD</option><option>POST</option></select></label>
+                <label class="field"><span>预期状态码</span><input id="monitorExpected" placeholder="默认 200–399，例如 200,204" maxlength="100"></label>
+                <label class="field"><span>请求头（JSON）</span><textarea id="monitorHeaders" rows="2" maxlength="6000" placeholder='{"Authorization":"Bearer …"}' autocomplete="off"></textarea></label>
+                <label class="field"><span>POST 请求体</span><textarea id="monitorBody" rows="2" maxlength="4096" autocomplete="off"></textarea></label>
+                <label class="field"><span>响应校验</span><select id="monitorAssertion"><option value="">不校验内容</option><option value="json">JSON 字段</option><option value="contains">包含文本</option></select></label>
+                <label class="field"><span>JSON 字段</span><input id="monitorJsonPath" placeholder="data.ready" maxlength="200"></label>
+                <label class="field"><span>预期内容</span><input id="monitorValue" placeholder='true 或 0 或 "ok"' maxlength="1024"></label>
+                <label class="checkbox-field"><input id="monitorClearSecrets" type="checkbox"><span>清除已保存的请求头与请求体</span></label>
+              </div>
+            </details>
           <button id="monitorSave" class="danger-button compact-action" type="submit">开始监测</button>
           <button id="monitorCancel" class="ghost-button compact-action" type="button" hidden>取消</button>
         </form>

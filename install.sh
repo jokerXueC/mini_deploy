@@ -43,15 +43,7 @@ UPGRADE_SERVICE_WAS_ACTIVE="false"
 UPGRADE_SERVICE_FAILSAFE_ARMED="false"
 # Only these program entries are updated. Never prune an installed tree:
 # retired deployment scripts and user-owned business resources must survive.
-RELEASE_ENTRIES=(
-agent.py host_swap.py ip_security.py login_guard.py basic_protection.py security_observation.py security_center.py cpu_metrics.py server_operations.py performance_metrics.py server_performance.py server_processes.py resource_alerts.py prometheus_metrics.py panel_maintenance.py release.json certificates.py certificate_discovery.py nginx_runtime.py nginx_install.py nginx_requests.py
-  caddy_requests.py request_gateway.py request_history.py request_export.py gateway_connections.py monitoring.py container_monitoring.py docker_events.py docker_mirrors.py ssh_terminal.py ssh_files.py ssh_file_manager.py terminal_ai.py panel_diagnostics.py terminal_model_io.py terminal_tools.py terminal_command_policy.py terminal_history.py requirements-ssh.txt
-  install.sh env.example server.env.example LICENSE THIRD_PARTY_NOTICES.md ui
-  examples/nginx.compose.yml
-  systemd/mini-deploy-agent.service
-  scripts/bootstrap_server.sh scripts/backup-installation.sh scripts/doctor.sh
-  scripts/verify_backup.py
-)
+RELEASE_ENTRIES=()
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "请使用 root 用户运行，或使用 sudo 执行。 / Please run as root or use sudo."
@@ -74,6 +66,19 @@ if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,
   echo "Python 版本过低，需要 Python 3.10 或更高版本 / Python 3.10 or newer is required." >&2
   exit 1
 fi
+
+RELEASE_MANIFEST="$("$PYTHON_BIN" - "$SOURCE_DIR/release.json" <<'PY'
+import json, re, sys
+entries = json.load(open(sys.argv[1], encoding='utf-8'))['program_entries']
+if not isinstance(entries, list) or not entries or len(entries) != len(set(entries)):
+    raise SystemExit('Invalid release manifest')
+for entry in entries:
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', entry) or any(p.startswith('.') for p in entry.split('/')):
+        raise SystemExit('Unsafe release entry')
+print('\n'.join(entries))
+PY
+)"
+mapfile -t RELEASE_ENTRIES <<< "$RELEASE_MANIFEST"
 
 for path in "$APP_HOME" "$ENV_FILE" "$DATA_HOME" "$LOG_HOME" "$INSTALL_BACKUP_DIR" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   if [[ "$path" != /* ]]; then

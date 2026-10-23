@@ -297,10 +297,33 @@
     el('monitorForm').reset();
     el('monitorSave').textContent = '开始监测';
     el('monitorCancel').hidden = true;
+    syncProbeFields();
   }
+  function syncProbeFields() {
+    el('monitorBody').closest('label').hidden = el('monitorMethod').value !== 'POST';
+    el('monitorJsonPath').closest('label').hidden = el('monitorAssertion').value !== 'json';
+    el('monitorValue').closest('label').hidden = !el('monitorAssertion').value;
+    el('monitorValue').placeholder = el('monitorAssertion').value === 'json' ? 'true 或 0 或 "ok"' : 'ok';
+    el('monitorClearSecrets').closest('label').hidden = !editing;
+  }
+  el('monitorMethod').addEventListener('change', syncProbeFields);
+  el('monitorAssertion').addEventListener('change', syncProbeFields);
+  syncProbeFields();
   el('monitorForm').addEventListener('submit', async event => {
     event.preventDefault();
-    if (await change({action: 'save', key: editing, url: el('monitorUrl').value}, '监测地址已保存')) resetForm();
+    try {
+      const headers = el('monitorHeaders').value.trim(), body = el('monitorBody').value;
+      const clear = el('monitorClearSecrets').checked;
+      const kind = el('monitorAssertion').value;
+      const probe = {method: el('monitorMethod').value,
+        headers: headers ? JSON.parse(headers) : clear ? {} : null,
+        body: el('monitorMethod').value !== 'POST' ? '' : body || (clear ? '' : null),
+        expected_status: el('monitorExpected').value.trim() ? el('monitorExpected').value.split(',').map(value => Number(value.trim())) : [],
+        assertion: kind ? {kind, path: el('monitorJsonPath').value.trim(),
+          value: kind === 'json' ? JSON.parse(el('monitorValue').value) : el('monitorValue').value} : {}};
+      if (probe.method === 'POST' && !await showConfirmDialog({title:'定期 POST 检查', message:'此地址将每 30 秒收到一次 POST 请求。请确认这是允许重复调用的健康检查接口。', confirmText:'保存检查'})) return;
+      if (await change({action: 'save', key: editing, url: el('monitorUrl').value, probe}, '监测地址已保存')) resetForm();
+    } catch (error) { feedback(`检查参数无效：${error.message}`); }
   });
   el('monitorCancel').addEventListener('click', resetForm);
   el('monitorTargets').addEventListener('click', async event => {
@@ -311,8 +334,18 @@
     if (!target) return;
     button.closest('details').open = false;
     if (action === 'edit') {
+        resetForm();
       editing = key;
       el('monitorUrl').value = target.url;
+        const probe = target.probe || {};
+        el('monitorMethod').value = probe.method || 'GET';
+        el('monitorExpected').value = (probe.expected_status || []).join(',');
+        el('monitorHeaders').placeholder = probe.has_headers ? '已保存；留空保持，填写 JSON 替换' : '{"Authorization":"Bearer …"}';
+        el('monitorBody').placeholder = probe.has_body ? '已保存；留空保持，填写内容替换' : '';
+        el('monitorAssertion').value = probe.assertion?.kind || '';
+        el('monitorJsonPath').value = probe.assertion?.path || '';
+        el('monitorValue').value = probe.assertion?.kind === 'json' ? JSON.stringify(probe.assertion.value) : probe.assertion?.value || '';
+        syncProbeFields();
       el('monitorSave').textContent = '保存修改';
       el('monitorCancel').hidden = false;
       el('monitorUrl').focus();

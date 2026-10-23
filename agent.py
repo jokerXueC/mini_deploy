@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 from email.message import EmailMessage
 from functools import wraps
 from http import cookies
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote_plus, urlparse
@@ -57,6 +57,7 @@ import cpu_metrics
 import sqlite3
 import docker_mirrors
 import host_swap
+import http_limits
 import ssh_terminal
 import terminal_ai
 import panel_diagnostics
@@ -358,6 +359,7 @@ _state: dict[str, Any] = {"system_metrics": []}
 _login_failures: dict[str, list[float]] = {}
 _login_failures_lock = threading.Lock()
 _system_status_cache: dict[str, Any] = {"at": 0.0, "payload": {}}
+_system_status_refresh = threading.Event()
 _realtime_metrics_lock = threading.Lock()
 _realtime_metrics: deque[dict[str, Any]] = deque(maxlen=60)
 _realtime_server: dict[str, Any] = {}
@@ -1877,7 +1879,7 @@ def _docker_status() -> dict[str, Any]:
 
 def _inspect_docker_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Gather bounded evidence in the monitoring worker, never a status HTTP request."""
-    if not snapshot.get("available"):
+    if not snapshot.get("available") or snapshot.get('stale'):
         return snapshot
     containers = snapshot.get("containers") or []
     # Inspect only state and selected identity labels, never environment variables.
@@ -2244,26 +2246,35 @@ def _server_performance_sampler(stop):
 def _system_status_payload() -> dict[str, Any]:
     now = time.time()
     with _system_status_lock:
-        if now - float(_system_status_cache.get("at") or 0) < SYSTEM_STATUS_CACHE_SECONDS:
-            return json.loads(json.dumps(_system_status_cache.get("payload") or {}, ensure_ascii=False))
-        realtime = _realtime_metrics_payload()
-        server = realtime["server"]
-        history = _record_system_metric(server, now)
-        payload = {
-            **realtime,
-            "server": server,
-            "docker": _docker_status(),
-            "history": history,
-            "history_interval_seconds": SYSTEM_METRIC_INTERVAL_SECONDS,
-            "history_max_points": SYSTEM_METRIC_MAX_POINTS,
-        }
-        try:
-            _performance_history().record(payload['docker'].get('containers') or [], now)
-        except (OSError, ValueError, sqlite3.Error, _MaintenanceLockError) as exc:
-            _log(f'container performance history unavailable: {exc}')
-        _system_status_cache["at"] = now
-        _system_status_cache["payload"] = payload
-        return json.loads(json.dumps(payload, ensure_ascii=False))
+        payload = json.loads(json.dumps(_system_status_cache.get('payload') or {}, ensure_ascii=False))
+        sampled = float(_system_status_cache.get('at') or 0)
+        error = _system_status_cache.get('error', '')
+    payload.update(_realtime_metrics_payload())
+    payload.setdefault('history', [])
+    payload.setdefault('history_interval_seconds', SYSTEM_METRIC_INTERVAL_SECONDS)
+    payload.setdefault('history_max_points', SYSTEM_METRIC_MAX_POINTS)
+    payload.setdefault('docker', {'available': False, 'containers': [], 'error': '等待首次后台采样'})
+    payload['docker'].update(sampled_at=sampled, stale=not sampled or now - sampled > 65)
+    if error:
+        payload['docker']['error'] = error
+    return payload
+
+
+def _sample_system_status() -> None:
+    # All subprocess and disk work happens outside the publication lock.
+    docker = _docker_status()
+    now = time.time()
+    realtime = _realtime_metrics_payload()
+    payload = {**realtime, 'docker': docker,
+               'history': _record_system_metric(realtime['server'], now),
+               'history_interval_seconds': SYSTEM_METRIC_INTERVAL_SECONDS,
+               'history_max_points': SYSTEM_METRIC_MAX_POINTS}
+    with _system_status_lock:
+        _system_status_cache.update(at=now, payload=payload, error='')
+    try:
+        _performance_history().record(docker.get('containers') or [], now)
+    except (OSError, ValueError, sqlite3.Error, _MaintenanceLockError) as exc:
+        _log(f'container performance history unavailable: {exc}')
 
 
 def _sample_realtime_metrics() -> None:
@@ -2315,11 +2326,14 @@ def _system_metric_sampler() -> None:
     """Keep long-range system trends populated independently of UI traffic."""
     time.sleep(2)
     while True:
+        _system_status_refresh.clear()
         try:
-            _system_status_payload()
+            _sample_system_status()
         except Exception as exc:  # noqa: BLE001 - sampler must never stop the agent
+            with _system_status_lock:
+                _system_status_cache['error'] = f'后台采样失败：{type(exc).__name__}'
             _log(f"system metric sample failed: {exc}")
-        time.sleep(30)
+        _system_status_refresh.wait(30)
 
 
 
@@ -2426,6 +2440,7 @@ def _health_check_sampler() -> None:
                 system["docker"] = _inspect_docker_snapshot(system.get("docker") or {})
                 _evaluate_resource_alerts(monitor, system)
                 _certificate_discovery().observe(monitor)
+                _request_history().evaluate(monitor, now)
                 next_system = now + 15
             if sending and sending[0].done():
                 future, key, message = sending
@@ -2626,9 +2641,9 @@ def _evaluate_resource_alerts(monitor: monitoring.Monitor, system: dict[str, Any
         resource_alerts.evaluate(monitor, [server])
     docker = system.get("docker") or {}
     installed = docker.get("error") != "docker command not found"
-    monitor.observe("docker:daemon", not docker["available"] if "available" in docker and installed else None,
+    monitor.observe("docker:daemon", not docker["available"] if "available" in docker and installed and not docker.get('stale') else None,
                     "Docker 无法连接", "请检查 Docker 服务是否正常运行", "docker")
-    container_monitoring.evaluate_containers(monitor, docker)
+    container_monitoring.evaluate_containers(monitor, {**docker, 'available': False} if docker.get('stale') else docker)
     with _server_performance().lock:
         scene = _server_performance().latest_scene
     if scene and 0 <= monitor.clock() - scene['at'] <= 15:
@@ -2647,10 +2662,10 @@ def _evaluate_resource_alerts(monitor: monitoring.Monitor, system: dict[str, Any
         coverage = monitor.coverage.get("docker_containers", {})
         complete = coverage.get("inspected", 0) == len(docker.get("containers") or [])
         monitor.coverage["docker"] = {
-            "status": "not_installed" if not installed else "healthy" if docker.get("available") and complete else "unknown",
+            "status": "not_installed" if not installed else "healthy" if docker.get("available") and complete and not docker.get('stale') else "unknown",
             "detail": (f"已检查 {coverage.get('inspected', 0)}/{len(docker.get('containers') or [])} 个容器"
                        if docker.get("available") else "Docker 无法读取" if installed else "未安装 Docker"),
-            "checked_at": monitor.clock()}
+            "checked_at": docker.get('sampled_at', monitor.clock())}
 
 
 def _alerts_payload(system: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3000,7 +3015,7 @@ def _ssh_manager():
         return _ssh_manager_instance
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
     def _terminal_http_grant(self):
         cookie = self._session_cookie_value()
         if not cookie:
@@ -3989,7 +4004,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/monitoring":
             if self._require_auth_json():
                 try:
-                    data = _read_json_body(self, max_bytes=8192)
+                    data = _read_json_body(self, max_bytes=65536)
                     result = _monitoring_operation(data)
                 except (ValueError, OSError, _MaintenanceLockError) as exc:
                     self._write_json(503 if isinstance(exc, _MaintenanceLockError) else 400,
@@ -4330,7 +4345,7 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(500, {"error": "docker_action_failed", "detail": str(exc)})
             return
         with _system_status_lock:
-            _system_status_cache.clear()
+            _system_status_refresh.set()
         try:
             monitor = _monitor()
             container_monitoring.mark_intentional_stop(monitor, container, stopped=action in {"stop", "pause", "remove"})
@@ -4543,7 +4558,7 @@ def main() -> None:
     history_worker = threading.Thread(target=request_history.Collector(_request_history()).run,
         args=(history_stop, _log), name="request-history-sampler", daemon=True)
     history_worker.start()
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server = http_limits.BoundedHTTPServer((HOST, PORT), Handler)
     _log(f"monitoring agent listening on {HOST}:{PORT}, sites={len(PROJECTS)}")
     try:
         server.serve_forever()

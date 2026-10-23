@@ -182,7 +182,7 @@ def test_startup_starts_monitoring_and_maintenance_without_deployment(runtime, m
             pass
 
     monkeypatch.setattr(agent.threading, "Thread", Thread)
-    monkeypatch.setattr(agent, "ThreadingHTTPServer", Server)
+    monkeypatch.setattr(agent.http_limits, "BoundedHTTPServer", Server)
     monkeypatch.setattr(agent, "_validate_ui_auth_config", lambda: None)
     monkeypatch.setattr(agent.sys, "argv", ["agent.py"])
     agent.main()

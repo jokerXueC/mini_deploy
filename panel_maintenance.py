@@ -22,15 +22,7 @@ from scripts.verify_backup import verify_backup
 
 REMOTES = {'gitee': ('https://gitee.com/XC1960/mini_deploy.git', 'master'),
            'github': ('https://github.com/jokerXueC/mini_deploy.git', 'main')}
-ENTRIES = (
-    'agent.py', 'host_swap.py', 'ip_security.py', 'security_observation.py', 'security_center.py', 'cpu_metrics.py', 'server_operations.py', 'performance_metrics.py', 'server_performance.py', 'server_processes.py', 'resource_alerts.py', 'prometheus_metrics.py', 'panel_maintenance.py',
-    'release.json', 'certificates.py', 'certificate_discovery.py', 'nginx_runtime.py', 'nginx_install.py',
-    'nginx_requests.py', 'caddy_requests.py', 'request_gateway.py', 'request_history.py', 'request_export.py', 'gateway_connections.py',
-    'monitoring.py', 'container_monitoring.py', 'docker_events.py', 'docker_mirrors.py', 'ssh_terminal.py',
-    'ssh_files.py', 'ssh_file_manager.py', 'terminal_ai.py', 'panel_diagnostics.py', 'terminal_model_io.py', 'terminal_tools.py', 'terminal_command_policy.py', 'terminal_history.py', 'requirements-ssh.txt',
-    'install.sh', 'env.example', 'server.env.example', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'ui',
-    'examples/nginx.compose.yml', 'systemd/mini-deploy-agent.service', 'scripts/bootstrap_server.sh',
-    'scripts/backup-installation.sh', 'scripts/doctor.sh', 'scripts/verify_backup.py')
+ENTRIES = tuple(json.loads(Path(__file__).with_name('release.json').read_text(encoding='utf-8'))['program_entries'])
 KEY = re.compile(r'[a-f0-9]{32}')
 BACKUP_KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,120}')
 MAX_FILES, MAX_SIZE = 6000, 192 * 1024**2

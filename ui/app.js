@@ -460,13 +460,20 @@ function setView(view) {
 
 
 async function fetchJson(path) {
-  const res = await fetch(path, { credentials: 'same-origin' });
-  if (res.status === 401) location.reload();
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || data.error || `${path} ${res.status}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(path, { credentials: 'same-origin', signal: controller.signal });
+    if (res.status === 401) location.reload();
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.error || `${path} ${res.status}`);
+    return data;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('读取超时，请重试；自动刷新的页面会继续尝试。');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return res.json();
 }
 
 async function postJson(path) {
@@ -1236,10 +1243,10 @@ function renderSystemStatus(system = {}) {
   renderSystemTrend(system);
 
   const dockerBadge = $('dockerBadge');
-  dockerBadge.className = `badge ${docker.available ? 'success' : 'failed'}`;
-  dockerBadge.textContent = docker.available ? `${containers.length} 个容器` : 'Docker 不可用';
+  dockerBadge.className = `badge ${docker.available ? docker.stale ? 'neutral' : 'success' : 'failed'}`;
+  dockerBadge.textContent = docker.available ? `${containers.length} 个容器${docker.stale ? ' · 数据待更新' : ''}` : 'Docker 不可用';
   $('dockerHint').textContent = docker.available
-    ? `采样 ${server.sampled_at || '-'} · 缓存 ${server.cache_seconds || 0}s`
+    ? `${docker.sampled_at ? `容器采样 ${new Date(docker.sampled_at * 1000).toLocaleTimeString('zh-CN')}` : '等待容器采样'}${docker.stale ? ' · 当前展示上次结果' : ' · 每 30 秒更新'}${docker.error ? ` · ${docker.error}` : ''}`
     : (docker.error || '无法读取 Docker 状态');
 
   const list = $('containerList');

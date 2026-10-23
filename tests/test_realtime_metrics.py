@@ -109,6 +109,8 @@ def test_status_reads_sampler_snapshot_without_resampling_counters(monkeypatch):
 
     monkeypatch.setattr(agent, "_cpu_percent", forbidden)
     monkeypatch.setattr(agent, "_network_status", forbidden)
+    monkeypatch.setattr(agent, "_docker_status", forbidden)
+    monkeypatch.setattr(agent, "_record_system_metric", forbidden)
     result = agent._system_status_payload()
     assert result["server"]["cpu_percent"] == 12
     assert result["realtime_history"][0]["ts"] == 1000

@@ -246,7 +246,7 @@ class Protection:
 
     def _public(self):
         return json.loads(json.dumps({key: value for key, value in self.state.items()
-                                     if key not in {'records', 'ignores', 'previous_login'}}))
+                                     if key not in {'records', 'ignores', 'previous_login', 'applied_login'}}))
 
     def status(self):
         # A slow proxy reload must never block status polling on the web thread.
@@ -281,7 +281,7 @@ class Protection:
         files = record['files']
         expected, desired = ('before', 'after') if enable else ('after', 'before')
         for item in files:
-            if proxy.read_config(Path(item['path'])) not in (item[expected], item[desired]):
+            if proxy.read_config(Path(item['path'])) not in (item[expected], item[desired], item.get('previous_after')):
                 raise ValueError('业务配置已被外部修改，未覆盖；请核对保留的备份')
         written = []
         try:
@@ -289,13 +289,15 @@ class Protection:
                 path = Path(item['path'])
                 current = proxy.read_config(path)
                 if current != item[desired]:
-                    proxy.Connections.write_live(path, item[expected], item[desired])
-                    written.append(item)
+                    proxy.Connections.write_live(path, current, item[desired])
+                    written.append((item, current))
             proxy.command([*record['prefix'], 'nginx', '-t'])
-            proxy.command([*record['prefix'], 'nginx', '-s', 'reload'])
+            if written or not record.get('applied'):
+                proxy.command([*record['prefix'], 'nginx', '-s', 'reload'])
+            record['applied'] = enable
         except (ValueError, OSError):
-            for item in reversed(written):
-                proxy.Connections.write_live(Path(item['path']), item[desired], item[expected])
+            for item, original in reversed(written):
+                proxy.Connections.write_live(Path(item['path']), item[desired], original)
             try:
                 proxy.command([*record['prefix'], 'nginx', '-t'])
                 proxy.command([*record['prefix'], 'nginx', '-s', 'reload'])
@@ -317,15 +319,18 @@ class Protection:
                 self.state.update(phase='partial', errors=[str(exc)[:300]], checked_at=self.clock())
                 self._save()
 
-    def _enable(self, client_ip, ssh):
+    def _enable(self, client_ip, ssh, *, reconcile=False):
         runtimes, published, errors = self.discover()
         with self.maintenance(), self.lock:
             old = self.guard.status()['settings']
             if not self.state.get('enabled') and 'previous_login' not in self.state:
                 self.state['previous_login'] = old
                 self._save()
-            self.guard.change({**old, 'action': 'settings', 'enabled': True}, client_ip)
-            self.guard.tick(ssh)
+            if not reconcile:
+                self.state['applied_login'] = {'enabled': True}
+                self._save()
+                self.guard.change({**old, 'action': 'settings', 'enabled': True}, client_ip)
+                self.guard.tick(ssh)
             ignores = list(dict.fromkeys(['127.0.0.0/8', '::1/128', *self.guard.status()['settings']['ignoreip']]))
             ports = sorted(set(published))
             self.state.update(enabled=True, ignores=ignores, ports=ports, errors=errors,
@@ -352,11 +357,32 @@ class Protection:
                 with self.maintenance(), self.lock:
                     existing = next((item for item in self.state['records'] if item['label'] == runtime['label']), None)
                     if existing:
+                        if existing['prefix'] != runtime['prefix']:
+                            # A recreated container must still point to the exact saved host files.
+                            if not all(item.get('visible') and str(mapped_path(runtime, item['visible'])) == item['path'] for item in existing['files']):
+                                raise ValueError('入口容器已重建且挂载无法核对，原文件保留')
+                            existing['prefix'] = runtime['prefix']
+                        if reconcile and any(proxy.read_config(Path(item['path'])) not in (item['after'], item.get('previous_after')) for item in existing['files']):
+                            entry['state'] = 'changed'
+                            raise ValueError('业务更新改变了配置，网站防护需要重新核对；未自动覆盖')
+                        whitelist = '\n'.join('        ' + str(ipaddress.ip_network(net)) + ' 1;' for net in ignores)
+                        for item in existing['files']:
+                            updated = re.sub(r'geo \$mini_basic_allow \{[^{}]*\}',
+                                             'geo $mini_basic_allow {\n        default 0;\n' + whitelist + '\n    }', item['after'])
+                            if updated != item['after']:
+                                item['previous_after'], item['after'] = item['after'], updated
+                        self._save()
                         self._write_record(existing, True)
+                        for item in existing['files']:
+                            item.pop('previous_after', None)
                         record = existing
                     else:
                         dump = proxy.command([*runtime['prefix'], 'nginx', '-T'])
                         files, servers = nginx_candidates(runtime, dump, ignores)
+                        for visible in re.findall(r'^# configuration file (/[^\r\n]+):\s*$', dump, re.M):
+                            for item in files:
+                                if str(mapped_path(runtime, visible)) == item['path']:
+                                    item['visible'] = visible
                         record = {'label': runtime['label'], 'prefix': runtime['prefix'], 'files': files, 'servers': servers}
                         # A private journal survives interruption; no server file is removed.
                         self.state['records'].append(record)
@@ -369,6 +395,11 @@ class Protection:
                 self.state['entries'].append(entry)
                 self._save()
         with self.maintenance(), self.lock:
+            labels = {runtime['label'] for runtime in runtimes}
+            for record in self.state.get('records', []):
+                if record['label'] not in labels:
+                    self.state['entries'].append({'label': record['label'], 'kind': 'nginx', 'state': 'changed',
+                        'detail': '本轮未发现原入口，覆盖情况待核对；恢复记录和原文件已保留'})
             self.state.update(phase='on', checked_at=self.clock(),
                 downloads={'state': 'off', 'detail': '下载限速暂未启用，避免影响正常大文件和流式响应；请求限速不等于带宽限制'})
             self._save()
@@ -393,38 +424,26 @@ class Protection:
             if not errors:
                 previous = self.state.get('previous_login')
                 if previous:
-                    self.guard.change({**previous, 'action': 'settings'}, client_ip)
+                    current = self.guard.status()['settings']
+                    restored = dict(current)
+                    for field, applied in self.state.get('applied_login', {}).items():
+                        if current.get(field) == applied and field in previous:
+                            restored[field] = previous[field]
+                    self.guard.change({**restored, 'action': 'settings'}, client_ip)
                     self.guard.tick(ssh)
                 self.state.update(enabled=False, phase='off', entries=[], records=[], errors=[], checked_at=self.clock())
                 self.state.pop('previous_login', None)
+                self.state.pop('applied_login', None)
             else:
                 self.state.update(phase='partial', errors=errors, checked_at=self.clock())
             self._save()
 
     def check(self):
-        """Read-only drift checks; never silently overwrite a business redeploy."""
+        """Reconcile discovery and owned rules; preserve unrelated configuration edits."""
         with self.maintenance(), self.lock:
             if not self.state.get('enabled') or (self.worker and self.worker.is_alive() and threading.current_thread() is not self.worker):
                 return
-            for entry in self.state.get('entries', []):
-                if entry['state'] != 'active':
-                    continue
-                record = next((item for item in self.state.get('records', []) if item['label'] == entry['label']), None)
-                try:
-                    if not record or any(proxy.read_config(Path(item['path'])) != item['after'] for item in record['files']):
-                        raise ValueError('业务更新改变了配置，网站防护需要重新核对；未自动覆盖')
-                    proxy.command([*record['prefix'], 'nginx', '-t'])
-                except (ValueError, OSError) as exc:
-                    entry.update(state='changed', detail=str(exc)[:250])
-            # Reconcile only the isolated firewall object, including after host reboot.
-            try:
-                self.firewall.apply(self.state.get('ports', []), self.state.get('ignores', []), True)
-                if self.state.get('ports'):
-                    self.state['connections'] = {'state': 'active', 'detail': 'TCP 新连接每来源 60 次/秒，突发 120；含 Docker 发布端口；不限制 UDP/QUIC'}
-            except (ValueError, OSError, RuntimeError) as exc:
-                self.state['connections'] = {'state': 'unavailable', 'detail': str(exc)[:250]}
-            self.state['checked_at'] = self.clock()
-            self._save()
+        self._enable(None, {}, reconcile=True)
 
     def request_check(self):
         # Proxy validation must not stall SSH log collection or login-ban expiry.

@@ -26,20 +26,34 @@ def test_expired_connection_distinguishes_old_history_and_releases_only_metadata
     state = {'released': False, 'actions': []}
     entry = {'key': 'demo-api', 'name': 'API', 'upstream': 'http://api:8766', 'network': 'app_default',
              'state': 'running', 'local_address': '127.0.0.1:18080', 'caddy_upstream': 'mini-gateway-demo-api:10000'}
+    source = {'kind': 'caddy', 'mode': 'docker', 'container': 'caddy', 'config_path': '/etc/caddy/Caddyfile'}
+    routes = [{'id': name, 'site': 'api.test', 'kind': 'proxy', 'label': label,
+               'upstream': 'http://api:8766', 'supported': True}
+              for name, label in [('admin', 'handle @admin'), ('api', 'handle /cloud/*')]]
 
     def gateways(route):
         connection = {'state': 'not_connected'} if state['released'] else {
-            'state': 'connected', 'config_state': 'changed', 'site': 'api.test', 'token': 'test-token',
+            'state': 'connected', 'config_state': 'changed', 'site': 'api.test', 'token': 'test-token', 'source': source,
             'error': '代理配置已变化，请求可能绕过采集网关'}
         route.fulfill(json={'entries': [{**entry, 'connection': connection}], 'history_sources': history.sources()})
 
     def release(route):
-        state['actions'].append(route.request.post_data_json)
-        state['released'] = True
-        route.fulfill(json={'connection': {'state': 'not_connected'}, 'notice': '旧接入记录已解除，当前代理配置和请求历史保留。'})
+        payload = route.request.post_data_json
+        state['actions'].append(payload)
+        if payload['action'] == 'release':
+            state['released'] = True
+            route.fulfill(json={'connection': {'state': 'not_connected'}, 'notice': '旧接入记录已解除，当前代理配置和请求历史保留。'})
+        elif payload['action'] == 'inspect':
+            route.fulfill(json={'source': source, 'revision': 'current-config', 'routes': routes, 'networks': ['app_default']})
+        elif payload['action'] == 'preview':
+            route.fulfill(json={'token': 'new-plan', 'gateway': {'key': payload['key']},
+                                'before_rule': 'api:8766', 'after_rule': 'gateway -> api:8766', 'notice': '确认后应用'})
+        else:
+            pytest.fail('configuration must not change before confirming the new preview')
 
     page.route('**/request-gateways', gateways)
     page.route('**/gateway-connections', release)
+    page.route('**/gateway-connections/discover', lambda route: route.fulfill(json={'sources': [source]}))
     page.goto(http_server.origin + '/ui?view=requests')
     playwright.expect(page.locator('#requestSource')).to_contain_text('采集需检查')
     playwright.expect(page.locator('#requestNotice')).to_contain_text('最后一条请求')
@@ -52,7 +66,15 @@ def test_expired_connection_distinguishes_old_history_and_releases_only_metadata
     playwright.expect(page.locator('#confirmModal')).to_contain_text('保留当前业务配置')
     page.locator('#confirmOkBtn').click()
     playwright.expect(page.locator('#requestStopMonitoring')).to_be_hidden()
-    assert state['actions'] == [{'action': 'release', 'key': 'demo-api', 'token': 'test-token', 'confirmed': True}]
+    playwright.expect(page.locator('#gatewayConnectTitle')).to_have_text('重新接入请求记录')
+    playwright.expect(page.locator('#gatewayConnectFeedback')).to_contain_text('请选择当前需要记录的规则')
+    assert [item['action'] for item in state['actions']] == ['release', 'inspect']
+    assert state['actions'][0] == {'action': 'release', 'key': 'demo-api', 'token': 'test-token', 'confirmed': True}
+    page.locator('#connectService').select_option('1', force=True)
+    playwright.expect(page.locator('#connectReview')).to_be_visible()
+    assert state['actions'][-1]['action'] == 'preview' and state['actions'][-1]['route_id'] == 'api'
+    assert state['actions'][-1]['source_revision'] == 'current-config'
+    assert not any(item['action'] == 'apply' for item in state['actions'])
     assert history.query('demo-api', period='7d')['total_requests'] == 1840
 
 
@@ -91,6 +113,10 @@ def test_export_modal_zip_report_preview_and_offline_charts(page, http_server, d
     assert report.locator('#table tr').count() > 1
     report.locator('#routesTab').click()
     report.locator('#search').fill('')
+    report.locator('#rollupsTab').click()
+    playwright.expect(report.locator('#rollupsNotice')).to_be_visible()
+    assert report.locator('#table tr').count() > 1
+    report.locator('#routesTab').click()
     report.screenshot(path=str(tmp_path / 'report-desktop.png'), full_page=True)
     report.set_viewport_size({'width': 390, 'height': 844})
     assert report.evaluate('document.documentElement.scrollWidth <= innerWidth')

@@ -224,7 +224,7 @@ def test_prepare_uses_owner_checked_ssh_output_without_consuming_reader(http_ser
 
 def test_installer_publishes_ai_backend_and_real_ui_assets():
     root = agent.UI_DIR.parent
-    assert 'terminal_ai.py' in (root / 'install.sh').read_text(encoding='utf-8')
+    assert 'terminal_ai.py' in json.loads((root / 'release.json').read_text(encoding='utf-8'))['program_entries']
     assert (agent.UI_DIR / 'terminal-ai.js').exists()
     assert 'terminal-ai.js' in agent.UI_ASSET_TYPES
 

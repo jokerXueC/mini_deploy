@@ -104,10 +104,12 @@ def test_retention_row_and_byte_limits_prune_only_history(tmp_path):
     store = history.History(tmp_path, max_rows=2, retention=100)
     ingest(store, [line("/expired", ts=NOW - 101), line("/old", ts=NOW - 90),
                    line("/new", ts=NOW - 50), line("/newest", ts=NOW - 20)])
-    assert {g["path"] for g in store.query("api", now=NOW)["groups"]} == {"/new", "/newest"}
+    assert {g["path"] for g in store.query("api", now=NOW)["groups"]} == {"/old", "/new", "/newest"}
+    assert store.query('api', now=NOW)['retained_requests'] == 2
     tiny = history.History(tmp_path, max_bytes=1)
     ingest(tiny, [line()])
-    assert tiny.query("api", now=NOW)["total_requests"] == 0
+    assert tiny.query("api", now=NOW)["total_requests"] == 4
+    assert tiny.query('api', now=NOW)['retained_requests'] == 0
     assert business.read_text() == "keep"
 
 
@@ -140,20 +142,18 @@ def test_collector_checkpoints_without_browser_and_timeout_keeps_previous_histor
     entry = {"spec": {"key": "api", "name": "API"}}
     gateway = SimpleNamespace(read=lambda _: entry, inspect=lambda _: {"Id": "container-a"}, upgrade_logging=lambda *_: None)
     commands = []
-    def logs(command, **kwargs):
-        commands.append(command)
-        kwargs["stdout"].write((line() + '\n').encode())
-        return SimpleNamespace(returncode=0)
-    monkeypatch.setattr(history.subprocess, "run", logs)
+    def logs(stream, since, until, checkpoint):
+        commands.append((since, until))
+        return ([line()], ['first'], {}) if len(commands) == 1 else ([], [], {})
+    monkeypatch.setattr(history, "read_log_batch", logs)
     collector.collect(gateway, entry, now=NOW)
     collector.collect(gateway, entry, now=NOW + 5)
     assert store.query("api", now=NOW)["total_requests"] == 1
-    assert "--timestamps" in commands[0]
-    assert commands[1][commands[1].index("--since") + 1] == str(NOW - 2)
+    assert commands[1][0] == NOW - 1
     before = store.source("api")["cursor"]
     def timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired("docker", 8)
-    monkeypatch.setattr(history.subprocess, "run", timeout)
+    monkeypatch.setattr(history, "read_log_batch", timeout)
     with pytest.raises(subprocess.TimeoutExpired):
         collector.collect(gateway, entry, now=NOW + 10)
     assert store.source("api")["cursor"] == before
@@ -191,11 +191,10 @@ def test_collector_keeps_route_warning_while_persisting_inflight_requests(tmp_pa
     gateway = SimpleNamespace(read=lambda _: entry, inspect=lambda _: {'Id': 'container-a'}, upgrade_logging=lambda *_: None)
     monkeypatch.setattr(Connections, 'status', lambda *_a, **_kw: {'error': '代理配置已变化'})
 
-    def logs(_command, **kwargs):
-        kwargs['stdout'].write((line() + '\n').encode())
-        return SimpleNamespace(returncode=0)
+    def logs(*args):
+        return [line()], ['first'], {}
 
-    monkeypatch.setattr(history.subprocess, 'run', logs)
+    monkeypatch.setattr(history, 'read_log_batch', logs)
     history.Collector(store).collect(gateway, entry, now=NOW)
     result = store.query('api', now=NOW)
     assert result['total_requests'] == 1 and result['error'] == '代理配置已变化'

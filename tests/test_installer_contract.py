@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -206,7 +207,7 @@ def test_release_symlinks_are_rejected_before_backup_and_before_chmod() -> None:
 def test_installer_never_recursively_changes_persistent_app_tree() -> None:
     assert 'chown -R root:root "$APP_HOME"' not in INSTALLER
     assert 'chmod -R go-w "$APP_HOME"' not in INSTALLER
-    manifest = INSTALLER[INSTALLER.index("RELEASE_ENTRIES=("):INSTALLER.index("\n)")]
+    manifest = json.loads((ROOT / 'release.json').read_text(encoding='utf-8'))['program_entries']
     for persistent_name in ("workspace", "projects.json", "sites.json", "monitoring-state.json",
                             ".backups", "state.json", "audit.jsonl"):
         assert persistent_name not in manifest

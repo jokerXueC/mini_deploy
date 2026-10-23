@@ -104,10 +104,43 @@ def test_external_change_never_overwritten_and_reports_partial_close(setup):
     assert conf.read_text() == external
 
 
+def test_reconcile_updates_ports_and_whitelist_and_preserves_user_policy_on_disable(setup):
+    protection, conf, _, fw = setup
+    finish(protection)
+    settings = protection.guard.status()['settings']
+    protection.guard.change({**settings, 'action': 'settings', 'maxretry': 11,
+                             'ignoreip': [*settings['ignoreip'], '8.8.8.8']}, '1.1.1.1')
+    discovery = protection.discover
+    protection.discover = lambda: (discovery()[0], [443], [])
+    protection.check()
+    assert fw.calls[-1][0] == [443] and '8.8.8.8/32' in fw.calls[-1][1]
+    assert '8.8.8.8/32 1;' in conf.read_text()
+    assert finish(protection, False)['phase'] == 'off'
+    settings = protection.guard.status()['settings']
+    assert settings['maxretry'] == 11 and '8.8.8.8/32' in settings['ignoreip']
+
+
+def test_newly_discovered_unsupported_entry_is_visible(setup):
+    protection, _, _, _ = setup
+    finish(protection)
+    discovery = protection.discover
+    protection.discover = lambda: ([*discovery()[0], {'kind': 'caddy', 'label': 'new-entry'}], [80, 443], [])
+    protection.check()
+    assert any(item['label'] == 'new-entry' for item in protection.status()['entries'])
+
+
+def test_unchanged_periodic_check_does_not_reload_nginx(setup):
+    protection, _, calls, _ = setup
+    finish(protection)
+    before = sum(args[-1] == 'reload' for args in calls)
+    protection.check()
+    assert sum(args[-1] == 'reload' for args in calls) == before
+
+
 def test_restart_reconcile_firewall_failure_and_private_configuration(setup):
     protection, conf, _, fw = setup
     finish(protection)
-    restored = basic.Protection(protection.home, protection.guard, firewall=fw)
+    restored = basic.Protection(protection.home, protection.guard, firewall=fw, discovery=protection.discover)
     assert restored.status()['enabled']
     fw.fail = True
     restored.check()
