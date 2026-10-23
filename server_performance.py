@@ -25,6 +25,8 @@ from certificates import trusted_path
 from request_export import stamp, numeric, write_csv, safe_cell
 
 INTERVAL = 30
+DATABASE_PAGES = 32768
+WRITE_BATCH_SIZE = 64
 EVIDENCE_BUDGET = 32 * 1024 * 1024
 RETENTION = 7 * 86400
 PERIODS = {'1h': 3600, '24h': 86400, '7d': RETENTION}
@@ -107,7 +109,7 @@ class History:
             with closing(sqlite3.connect(self.path, timeout=3)) as db, db:
                 self.path.chmod(0o600)
                 db.row_factory = sqlite3.Row
-                db.execute('PRAGMA max_page_count=32768')
+                db.execute(f'PRAGMA max_page_count={DATABASE_PAGES}')
                 db.executescript('''CREATE TABLE IF NOT EXISTS samples (
                     run TEXT NOT NULL, ts INTEGER NOT NULL, first REAL NOT NULL, last REAL NOT NULL,
                     observations INTEGER NOT NULL, data TEXT NOT NULL, metadata TEXT NOT NULL,
@@ -183,20 +185,83 @@ class History:
                 self.pending.pop(key)
                 self.persisted.pop(key, None)
 
+    def _prepare_write(self, db, samples, contexts, now):
+        page_size = db.execute('PRAGMA page_size').fetchone()[0]
+        limit = db.execute('PRAGMA max_page_count').fetchone()[0]
+        # Include row/index overhead and overflow pages, not just compressed evidence.
+        payloads = [len(row[-2].encode()) + len(row[-1].encode()) for row in samples]
+        payloads += [len(row[-2].encode()) + len(row[-1]) for row in contexts]
+        needed = 8 + sum(math.ceil(size / page_size) + 4 for size in payloads)
+        if needed > limit // 2:
+            raise ValueError('单批性能记录过大，无法安全写入历史库')
+        db.execute('DELETE FROM samples WHERE ts < ?', (now - RETENTION,))
+        db.execute('DELETE FROM process_context WHERE at < ?', (now - RETENTION,))
+        count = db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
+        if count + len(samples) > 22000:
+            db.execute('DELETE FROM samples WHERE rowid IN (SELECT rowid FROM samples ORDER BY ts LIMIT ?)',
+                       (count + len(samples) - 22000,))
+        used = db.execute('SELECT COALESCE(SUM(length(detail)),0) FROM process_context').fetchone()[0]
+        required = sum(len(row[-1]) for row in contexts)
+        if used + required > EVIDENCE_BUDGET:
+            victims = []
+            for row in db.execute('SELECT rowid,length(detail) FROM process_context ORDER BY at'):
+                victims.append((row[0],))
+                used -= row[1]
+                if used + required <= EVIDENCE_BUDGET * .875:
+                    break
+            db.executemany('DELETE FROM process_context WHERE rowid=?', victims)
+        # Commit retention first: SQLITE_FULL would otherwise roll it back with the insert.
+        db.commit()
+        reserve = needed + limit // 8
+        while True:
+            pages = db.execute('PRAGMA page_count').fetchone()[0]
+            free = db.execute('PRAGMA freelist_count').fetchone()[0]
+            if limit - pages + free >= reserve:
+                return
+            # Reuse old monitoring pages in place; never unlink or rebuild the database.
+            victims = list(db.execute('''SELECT kind,id FROM (
+                SELECT 'sample' AS kind,rowid AS id,ts AS age FROM samples
+                    WHERE rowid IN (SELECT rowid FROM samples ORDER BY ts LIMIT 128)
+                UNION ALL
+                SELECT 'context',rowid,at FROM process_context
+                    WHERE rowid IN (SELECT rowid FROM process_context ORDER BY at LIMIT 128)
+                ) ORDER BY age,kind,id LIMIT 128'''))
+            if not victims:
+                raise sqlite3.OperationalError('性能历史库没有足够的可复用空间')
+            db.executemany('DELETE FROM samples WHERE rowid=?', [(r['id'],) for r in victims if r['kind'] == 'sample'])
+            db.executemany('DELETE FROM process_context WHERE rowid=?', [(r['id'],) for r in victims if r['kind'] == 'context'])
+            db.commit()
+
+    def _saved(self, batch, contexts, now):
+        with self.lock:
+            for scene in contexts:
+                key = (scene['run'], scene['ts'])
+                if self.contexts.get(key) is scene:
+                    self.contexts.pop(key)
+            for bucket in batch:
+                key = (bucket['run'], bucket['ts'])
+                self.persisted[key] = bucket['observations']
+                if bucket['ts'] + INTERVAL <= now and self.pending.get(key, {}).get('observations') == bucket['observations']:
+                    self.pending.pop(key, None)
+                    self.persisted.pop(key, None)
+
     def flush(self, now=None, force=False):
         now = time.time() if now is None else now
         with self.flush_lock:
             if not force and self.last_flush is not None and now - self.last_flush < INTERVAL:
                 return
             with self.lock:
-                batch = [json.loads(json.dumps(bucket)) for key, bucket in self.pending.items()
-                         if self.persisted.get(key) != bucket['observations']]
-                contexts = list(self.contexts.values())
-            if not batch and not contexts:
+                keys = sorted({key for key, bucket in self.pending.items()
+                               if self.persisted.get(key) != bucket['observations']} | self.contexts.keys(),
+                              key=lambda key: (key[1], key[0]))
+            if not keys:
                 return
             try:
-                with self.connect() as db:
-                    db.execute('DELETE FROM process_context WHERE at < ?', (now - RETENTION,))
+                for offset in range(0, len(keys), WRITE_BATCH_SIZE):
+                    with self.lock:
+                        selected = keys[offset:offset + WRITE_BATCH_SIZE]
+                        batch = [json.loads(json.dumps(self.pending[key])) for key in selected if key in self.pending]
+                        contexts = [self.contexts[key] for key in selected if key in self.contexts]
                     encoded = [(c['run'], c['ts'], c['at'], c['score'], json.dumps(context_summary(c), ensure_ascii=False),
                                 zlib.compress(json.dumps(c, ensure_ascii=False, allow_nan=False).encode())) for c in contexts]
                     encoded.sort(key=lambda row: row[2], reverse=True)
@@ -206,43 +271,23 @@ class History:
                             keep.append(row)
                             size += len(row[-1])
                     encoded = keep
-                    used = db.execute('SELECT COALESCE(SUM(length(detail)),0) FROM process_context').fetchone()[0]
-                    required = sum(len(row[-1]) for row in encoded)
-                    if used + required > EVIDENCE_BUDGET:
-                        victims = []
-                        for row in db.execute('SELECT rowid,length(detail) FROM process_context ORDER BY at'):
-                            victims.append((row[0],))
-                            used -= row[1]
-                            if used + required <= EVIDENCE_BUDGET * .875:
-                                break
-                        db.executemany('DELETE FROM process_context WHERE rowid=?', victims)
-                    db.executemany('''INSERT INTO process_context VALUES(?,?,?,?,?,?) ON CONFLICT(run,ts) DO UPDATE SET
-                        at=excluded.at,score=excluded.score,summary=excluded.summary,detail=excluded.detail
-                        WHERE excluded.score >= process_context.score''', encoded)
-                    db.executemany('''INSERT INTO samples VALUES(?,?,?,?,?,?,?) ON CONFLICT(run,ts) DO UPDATE SET
-                        first=excluded.first,last=excluded.last,observations=excluded.observations,
-                        data=excluded.data,metadata=excluded.metadata''',
-                        [(b['run'], b['ts'], b['first'], b['last'], b['observations'], json.dumps({**b['stats'], '_seconds': b['seconds']}, allow_nan=False),
-                          json.dumps(b['metadata'], ensure_ascii=False)) for b in batch])
-                    db.execute('DELETE FROM samples WHERE ts < ?', (now - RETENTION,))
-                    # Multiple restarts in one interval must not erase earlier samples.
-                    count = db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
-                    if count > 22000:
-                        db.execute('DELETE FROM samples WHERE rowid IN (SELECT rowid FROM samples ORDER BY ts LIMIT ?)', (count - 22000,))
-            except (ValueError, OSError, sqlite3.Error, RuntimeError):
-                self.error = '性能历史写入失败，请检查数据目录、维护状态或磁盘空间；待写采样暂存于内存。'
+                    samples = [(b['run'], b['ts'], b['first'], b['last'], b['observations'],
+                                json.dumps({**b['stats'], '_seconds': b['seconds']}, allow_nan=False),
+                                json.dumps(b['metadata'], ensure_ascii=False)) for b in batch]
+                    with self.connect() as db:
+                        self._prepare_write(db, samples, encoded, now)
+                        db.executemany('''INSERT INTO samples VALUES(?,?,?,?,?,?,?) ON CONFLICT(run,ts) DO UPDATE SET
+                            first=excluded.first,last=excluded.last,observations=excluded.observations,
+                            data=excluded.data,metadata=excluded.metadata''', samples)
+                        db.executemany('''INSERT INTO process_context VALUES(?,?,?,?,?,?) ON CONFLICT(run,ts) DO UPDATE SET
+                            at=excluded.at,score=excluded.score,summary=excluded.summary,detail=excluded.detail
+                            WHERE excluded.score >= process_context.score''', encoded)
+                    self._saved(batch, contexts, now)
+            except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+                full = getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL or getattr(exc, 'errno', None) == 28
+                self.error = ('性能历史写入失败：历史库或磁盘空间不足' if full else '性能历史写入失败，请检查数据目录、维护状态或磁盘空间') + '；未写入的采样暂存于内存，将自动重试。'
                 raise
             with self.lock:
-                for scene in contexts:
-                    key = (scene['run'], scene['ts'])
-                    if self.contexts.get(key) is scene:
-                        self.contexts.pop(key)
-                for bucket in batch:
-                    key = (bucket['run'], bucket['ts'])
-                    self.persisted[key] = bucket['observations']
-                    if bucket['ts'] + INTERVAL <= now and self.pending.get(key, {}).get('observations') == bucket['observations']:
-                        self.pending.pop(key, None)
-                        self.persisted.pop(key, None)
                 self.last_flush, self.error = now, ''
 
     def version(self, period='24h', now=None):
@@ -264,6 +309,7 @@ class History:
         now = time.time() if now is None else now
         since = now - PERIODS[period]
         with self.connect() as db:
+            last_saved = db.execute('SELECT MAX(last) FROM samples').fetchone()[0]
             raw = [dict(row) for row in db.execute('SELECT * FROM samples WHERE ts>=? AND first<=? ORDER BY first,run', (since, now))]
             contexts = [json.loads(row[0]) for row in db.execute(
                 'SELECT summary FROM process_context WHERE at>=? AND at<=? ORDER BY at DESC', (since, now))]
@@ -310,11 +356,12 @@ class History:
             'coverage_seconds': coverage_seconds,
             'coverage_percent': min(100, coverage_seconds / PERIODS[period] * 100), 'session_count': len(sessions),
             'first_at': stamp(min(row['first'] for row in raw)) if raw else '', 'latest_at': stamp(latest) if latest is not None else '',
-            'stale': latest is not None and now - latest > 65, 'error': self.error,
+            'last_saved_at': stamp(last_saved) if last_saved is not None else '',
+            'stale': last_saved is not None and now - last_saved > 65, 'error': self.error,
             'metadata': metadata, 'points': points, 'summary': summary, 'metrics': METRICS,
             'contexts': contexts, 'context_details': details,
-            'context_notice': '进程每约 5 秒读取计数差值，每 30 秒保留压力最明显的一次现场；进程速率为计数窗口平均，整机指标为最近的 1 秒采样，窗口不同可能产生差异。CPU 以单逻辑核为 100%，整机占比另列；常驻内存 RSS 可能包含共享页。磁盘 I/O 为内核记账的存储读写字节，不是网络流量；写入记账与设备落盘时刻可能不同。排名只覆盖采样时仍存在且有读取权限的进程，短暂进程和两次采样之间的尖峰可能遗漏。同一时刻占用高是排查线索，不等于已确认因果；不采集命令参数、环境变量或文件内容。现场最多保留 7 天，压缩明细达到 32 MiB 时较早现场会先淘汰；总体性能统计独立保留。',
-            'notice': '每秒采集、每 30 秒持久保存平均值和峰值；无需打开网页。仅分析已保存采样，缺失不补零；峰值为实际 1 秒采样峰值。网络统计沿用所有非回环接口之和，可能包含虚拟接口流量。'}
+            'context_notice': '进程每约 5 秒读取计数差值，每 30 秒保留压力最明显的一次现场；进程速率为计数窗口平均，整机指标为最近的 1 秒采样，窗口不同可能产生差异。CPU 以单逻辑核为 100%，整机占比另列；常驻内存 RSS 可能包含共享页。磁盘 I/O 为内核记账的存储读写字节，不是网络流量；写入记账与设备落盘时刻可能不同。排名只覆盖采样时仍存在且有读取权限的进程，短暂进程和两次采样之间的尖峰可能遗漏。同一时刻占用高是排查线索，不等于已确认因果；不采集命令参数、环境变量或文件内容。现场最多保留 7 天，压缩明细达到 32 MiB 时较早现场会先淘汰，不影响总体统计；两者共同受总库容量限制。',
+            'notice': '每秒采集、每 30 秒持久保存平均值和峰值；无需打开网页。历史最多保留 7 天，总库上限 128 MiB（包含索引和现场摘要），接近容量上限会提前轮换较早记录并预留写入空间。仅分析已保存采样，缺失不补零；峰值为实际 1 秒采样峰值。网络统计沿用所有非回环接口之和，可能包含虚拟接口流量。'}
 
     def nearby(self, at, radius=300):
         with self.connect() as db:

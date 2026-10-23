@@ -960,6 +960,7 @@ function trendAvailability(points, config, timing = {}) {
   if (valid.some((value, index) => index > 0 && value && valid[index - 1])) {
     return { ready: true, message: '' };
   }
+  if (timing.emptyMessage) return {ready: false, message: timing.emptyMessage};
   const configuredInterval = Number(timing.intervalSeconds);
   const interval = Number.isFinite(configuredInterval) && configuredInterval > 0 ? configuredInterval : 1800;
   const now = timing.nowSeconds ?? Date.now() / 1000;
@@ -1053,7 +1054,7 @@ function renderSystemTrend(system = {}) {
   const filtered = cutoff ? rawHistory.filter(point => Number(point?.ts) >= nowTs - cutoff) : rawHistory;
   const points = observation?.points || filtered.slice().reverse();
   const intervalSeconds = observation?.intervalSeconds || (realtime ? 1 : system.history_interval_seconds);
-  const timing = { intervalSeconds, nowSeconds: nowTs, lastSampleTs: rawHistory[0]?.ts };
+  const timing = { intervalSeconds, nowSeconds: nowTs, lastSampleTs: rawHistory[0]?.ts, emptyMessage: observation?.emptyMessage };
   if (observation) timing.lastSampleTs = points.at(-1)?.ts;
   const metricKeys = container ? ['cpu_percent', 'memory_percent'] : ['cpu_percent', 'memory_percent', 'network_total_kbps'];
   if (observation && chart.observationSource === observation) return;

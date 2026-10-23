@@ -52,6 +52,33 @@ def test_heatmap_keeps_missing_samples_blank_and_preserves_focus_on_refresh(page
     playwright.expect(page.locator('#loadMapDetail')).to_contain_text('20.0%')
 
 
+def test_saved_history_write_failure_is_visible_and_clears_after_recovery(page, http_server, tmp_path):
+    page.clock.install()
+    preview(page, http_server, system())
+    now = int(time.time())
+    data = {'points': [], 'contexts': [], 'stale': True,
+            'error': '性能历史写入失败：历史库或磁盘空间不足；未写入的采样暂存于内存，将自动重试。'}
+    page.route('**/performance/server?*', lambda route: route.fulfill(json=data))
+    page.locator('[data-trend-range="1h"]').click()
+    playwright.expect(page.locator('#observationStatus')).to_contain_text('空间不足')
+    playwright.expect(page.locator('#loadMapDetail')).to_have_text('历史采样保存失败')
+    playwright.expect(page.locator('.trend-card-empty small')).to_have_text(['历史采样保存失败，请查看上方原因'] * 3)
+    playwright.expect(page.locator('.load-cell[data-level="empty"]')).to_have_count(180)
+    for width in (1440, 390):
+        page.set_viewport_size({'width': width, 'height': 1000})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        page.screenshot(path=str(tmp_path / f'history-write-error-{width}.png'), full_page=True)
+    data.update(error='', stale=False, points=[{'ts': now, 'cpu_percent': 25}])
+    page.clock.run_for(31000)
+    playwright.expect(page.locator('#observationStatus')).not_to_contain_text('空间不足')
+    playwright.expect(page.locator('#loadAverage')).to_have_text('25.0%')
+    data.update(stale=True, points=[])
+    page.clock.run_for(31000)
+    playwright.expect(page.locator('#observationStatus')).to_contain_text('历史采样已中断')
+    playwright.expect(page.locator('#loadMapDetail')).to_have_text('所选时段没有已保存的采样')
+    playwright.expect(page.locator('.trend-card-empty small')).to_have_text(['所选时段没有新的已保存采样'] * 3)
+
+
 def test_persisted_hour_uses_real_peaks_weighted_means_and_exact_interval_evidence(page, http_server, tmp_path):
     payload = system()
     now = int(time.time() // 60) * 60

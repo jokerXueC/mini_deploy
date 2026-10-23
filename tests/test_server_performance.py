@@ -10,6 +10,7 @@ from collections import deque
 import pytest
 
 import agent
+import server_performance as performance
 from server_performance import History, values, METRICS, build
 from test_deployment_removal import runtime as runtime, http_server as http_server
 from test_request_export import get
@@ -102,6 +103,118 @@ def test_failed_database_keeps_pending_and_recovers_without_double_count(tmp_pat
     history.flush(NOW + 32)
     data = history.query(now=NOW + 32)
     assert data['sample_seconds'] == 2 and data['summary']['cpu_percent']['average'] == 60
+
+
+def fill_history_to_limit(history):
+    """An actual SQLITE_FULL, with unexpired rows and no dependency on disk capacity."""
+    start = NOW - 6 * 86400
+    history.observe(sample(), start)
+    history.record_context({'at': start, 'available': True, 'warnings': [], 'processes': []}, sample())
+    history.flush(start + 30)
+    with history.connect() as db:
+        saved = tuple(db.execute('SELECT * FROM samples').fetchone())
+        context = tuple(db.execute('SELECT * FROM process_context').fetchone())
+        for index in range(1, 10000):
+            at = start + index * 30
+            try:
+                db.execute('INSERT INTO samples VALUES(?,?,?,?,?,?,?)',
+                           (saved[0], at, at, at, *saved[4:]))
+                db.execute('INSERT INTO process_context VALUES(?,?,?,?,?,?)',
+                           (context[0], at, at, *context[3:]))
+                db.commit()
+            except sqlite3.OperationalError as exc:
+                assert exc.sqlite_errorcode == sqlite3.SQLITE_FULL
+                db.rollback()
+                return
+        pytest.fail('fixture did not reach the real SQLite page limit')
+
+
+def test_full_database_reuses_pages_and_saves_backlog_without_recreating_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(performance, 'DATABASE_PAGES', 512)
+    monkeypatch.setattr(performance, 'WRITE_BATCH_SIZE', 8)
+    history = History(tmp_path)
+    fill_history_to_limit(history)
+    inode = history.path.stat().st_ino
+    business = tmp_path / 'business.txt'
+    business.write_text('preserve')
+    with history.connect() as db:
+        before = db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
+        assert db.execute('PRAGMA freelist_count').fetchone()[0] == 0
+    # Reopening an old full database must recover without resetting it.
+    history = History(tmp_path)
+    for index in range(40):
+        history.observe(sample(index), NOW + index * 30)
+    history.flush(NOW + 1200)
+    data = history.query('1h', NOW + 1200)
+    assert not history.error and not history.pending
+    assert data['sample_seconds'] == 40 and len(data['points']) == 40
+    assert data['summary']['cpu_percent']['average'] == 19.5
+    with history.connect() as db:
+        assert 0 < db.execute('SELECT COUNT(*) FROM samples WHERE first < ?', (NOW,)).fetchone()[0] < before
+        assert db.execute('PRAGMA page_count').fetchone()[0] <= 512
+        assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert history.path.stat().st_ino == inode and business.read_text() == 'preserve'
+    # Further writes and restart continue from the retained data.
+    history = History(tmp_path)
+    history.observe(sample(99), NOW + 1230)
+    history.flush(NOW + 1231)
+    assert history.query('1h', NOW + 1231)['sample_seconds'] == 41
+
+
+def test_partial_backlog_commit_retains_only_unwritten_samples_for_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(performance, 'WRITE_BATCH_SIZE', 2)
+    history = History(tmp_path)
+    for index in range(5):
+        history.observe(sample(index), NOW + index * 30)
+    original, calls = history._prepare_write, []
+
+    def prepare(*args):
+        calls.append(True)
+        if len(calls) == 2:
+            raise OSError(28, 'No space left on device')
+        return original(*args)
+
+    monkeypatch.setattr(history, '_prepare_write', prepare)
+    with pytest.raises(OSError):
+        history.flush(NOW + 150)
+    assert len(history.pending) == 3 and '空间不足' in history.error
+    assert history.query('1h', NOW + 150)['sample_seconds'] == 2
+    monkeypatch.setattr(history, '_prepare_write', original)
+    history.flush(NOW + 151)
+    assert not history.error and not history.pending
+    assert history.query('1h', NOW + 151)['sample_seconds'] == 5
+
+
+def test_continuous_sampling_rotates_by_total_pages_including_summaries(tmp_path, monkeypatch):
+    monkeypatch.setattr(performance, 'DATABASE_PAGES', 512)
+    monkeypatch.setattr(performance, 'WRITE_BATCH_SIZE', 8)
+    history = History(tmp_path)
+    for index in range(800):
+        at = NOW + index * 30
+        history.observe(sample(index % 100), at)
+        history.record_context({'at': at, 'available': True, 'warnings': [], 'processes': []}, sample())
+        if index % 8 == 7:
+            history.flush(at + 1)
+    with history.connect() as db:
+        assert 0 < db.execute('SELECT COUNT(*) FROM samples').fetchone()[0] < 800
+        assert db.execute('SELECT MAX(last) FROM samples').fetchone()[0] == at
+        assert db.execute('SELECT MAX(at) FROM process_context').fetchone()[0] == at
+        assert db.execute('SELECT SUM(length(detail)) FROM process_context').fetchone()[0] < performance.EVIDENCE_BUDGET
+        assert db.execute('PRAGMA page_count').fetchone()[0] <= 512
+        assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    data = history.query('1h', at + 1)
+    assert len(data['points']) == 120 and len(data['contexts']) == 120
+    assert history.context(history.run, at)['at'] == at
+    assert not history.error
+
+
+def test_empty_recent_window_reports_stalled_writer_and_last_saved_time(tmp_path):
+    history = History(tmp_path)
+    history.observe(sample(), NOW)
+    history.flush(NOW + 30)
+    data = history.query('1h', NOW + 7200)
+    assert not data['points'] and data['stale'] and data['last_saved_at']
+    assert not History(tmp_path / 'new').query('1h', NOW)['stale']
 
 
 def test_disk_latency_weighting_and_missing_devices():

@@ -10,7 +10,7 @@
   meta = data.metadata || {};
   $('server').textContent = `${meta.hostname || '服务器'} · ${meta.logical_cores ? meta.logical_cores + ' 个逻辑核' : '核心数未记录'} · ${format(meta.memory_total_mb == null ? null : meta.memory_total_mb / 1024, 'GiB 内存')}`;
   $('range').textContent = `${data.since} 至 ${data.until}（UTC）`;
-  $('coverage').textContent = `覆盖率 ${format(data.coverage_percent, '%')} · ${format(data.coverage_seconds)} 个不同采样秒 · ${format(data.points.length)} 组统计 · ${data.session_count} 个采样批次${data.first_at ? ` · 实际记录 ${data.first_at} 至 ${data.latest_at}` : ' · 等待首次采样，通常在 30 秒内开始显示'}`;
+  $('coverage').textContent = `覆盖率 ${format(data.coverage_percent, '%')} · ${format(data.coverage_seconds)} 个不同采样秒 · ${format(data.points.length)} 组统计 · ${data.session_count} 个采样批次${data.first_at ? ` · 实际记录 ${data.first_at} 至 ${data.latest_at}` : data.error ? ' · 历史采样保存失败' : data.stale || data.last_saved_at ? ' · 所选时段没有已保存的采样' : ' · 等待首次采样，通常在 30 秒内开始显示'}`;
   $('notice').textContent = data.notice + ' 覆盖率按有有效指标的采样秒计算，各指标完整程度见下方有效采样数。';
   $('warnings').replaceChildren();
   for (const text of [data.error, data.stale ? '最近采样已超过 65 秒，采集可能中断。' : '', data.coverage_percent < 95 ? '所选时间范围的数据尚未完整覆盖；升级前、停机时或采集失败的时间无法补回。' : ''].filter(Boolean)) {

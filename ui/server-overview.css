@@ -41,6 +41,7 @@ html[data-theme="light"] #serverView {
 #serverView .system-trend-panel > .panel-head { margin-bottom: 18px; }
 #serverView .system-trend-panel .panel-head h2 { font-size: 15px; font-weight: 500; }
 #serverView .system-trend-panel .panel-head p { font-size: 12px; }
+#serverView #observationStatus[data-error="true"] { color: var(--load-high); }
 #serverView .trend-range-controls { background: none; border: 0; gap: 2px; padding: 0; }
 #serverView .trend-range { border-radius: 3px; min-height: 30px; font-size: 12px; }
 #serverView .trend-range.active { color: var(--fg); background: var(--surface-muted); box-shadow: none; }

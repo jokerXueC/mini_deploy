@@ -67,6 +67,7 @@ window.ServerOverview = (() => {
     } catch (error) {
       if (request !== controller || requestKey !== key) return;
       historyError = error.name === 'AbortError' ? '读取历史超时' : error.message;
+      derived = null;
     } finally {
       clearTimeout(timeout);
       if (request === controller && requestKey === key) {
@@ -91,6 +92,7 @@ window.ServerOverview = (() => {
     document.querySelector('[data-trend-range="all"]').textContent = target ? '已保留' : '全部';
     if (!target && range === 'realtime') {
       if (requestKey) reset();
+      $('observationStatus').dataset.error = 'false';
       $('observationStatus').textContent = system.docker?.available === false ? 'Docker 暂不可用 · 当前查看主机' : '主机 CPU · 内存 · 网络吞吐';
       return null;
     }
@@ -99,8 +101,10 @@ window.ServerOverview = (() => {
     if (requestKey !== key) { reset(); requestKey = key; }
     if (!request && Date.now() >= nextRead && isVisible()) readHistory(key, period);
     $('observationStatus').textContent = historyError ? `${historyError} · ${history ? '保留上次结果，' : ''}稍后重试`
+      : history?.error || (history?.stale ? '历史采样已中断，最近超过 65 秒没有新记录'
       : request && !history ? '正在读取已保存的采样…' : target ? '容器 CPU · 内存；网络吞吐请查看服务器整体'
-      : '已保存的历史采样 · 点击时段查看现场';
+      : '已保存的历史采样 · 点击时段查看现场');
+    $('observationStatus').dataset.error = String(Boolean(historyError || history?.error || history?.stale));
     if (derived) return derived;
     const interval = Math.max(30, Number(history?.interval_seconds) || 30);
     const now = Number.isFinite(Date.parse(history?.until)) ? Date.parse(history.until) / 1000 : Date.now() / 1000;
@@ -128,6 +132,8 @@ window.ServerOverview = (() => {
       : range === '6h' ? '最近 6 小时' : range === '24h' ? '最近 24 小时' : '最近 7 天';
     derived = {revision: ++revision, points: filled, intervalSeconds: interval, container: Boolean(target), target,
       windowStart: windowEnd - windowSeconds, windowEnd, rangeLabel,
+      emptyMessage: historyError ? '历史暂时无法读取，将自动重试' : history?.error ? '历史采样保存失败，请查看上方原因'
+        : history?.stale || !points.length && history?.last_saved_at ? '所选时段没有新的已保存采样' : '',
       contexts: history?.contexts || [],
       hint: `${select.selectedOptions[0]?.textContent} · ${rangeLabel} · 每 30 秒采集 · ${points.length} 个时间点${target ? ' · 区间均值' : ''}`};
     return derived;
@@ -380,7 +386,10 @@ window.ServerOverview = (() => {
       cells.forEach((cell, index) => { cell.tabIndex = index === 0 ? 0 : -1; });
     }
     $('loadMapDetail').textContent = selected >= 0 ? descriptions[selected]
-      : points.length ? container ? '内存 ≥ 90% 标为高占用 · CPU 按逻辑核计量' : 'CPU ≥ 80% / 内存 ≥ 90% 标黄 · 网络亮度为相对吞吐' : '等待首次采样';
+      : points.length ? container ? '内存 ≥ 90% 标为高占用 · CPU 按逻辑核计量' : 'CPU ≥ 80% / 内存 ≥ 90% 标黄 · 网络亮度为相对吞吐'
+      : historyError ? '历史暂时无法读取' : history?.error ? '历史采样保存失败'
+      : history?.stale || history?.last_saved_at ? '所选时段没有已保存的采样'
+      : request ? '正在读取已保存的采样…' : requestKey ? '所选时段暂无采样，首次保存通常需要 30 秒' : '等待首次采样';
     highlight();
   }
   return {update, source, pause};

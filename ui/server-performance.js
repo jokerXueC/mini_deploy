@@ -78,7 +78,8 @@
       if (data.period !== requestedPeriod || !Array.isArray(data.points) || !Array.isArray(data.metrics) || !data.summary || typeof data.summary !== 'object' || !Number.isFinite(data.sample_seconds)) throw new Error('性能历史数据格式异常');
       etag = response.headers.get('ETag') || '';
       $('serverPerformanceFrame').contentWindow.postMessage({type:'performance-report-update', data}, '*');
-      $('serverPerformanceFeedback').textContent = `已更新 ${new Date().toLocaleTimeString('zh-CN', {hour12:false})} · ${data.sample_seconds} 次有效采样 · 每 30 秒保存统计`;
+      $('serverPerformanceFeedback').textContent = data.error || (data.stale ? '历史采样已中断，当前展示已保存的数据。'
+        : `已更新 ${new Date().toLocaleTimeString('zh-CN', {hour12:false})} · ${data.sample_seconds} 次有效采样 · 每 30 秒保存统计`);
     } catch (error) {
       if (version === revision && error.name !== 'AbortError') $('serverPerformanceFeedback').textContent = `${error.message.replace(/[。；]$/, '')}；保留当前图表，稍后重试。`;
     } finally { if (liveController === request) { refreshing = false; controls(); schedule(); } }
@@ -100,7 +101,7 @@
         link.download = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '')?.[1] || `mini-deploy-performance.${format}`;
         document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(target), 60000);
       }
-      $('serverPerformanceFeedback').textContent = `${format === 'html' ? '已读取' : '已下载'} · ${count} 次有效采样${count === '0' ? ' · 采集通常在 30 秒内开始，过去的数据无法补回' : ' · 每 30 秒保存统计'}`;
+      $('serverPerformanceFeedback').textContent = `${format === 'html' ? '已读取' : '已下载'} · ${count} 次有效采样${count === '0' ? ' · 所选时段没有已保存的采样' : ' · 每 30 秒保存统计'}`;
     } catch (error) {
       if (run === requestVersion && error.name !== 'AbortError') {
         retryInitial = format === 'html' && error.retry !== false;

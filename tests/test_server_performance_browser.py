@@ -110,3 +110,15 @@ def test_empty_history_and_unavailable_export_are_visible(page, http_server, run
     playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text('历史暂不可用')
     assert page.locator('#serverPerformanceFrame').get_attribute('src') == preview_url
     assert page.locator('#serverPerformanceFrame').is_visible()
+
+
+def test_report_does_not_call_write_failure_first_sampling(page, http_server, runtime, monkeypatch):
+    history = server_performance.History(runtime)
+    history.error = '性能历史写入失败：历史库或磁盘空间不足'
+    monkeypatch.setattr(agent, '_server_performance', lambda: history)
+    page.goto(http_server.origin + '/ui?view=server')
+    page.locator('#serverPerformanceOpen').click()
+    frame = page.frame_locator('#serverPerformanceFrame')
+    playwright.expect(frame.locator('#warnings')).to_contain_text('空间不足')
+    playwright.expect(frame.locator('#coverage')).to_contain_text('历史采样保存失败')
+    playwright.expect(page.locator('#serverPerformanceFeedback')).not_to_contain_text('30 秒内')
