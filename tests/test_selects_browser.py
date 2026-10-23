@@ -25,7 +25,7 @@ def test_filter_menus_readable_and_aligned(browser_page, tmp_path, width, theme)
     page, _ = browser_page
     page.set_viewport_size({'width': width, 'height': 950})
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
-    for view, control in [('security', 'securityRiskFilter'), ('events', 'incidentStatus'),
+    for view, control in [('security', 'securityActivitySource'), ('events', 'incidentStatus'),
                           ('requests', 'requestStatus')]:
         page.locator(f'#{view}ViewTab').click()
         button = page.locator(f'#{control}-button')
@@ -41,8 +41,8 @@ def test_filter_menus_readable_and_aligned(browser_page, tmp_path, width, theme)
     assert_menu_fits(page, single_line=True)
     page.keyboard.press('End')
     page.keyboard.press('Enter')
-    playwright.expect(page.locator('#securityActivitySource')).to_have_value('fail2ban')
-    playwright.expect(page.locator('#securityActivitySource-button')).to_have_text('封禁与解封')
+    playwright.expect(page.locator('#securityActivitySource')).to_have_value('ssh')
+    playwright.expect(page.locator('#securityActivitySource-button')).to_have_text('SSH 登录')
 
 
 @pytest.mark.parametrize('width', [1440, 320])
@@ -136,10 +136,10 @@ def test_compact_menu_flips_above_and_tracks_resizing(browser_page, width):
     page, _ = browser_page
     page.set_viewport_size({'width': width, 'height': 700})
     page.locator('#securityViewTab').click()
-    page.locator('#securityRiskFilter-button').evaluate('''(button) => {
+    page.locator('#securityActivitySource-button').evaluate('''(button) => {
       Object.assign(button.style, {position:'fixed', right:'12px', bottom:'12px', width:'96px', zIndex:1000});
     }''')
-    button = page.locator('#securityRiskFilter-button')
+    button = page.locator('#securityActivitySource-button')
     button.click()
     menu = assert_menu_fits(page, single_line=True)
     assert menu.bounding_box()['y'] + menu.bounding_box()['height'] < button.bounding_box()['y']

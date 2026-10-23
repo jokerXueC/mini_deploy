@@ -1,5 +1,11 @@
 # Third-Party Notices
 
+## Natural Earth
+
+`ui/world-land.geojson` contains Natural Earth 1:110m land geometry (public domain).
+Source: https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_land.geojson
+Terms: https://www.naturalearthdata.com/about/terms-of-use/
+
 ## xterm.js and Fit Addon
 
 The terminal bundles @xterm/xterm 5.5.0 and @xterm/addon-fit 0.10.0 from npm.

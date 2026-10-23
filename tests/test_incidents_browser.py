@@ -110,8 +110,8 @@ def test_acknowledgment_keeps_faults_and_history_and_survives_reload(incidents):
     assert control["posts"][-1] == {"action": "acknowledge_all"}
     page.locator("#resetIncidentFilters").click()
     assert page.locator("#alertList .incident-row").count() == 5
-    choose(page, "historyStatus", "acknowledged")
-    assert page.locator("#eventTimeline .incident-row").count() == 5
+    assert page.locator("#eventTimeline .incident-row").count() == 2
+    playwright.expect(page.locator("#eventTimeline")).not_to_contain_text("已知晓：")
     choose(page, "historyStatus", "recovery")
     playwright.expect(page.locator("#eventTimeline")).to_contain_text("持续 2 分钟")
     choose(page, "historyStatus", "disappeared")
@@ -210,27 +210,31 @@ def test_unknown_stale_and_failed_mutation_never_imply_recovery(incidents):
     playwright.expect(page.locator("#alertList")).to_contain_text("监测暂不可用")
 
 
-def test_missing_incident_id_disables_ack_and_operations_stay_separate(incidents):
-    page, _, control = incidents
+def test_missing_incident_id_disables_ack_and_non_incidents_are_hidden(incidents):
+    page, state, control = incidents
     control["snapshot"]["alerts"][0].pop("incident_id")
     control["snapshot"]["events"].append({"id": "operation", "kind": "monitoring_save", "source": "monitoring",
         "title": "保存监测地址", "detail": "Local probe", "at_ts": int(time.time())})
     control["snapshot"]["events"].append({"id": "lifecycle", "kind": "lifecycle", "source": "docker_events",
         "title": "容器 api 已启动", "level": "info", "metadata": {"container": "api", "action": "start"}, "at_ts": int(time.time())})
+    control["snapshot"]["events"].append({"id": "audit", "kind": "audit", "source": "docker",
+        "title": "操作失败审计", "level": "critical", "at_ts": int(time.time())})
+    control["snapshot"]["events"].append({"id": "api-failure", "kind": "alert", "source": "website",
+        "title": "接口 /health 无法访问", "detail": "HTTP 503", "level": "critical", "at_ts": int(time.time())})
     refresh(page)
     playwright.expect(page.locator('[data-incident-ack="docker:api:oom"]')).to_be_disabled()
     playwright.expect(page.locator("#eventTimeline")).not_to_contain_text("保存监测地址")
-    choose(page, "historyStatus", "lifecycle")
-    playwright.expect(page.locator("#eventTimeline")).to_contain_text("容器 api 已启动")
-    playwright.expect(page.locator("#eventTimeline .incident-row")).to_have_class("incident-row neutral")
+    playwright.expect(page.locator("#eventTimeline")).not_to_contain_text("容器 api 已启动")
+    playwright.expect(page.locator("#eventTimeline")).not_to_contain_text("操作失败审计")
+    playwright.expect(page.locator("#eventTimeline")).to_contain_text("接口 /health 无法访问")
+    playwright.expect(page.locator("#incidentHistoryHint")).to_contain_text("3 条异常与恢复记录")
     playwright.expect(page.locator("#alertBadge")).to_have_text("5 项异常")
-    page.locator("#incidentOperations > summary").click()
-    playwright.expect(page.locator("#incidentOperationList")).to_contain_text("保存监测地址")
-    choose(page, "operationKind", "monitoring_save")
-    playwright.expect(page.locator("#incidentOperationList")).to_contain_text("保存监测地址")
+    assert page.locator("#incidentOperations, #prometheusPanel, script[src*='prometheus.js']").count() == 0
+    assert not any(call[0] == '/metrics/access' for call in state['calls'])
+    assert len(control["snapshot"]["events"]) == 6
 
 
-def test_history_pagination_filter_reset_and_lazy_operations(incidents):
+def test_history_pagination_filter_reset_excludes_operations(incidents):
     page, _, control = incidents
     now = int(time.time())
     control["snapshot"]["events"] = [
@@ -241,26 +245,18 @@ def test_history_pagination_filter_reset_and_lazy_operations(incidents):
          "title": f"面板操作 {i}", "at_ts": now - i} for i in range(65)]
     control["snapshot"]["coverage"]["docker_events"] = {"status": "unknown", "detail": "等待首次事件", "checked_at": now - 5}
     refresh(page)
-    assert page.locator("#eventTimeline .incident-row").count() == 50
-    assert page.locator("#incidentOperationList .incident-operation").count() == 0
-    playwright.expect(page.locator("#historyPageInfo")).to_have_text("筛选 65 / 共 65 条 · 第 1 / 2 页")
+    assert page.locator("#eventTimeline .incident-row").count() == 5
+    assert page.locator("#incidentOperations").count() == 0
+    playwright.expect(page.locator("#historyPageInfo")).to_have_text("筛选 65 / 共 65 条 · 第 1 / 13 页")
     assert page.locator("#incidentCoverage small").count() == 1
-    assert page.locator("#incidentCoverage .incident-coverage-item").last.get_attribute("title") == "等待首次事件"
+    assert page.locator("#incidentCoverage .incident-coverage-item").count() == 2
     page.get_by_role("button", name="下一页历史", exact=True).click()
-    assert page.locator("#eventTimeline .incident-row").count() == 15
-    playwright.expect(page.locator("#historyNext")).to_be_disabled()
+    assert page.locator("#eventTimeline .incident-row").count() == 5
+    playwright.expect(page.locator("#historyNext")).to_be_enabled()
     refresh(page)
-    playwright.expect(page.locator("#historyPageInfo")).to_contain_text("第 2 / 2 页")
+    playwright.expect(page.locator("#historyPageInfo")).to_contain_text("第 2 / 13 页")
     choose(page, "historySource", "website")
     assert page.locator("#eventTimeline .incident-row").count() == 5
     playwright.expect(page.locator("#historyPageInfo")).to_have_text("筛选 5 / 共 65 条 · 第 1 / 1 页")
     playwright.expect(page.locator("#historyPrev")).to_be_disabled()
     playwright.expect(page.locator("#historyNext")).to_be_disabled()
-    page.locator("#incidentOperations > summary").click()
-    playwright.expect(page.locator("#incidentOperationList .incident-operation")).to_have_count(50)
-    page.get_by_role("button", name="下一页操作记录", exact=True).click()
-    assert page.locator("#incidentOperationList .incident-operation").count() == 15
-    refresh(page)
-    playwright.expect(page.locator("#operationPageInfo")).to_contain_text("第 2 / 2 页")
-    page.locator("#incidentOperations > summary").click()
-    playwright.expect(page.locator("#incidentOperationList .incident-operation")).to_have_count(0)

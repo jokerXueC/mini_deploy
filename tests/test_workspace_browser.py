@@ -35,7 +35,8 @@ def test_all_views_share_workspace_and_fit_mobile_with_populated_data(page, prev
             page.locator(f'#{view}ViewTab').click()
             playwright.expect(page.locator(f'#{view}View')).to_have_class('dashboard-view active')
             if view == 'security':
-                playwright.expect(page.locator('.security-risk')).to_have_count(3)
+                playwright.expect(page.locator('.security-login-row')).to_have_count(10)
+                playwright.expect(page.locator('#securityMapDots circle')).to_have_count(4)
             elif view == 'certificates':
                 playwright.expect(page.locator('#discoverySites .discovery-row')).to_have_count(3)
             elif view == 'requests':
@@ -51,6 +52,6 @@ def test_all_views_share_workspace_and_fit_mobile_with_populated_data(page, prev
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), (theme, view, width)
                 assert page.locator(f'#{view}View').evaluate('el => el.scrollWidth <= el.clientWidth + 1'), (theme, view, width)
                 assert page.locator('.hero h1').evaluate('el => getComputedStyle(el).fontSize') == ('28px' if width > 760 else '24px')
-                assert page.locator('body').evaluate('el => getComputedStyle(el, "::before").display') == 'none'
+                assert page.locator('body').evaluate('el => { const grid = getComputedStyle(el, "::before"); return grid.display !== "none" && grid.backgroundImage.includes("linear-gradient") && Number(grid.opacity) > 0; }')
                 if width in (1440, 390):
                     page.screenshot(path=str(tmp_path / f'{view}-{theme}-{width}.png'), full_page=True)

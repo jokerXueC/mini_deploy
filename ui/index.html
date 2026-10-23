@@ -72,36 +72,21 @@
 
     <div id="securityView" class="dashboard-view">
       <section class="ip-security security-center" aria-labelledby="ipSecurityTitle">
-        <div class="security-heading"><div class="security-heading-title"><span class="security-emblem" aria-hidden="true"></span><div><h2 id="ipSecurityTitle">正在检查安全状态</h2><p id="securitySummaryNote">等待只读检查结果</p></div></div><button id="ipSecurityRefresh" class="ghost-button compact-action" type="button">重新检查</button></div>
-        <div class="security-metrics"><div><span>待核对风险</span><strong id="securityRiskCount">—</strong><small id="securityRiskHint">等待检查</small></div><div><span>SSH 登录失败</span><strong id="securityLoginCount">—</strong><small>24 小时 · 已采集</small></div><div><span>记录封禁</span><strong id="securityBanCount">—</strong><small>24 小时 · 含手动操作</small></div><div><span>配置变化</span><strong id="securityChangeCount">—</strong><small>24 小时 · 已监测文件</small></div></div>
-        <div class="security-workspace">
-          <section class="security-risk-section" aria-labelledby="securityRiskTitle"><div class="security-section-head"><h3 id="securityRiskTitle">需要关注</h3><label>检查范围<select id="securityRiskFilter"><option value="all">全部风险</option><option value="login">登录安全</option><option value="docker">容器权限</option><option value="exposure">端口暴露</option><option value="host">主机配置</option></select></label></div><div id="securityRisks" class="security-risks"><p class="muted">等待检查结果</p></div></section>
-          <aside class="security-coverage" aria-labelledby="securityCoverageTitle"><h3 id="securityCoverageTitle">采集与防护</h3><p id="ipSecurityStatus" class="muted">正在检查主机 Fail2ban</p><div id="securityCoverage"></div><p id="securityCoverageNote" class="muted"></p><div class="security-related"><a href="?view=certificates">证书与有效期 <span aria-hidden="true">↗</span></a><a href="?view=events">异常与通知 <span aria-hidden="true">↗</span></a></div></aside>
-        </div>
-        <section class="security-activity" aria-labelledby="securityActivityTitle"><div class="security-section-head"><div><h3 id="securityActivityTitle">安全事件</h3><p id="securityActivityNote" class="muted">等待登录与配置事件</p></div><label>事件来源<select id="securityActivitySource"><option value="all">全部来源</option><option value="ssh">SSH 登录</option><option value="config">配置变化</option><option value="fail2ban">封禁与解封</option></select></label></div><div id="securityActivityList" class="security-activity-list"></div><div class="ip-security-pagination"><span id="securityActivityPage" class="muted"></span><button id="securityActivityPrev" type="button" class="ghost-button compact-action">上一页</button><button id="securityActivityNext" type="button" class="ghost-button compact-action">下一页</button></div><p id="securityActivityRetention" class="ip-security-note"></p></section>
-        <details id="securityProtection" class="security-protection"><summary><span>防护与规则</span><small>登录保护、白名单与 IP 管理</small></summary>
-        <p id="ipSecurityClient" class="muted"></p><p id="ipSecurityNotice" class="ip-security-note"></p>
-        <div class="ip-security-intro"><div><h3>面板登录防爆破</h3><p>默认 10 分钟内输错 5 次密码，封禁 1 小时。当前访问 IP 自动加入白名单。</p></div><button id="ipSecuritySetup" class="ghost-button compact-action" type="button" disabled>检查中</button></div>
-        <div class="ip-security-intro"><div><h3>SSH 登录防爆破</h3><p id="ipSecuritySSHInfo">等待识别 SSH 端口与日志来源</p></div><div class="ip-security-actions"><button id="ipSecuritySSHSetup" class="ghost-button compact-action" type="button" disabled>检查中</button><button id="ipSecuritySSHDisable" class="ghost-button compact-action" type="button" hidden>暂停 SSH 防护</button></div></div>
-        <details class="ip-security-settings"><summary>防护设置</summary><p>面板和 SSH 分别保存设置，当前访问 IP 自动保留。</p><label class="ip-security-settings-target">调整对象<select id="ipSecuritySettingsTarget"><option value="panel">面板防护</option><option value="ssh">SSH 防护</option></select></label><div class="ip-security-fields">
-          <label>失败次数<input id="ipSecurityMaxretry" type="number" min="3" max="50" value="5"></label>
-          <label>统计窗口（分钟）<input id="ipSecurityFindtime" type="number" min="1" max="1440" value="10"></label>
-          <label>封禁时长（分钟）<input id="ipSecurityBantime" type="number" min="1" max="10080" value="60"></label>
-          <label>保护入口<select id="ipSecurityPorts"><option value="panel">面板端口 6868</option><option value="web">面板和网页入口 80/443</option></select></label>
-        </div><label class="ip-security-whitelist">白名单（每行一个 IP 或 CIDR 网段）<textarea id="ipSecurityIgnore" rows="3" placeholder="例如 203.0.113.10 或 192.168.1.0/24"></textarea></label>
-          <label class="ip-security-toggle"><input id="ipSecurityIncrement" type="checkbox">重复触发时递增封禁，最长 7 天</label>
-          <p class="muted">这里只修改 mini_deploy 专属规则。保护 80/443 时，被封 IP 对同端口的其他网站访问也可能受影响。</p></details>
-        <button id="ipSecurityDisable" class="ghost-button compact-action" type="button" hidden>暂停面板防护</button>
-        <details class="ip-security-discovery"><summary id="ipSecurityChecksSummary">防护状态核验</summary><p id="ipSecurityCheckedAt" class="muted"></p><div id="ipSecurityChecks"></div><p class="muted">运行中不等于已验证拦截。请从另一台测试客户端确认实际效果；Docker、反向代理与 IPv6 需要分别核实。</p></details>
-        <details class="ip-security-discovery"><summary id="ipSecurityPortsSummary">端口暴露检查</summary><p class="muted">只读检查数据库、缓存和 Docker API 等常见服务。非回环监听不代表公网一定可达，不自动关闭端口。</p><div id="ipSecurityPortFindings"></div><p id="ipSecurityScanWarnings" class="muted"></p></details>
-        <div class="ip-security-rule-head"><label>现有防护规则<select id="ipSecurityJail"><option value="">尚未加载</option></select></label><span id="ipSecurityRuleInfo" class="muted"></span></div>
-        <p id="ipSecurityRuleWhitelist" class="muted"></p>
-        <form id="ipSecurityBanForm" class="ip-security-ban"><input id="ipSecurityAddress" aria-label="要封禁的 IP" placeholder="输入 IPv4 或 IPv6 地址" required maxlength="64"><button id="ipSecurityBan" class="ghost-button compact-action danger-text" type="submit" disabled>封禁 IP</button></form>
-        <div id="ipSecurityBanned" class="ip-security-banned"><p class="muted">选择规则后查看封禁 IP</p></div>
-        <p id="ipSecurityFeedback" class="muted" role="status" aria-live="polite"></p>
-        <details class="ip-security-history"><summary>Fail2ban 封禁历史</summary><p id="ipSecurityLogStatus" class="muted"></p><div id="ipSecurityEvents"></div><div class="ip-security-pagination"><button id="ipSecurityHistoryPrev" type="button" class="ghost-button compact-action">上一页</button><span id="ipSecurityHistoryPage" class="muted"></span><button id="ipSecurityHistoryNext" type="button" class="ghost-button compact-action">下一页</button></div></details>
-        <details class="ip-security-history"><summary>近期防护操作与登录失败</summary><p class="muted">来自最近 300 条面板审计，最多展示 40 条；Fail2ban 自动封禁及其他工具的操作以其原生日志为准。</p><div id="ipSecurityHistory"></div></details>
-        </details>
+        <div class="security-heading"><div class="security-heading-title"><span class="security-emblem" aria-hidden="true"></span><div><h2 id="ipSecurityTitle">登录与防护</h2><p id="securitySummaryNote">正在读取登录记录</p></div></div><button id="ipSecurityRefresh" class="toolbar-icon" type="button" title="刷新登录记录" aria-label="刷新登录记录"><img src="ui/previews/ssh-ai/icons/refresh-cw.svg" alt=""></button></div>
+        <section class="security-basic" aria-labelledby="securityBasicTitle"><div class="security-basic-head"><div><h3 id="securityBasicTitle">基础防护</h3><p id="securityBasicSummary">正在检测防护状态</p></div><button id="securityBasicToggle" type="button" class="security-switch" role="switch" aria-checked="false" aria-label="基础防护" disabled><span></span></button></div><details id="securityBasicDetails"><summary>生效范围与详情</summary><div id="securityBasicCoverage"></div><p class="ip-security-note">仅调整面板专属规则，保留现有管理连接。大规模带宽攻击仍需云厂商清洗。</p><button id="securityBasicRetry" class="ghost-button compact-action" type="button" hidden>重新检测并应用</button></details><p id="securityBasicFeedback" class="security-feedback" role="status" aria-live="polite"></p></section>
+        <div class="security-metrics"><div><span>登录成功</span><strong id="securitySuccessCount">—</strong><small>最近 24 小时</small></div><div><span>登录失败</span><strong id="securityLoginCount">—</strong><small>面板与 SSH · 最近 24 小时</small></div><div><span>当前临时封禁</span><strong id="securityBanCount">—</strong><small id="securityBanHint">到期自动解封</small></div><div><span>登录来源</span><strong id="securityLocationCount">—</strong><small>最近 24 小时 · 独立 IP</small></div></div>
+        <section class="security-map-section" aria-labelledby="securityMapTitle">
+          <div class="security-section-head"><div><h3 id="securityMapTitle">登录地区</h3><p id="securityMapNote" class="muted">IP 归属地为近似位置</p></div><div class="security-map-legend"><span>成功</span><span>含失败</span></div></div>
+          <div class="security-map-layout"><div class="security-map-surface"><svg id="securityMap" viewBox="0 0 1000 500" role="group" aria-labelledby="securityMapTitle securityMapNote"><g id="securityMapLand" aria-hidden="true"></g><g id="securityMapDots"></g></svg><p id="securityMapEmpty" class="muted">正在读取地图</p></div><div class="security-map-sidebar"><div id="securityRegions" class="security-regions"></div><section id="securityMapDetail" class="security-map-detail" aria-labelledby="securityMapDetailTitle" hidden><div class="security-map-detail-head"><h4 id="securityMapDetailTitle"></h4><button id="securityMapDetailClose" class="toolbar-icon" type="button" title="关闭地区详情" aria-label="关闭地区详情"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></div><div id="securityMapDetailBody"></div></section></div></div>
+        </section>
+        <section class="security-guard-bar" aria-label="自动登录防护"><div><strong>连续登录失败自动封禁</strong><p id="securityPolicySummary">10 分钟内失败 5 次，封禁 1 小时</p><small id="securityEnforcement">正在读取实际防护状态</small></div><div class="security-guard-actions"><button id="securityPolicyOpen" type="button" class="toolbar-icon" title="防护设置" aria-label="防护设置"><img src="ui/previews/ssh-ai/icons/settings-2.svg" alt=""></button><button id="securityGuardToggle" type="button" class="security-switch" role="switch" aria-checked="false" aria-label="连续登录失败自动封禁" disabled><span></span></button></div></section>
+        <form id="securityPolicyForm" class="security-policy-form" hidden>
+          <div class="security-policy-fields"><label>失败次数<input id="securityMaxretry" type="number" min="3" max="50" required value="5"></label><label>统计窗口（分钟）<input id="securityFindtime" type="number" min="1" max="1440" required value="10"></label><label>封禁时长（分钟）<input id="securityBantime" type="number" min="1" max="10080" required value="60"></label></div>
+          <label>白名单（每行一个 IP 或网段）<textarea id="securityIgnore" rows="2" placeholder="例如 192.168.1.0/24"></textarea></label><p id="securityClientNote" class="muted"></p><p class="muted">仅统计面板和主机 SSH 的认证失败。业务接口报错不触发封禁；已有 Fail2ban 规则保持独立。</p><p class="muted">地区查询仅向 ipwho.is 发送公网 IP，结果缓存 24 小时；内网地址不外发。</p><button class="ghost-button compact-action" type="submit">保存并生效</button>
+        </form>
+        <p id="ipSecurityFeedback" class="security-feedback muted" role="status" aria-live="polite"></p>
+        <section class="security-activity" aria-labelledby="securityActivityTitle"><div class="security-section-head"><h3 id="securityActivityTitle">IP 登录记录</h3><div class="security-login-filters"><label>来源<select id="securityActivitySource"><option value="all">全部来源</option><option value="panel">面板登录</option><option value="ssh">SSH 登录</option></select></label><label>结果<select id="securityActivityOutcome"><option value="all">全部结果</option><option value="login_success">登录成功</option><option value="login_failure">登录失败</option></select></label></div></div><div class="security-login-head"><span>时间 / 来源</span><span>来源 IP</span><span>地区 / 账号</span><span>结果</span></div><div id="securityActivityList" class="security-activity-list"></div><div class="ip-security-pagination"><span id="securityActivityPage" class="muted"></span><button id="securityActivityPrev" type="button" class="toolbar-icon" title="上一页" aria-label="上一页"><img src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button><button id="securityActivityNext" type="button" class="toolbar-icon" title="下一页" aria-label="下一页"><img src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button></div><p id="securityActivityRetention" class="ip-security-note">已采集登录记录保留 30 天，最多 20000 条；停机或日志轮转可能存在空档。</p></section>
+        <section class="security-ban-section" aria-labelledby="securityBansTitle"><div class="security-section-head"><h3 id="securityBansTitle">临时封禁</h3><span class="muted">仅显示当前封禁</span></div><div id="securityBans"></div><div class="ip-security-pagination"><span id="securityBanPage" class="muted"></span><button id="securityBanPrev" class="toolbar-icon" type="button" aria-label="封禁上一页" title="上一页"><img src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button><button id="securityBanNext" class="toolbar-icon" type="button" aria-label="封禁下一页" title="下一页"><img src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button></div></section>
       </section>
     </div>
     <div id="terminalView" class="dashboard-view">
@@ -371,10 +356,10 @@
         <div id="alertList" class="incident-list skeleton-block" aria-label="当前异常"></div>
       </section>
       <details id="monitorWebsiteSection" class="website-monitor-panel incident-section">
-        <summary>网站监测 <span id="monitorTargetCount"></span></summary>
-        <div class="panel-head"><div><h2>网站监测</h2><p id="monitorSummary">每 30 秒检查访问状态与响应耗时，HTTPS 自动检查证书</p></div><button id="monitorNotify" class="ghost-button compact-action" type="button">设置通知</button></div>
+        <summary>网站与接口监测 <span id="monitorTargetCount"></span></summary>
+        <div class="panel-head"><div><h2>网站与接口监测</h2><p id="monitorSummary">每 30 秒检查访问状态与响应耗时，HTTPS 自动检查证书</p></div><button id="monitorNotify" class="ghost-button compact-action" type="button">设置通知</button></div>
         <form id="monitorForm" class="monitor-add-form">
-          <label class="field"><span>网站地址</span><input id="monitorUrl" required maxlength="2048" placeholder="https://example.com 或 http://192.168.1.10:8080/health" autocomplete="off"></label>
+          <label class="field"><span>网站或接口地址</span><input id="monitorUrl" required maxlength="2048" placeholder="https://example.com 或 http://192.168.1.10:8080/health" autocomplete="off"></label>
           <button id="monitorSave" class="danger-button compact-action" type="submit">开始监测</button>
           <button id="monitorCancel" class="ghost-button compact-action" type="button" hidden>取消</button>
         </form>
@@ -411,24 +396,17 @@
             <div class="certificate-actions"><label><input id="monitorRecovery" type="checkbox" checked> 恢复后通知</label><button class="ghost-button compact-action" type="submit">保存规则</button></div>
           </form>
         </details>
-      <details id="prometheusPanel" class="website-monitor-panel incident-section"><summary>Prometheus 接入</summary>
-        <p id="prometheusStatus" class="monitor-feedback" role="status">读取接入状态…</p>
-        <div class="certificate-actions"><button id="prometheusEnable" class="ghost-button compact-action" type="button">开启采集</button><button id="prometheusRotate" class="ghost-button compact-action" type="button" hidden>重新生成密钥</button><button id="prometheusDisable" class="ghost-button compact-action" type="button" hidden>关闭采集</button></div>
-        <div id="prometheusCredentials" hidden><label class="field"><span>采集配置（包含只读密钥，仅本次显示）</span><textarea id="prometheusConfig" rows="10" readonly spellcheck="false"></textarea></label><div class="certificate-actions"><button id="prometheusCopy" class="toolbar-icon" type="button" title="复制配置" aria-label="复制配置"><img src="ui/previews/ssh-ai/icons/copy.svg" alt=""></button><button id="prometheusDownload" class="toolbar-icon" type="button" title="下载配置" aria-label="下载配置"><img src="ui/previews/ssh-ai/icons/download.svg" alt=""></button></div></div>
-        <p id="prometheusFeedback" class="monitor-feedback" role="status"></p>
-      </details>
       <section class="incident-section" aria-labelledby="incidentHistoryTitle">
         <div class="panel-head">
-          <div><h2 id="incidentHistoryTitle">异常历史</h2><p id="incidentHistoryHint">异常、恢复与知晓记录</p></div>
+          <div><h2 id="incidentHistoryTitle">异常历史</h2><p id="incidentHistoryHint">异常与恢复记录</p></div>
         </div>
         <div class="incident-filters" aria-label="异常历史筛选">
           <label>来源<select id="historySource"><option value="all">全部来源</option></select></label>
-          <label>状态<select id="historyStatus"><option value="all">全部记录</option><option value="alert">异常</option><option value="recovery">已恢复</option><option value="acknowledged">已知晓</option><option value="disappeared">配置容器消失</option><option value="lifecycle">容器生命周期</option></select></label>
+          <label>状态<select id="historyStatus"><option value="all">全部记录</option><option value="alert">异常</option><option value="recovery">已恢复</option><option value="disappeared">容器未找到</option></select></label>
         </div>
         <div id="eventTimeline" class="incident-list skeleton-block" aria-label="异常历史"></div>
         <nav class="incident-pagination" aria-label="异常历史分页"><span id="historyPageInfo" role="status"></span><button id="historyPrev" class="ghost-button incident-page-button" type="button" aria-label="上一页历史" title="上一页历史" disabled>&#8249;</button><button id="historyNext" class="ghost-button incident-page-button" type="button" aria-label="下一页历史" title="下一页历史" disabled>&#8250;</button></nav>
       </section>
-      <details id="incidentOperations" class="incident-section"><summary>操作记录 <span id="incidentOperationCount"></span></summary><div class="incident-filters"><label>操作类型<select id="operationKind"><option value="all">全部操作</option></select></label></div><div id="incidentOperationList" class="incident-list"></div><nav class="incident-pagination" aria-label="操作记录分页"><span id="operationPageInfo" role="status"></span><button id="operationPrev" class="ghost-button incident-page-button" type="button" aria-label="上一页操作记录" title="上一页操作记录" disabled>&#8249;</button><button id="operationNext" class="ghost-button incident-page-button" type="button" aria-label="下一页操作记录" title="下一页操作记录" disabled>&#8250;</button></nav></details>
     </div>
 
     <div id="serverView" class="dashboard-view active">
@@ -611,10 +589,10 @@
       <section class="project-modal container-log-modal" role="dialog" aria-modal="true" aria-labelledby="containerLogsTitle">
         <div class="modal-head">
           <div>
-            <h2 id="containerLogsTitle">容器日志</h2>
+            <span class="container-log-eyebrow">CONTAINER / LOGS</span><h2 id="containerLogsTitle">容器日志</h2>
             <p id="containerLogsMeta">最近日志</p>
           </div>
-          <button id="closeContainerLogsBtn" class="ghost-button icon-action" type="button">关闭</button>
+          <button id="closeContainerLogsBtn" class="toolbar-icon" type="button" title="关闭日志" aria-label="关闭日志"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button>
         </div>
         <div class="log-actions container-log-actions">
           <label class="log-control">预览
@@ -664,7 +642,8 @@
           <button id="downloadContainerLogBtn" class="log-tab log-download" type="button">下载日志</button>
           <span id="containerLogCount" class="badge neutral">0 行</span>
         </div>
-        <pre id="containerLogsContent" class="logs container-log-content"></pre>
+        <div class="container-log-streambar"><span id="containerLogLiveStatus" role="status">正在连接</span><div><button id="containerLogPause" class="toolbar-icon" type="button" aria-label="暂停或继续刷新" title="暂停刷新" aria-pressed="false"><img src="ui/previews/ssh-ai/icons/pause.svg" alt=""></button><button id="containerLogFollow" class="ghost-button compact-action" type="button" aria-pressed="true" title="滚动至底部并跟随新日志">跟随最新</button></div></div>
+        <pre id="containerLogsContent" class="logs container-log-content" tabindex="0" aria-label="容器日志内容"></pre>
       </section>
     </div>
 
@@ -739,7 +718,6 @@
   <script src="ui/certificates.js"></script>
   <script src="ui/certificate-discovery.js"></script>
   <script src="ui/monitoring.js"></script>
-  <script src="ui/prometheus.js"></script>
   <script src="ui/docker-images.js"></script>
   <script src="ui/panel-ai.js"></script>
   <script src="ui/ip-security.js"></script>

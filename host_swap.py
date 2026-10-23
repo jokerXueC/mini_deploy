@@ -1,4 +1,4 @@
-"""Manage one owned swapfile, without altering external swap or deleting files."""
+"""Manage an owned swapfile and reversibly toggle existing swap without deleting files."""
 from __future__ import annotations
 
 import copy
@@ -29,6 +29,7 @@ class Manager:
             raise ValueError('Swap 数据目录必须为不含空格的绝对路径')
         self.path = self.directory / 'swapfile'
         self.record = self.directory / 'owner.json'
+        self.external_record = self.home / 'host-swap' / 'external.json'
         self.proc, self.fstab, self.run = Path(proc), Path(fstab), runner
         self.supported = (sys.platform == 'linux' and os.geteuid() == 0) if supported is None else supported
         self.maintenance = maintenance
@@ -80,15 +81,94 @@ class Manager:
     def _entry(self):
         return f'{self.path} none swap sw,nofail 0 0 {TAG}'
 
+    @staticmethod
+    def _identity(path):
+        if not isinstance(path, str) or not Path(path).is_absolute() or any(c.isspace() or (c == '\\' and os.name == 'posix') or ord(c) < 32 for c in path):
+            raise ValueError('系统 Swap 路径无法安全识别，未操作原文件')
+        trusted_path(Path(path))
+        info = Path(path).stat()
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISBLK(info.st_mode)) or info.st_nlink != 1:
+            raise ValueError('系统 Swap 必须为独立文件或块设备，未操作原文件')
+        return {'path': path, 'device': info.st_dev, 'inode': info.st_ino,
+                'rdev': getattr(info, 'st_rdev', 0), 'kind': stat.S_IFMT(info.st_mode)}
+
+    def _external(self):
+        trusted_path(self.external_record)
+        if not self.external_record.exists():
+            return []
+        if self.external_record.stat().st_size > 16384:
+            raise ValueError('系统 Swap 恢复记录过大，未操作原文件')
+        data = json.loads(self.external_record.read_text())
+        items = data.get('items') if isinstance(data, dict) and data.get('version') == 1 else None
+        if not isinstance(items, list) or not 1 <= len(items) <= 32:
+            raise ValueError('系统 Swap 恢复记录无效，未操作原文件')
+        for item in items:
+            if not isinstance(item, dict) or self._identity(item.get('path')) != item:
+                raise ValueError('原系统 Swap 文件或设备身份已变化，未自动启用')
+        return items
+
+    def _memory_guard(self, used):
+        memory = self._memory()
+        reserve = max(256 * 1024**2, memory.get('MemTotal', 0) // 10)
+        if memory.get('MemAvailable', 0) < used + reserve:
+            raise ValueError('可用内存不足，已阻止关闭 Swap；请先释放内存后重试')
+
+    def _apply_external(self, enabled):
+        items = self._external()
+        if enabled:
+            for item in items:
+                if self._identity(item['path']) != item:
+                    raise ValueError('原系统 Swap 身份已变化，未自动启用')
+                if not any(row['path'] == item['path'] for row in self._active()):
+                    self.run(['swapon', item['path']], timeout=30)
+                if not any(row['path'] == item['path'] for row in self._active()):
+                    raise RuntimeError('未确认系统 Swap 已开启，请检查主机日志')
+            return '系统 Swap 已开启；原交换文件和开机配置均保留。'
+        active = self._active()
+        self._memory_guard(sum(row['used'] for row in active))
+        known = {item['path']: item for item in items}
+        for row in active:
+            known[row['path']] = self._identity(row['path'])
+        if not known or len(known) > 32:
+            raise ValueError('系统 Swap 数量无法安全处理，未修改配置')
+        trusted_path(self.external_record)
+        self.external_record.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        atomic_write(self.external_record, json.dumps({'version': 1, 'items': list(known.values())}))
+        try:
+            for row in active:
+                self._memory_guard(sum(item['used'] for item in self._active()))
+                if self._identity(row['path']) != known[row['path']]:
+                    raise ValueError('系统 Swap 身份已变化，未继续关闭')
+                self.run(['swapoff', row['path']], timeout=120)
+                if any(item['path'] == row['path'] for item in self._active()):
+                    raise RuntimeError('系统 Swap 仍在使用，恢复记录已保留')
+        except Exception as exc:
+            failures = []
+            for row in active:
+                try:
+                    if not any(item['path'] == row['path'] for item in self._active()):
+                        if self._identity(row['path']) != known[row['path']]:
+                            raise ValueError('系统 Swap 身份已变化')
+                        self.run(['swapon', row['path']], timeout=30)
+                except Exception:
+                    failures.append(row['path'])
+            if failures:
+                raise RuntimeError('关闭未完成，部分系统 Swap 未恢复；文件和恢复记录已保留，请检查当前状态') from exc
+            raise
+        return '系统 Swap 已临时关闭；交换文件和开机配置保留，重启后可能自动恢复。'
+
     def status(self):
         with self.lock:
             job = copy.deepcopy(self.job)
         result = {'supported': self.supported, 'editable': False, 'enabled': False, 'managed_active': False,
-                  'persistent': False, 'owned': False, 'size_bytes': SIZE, 'job': job}
+                  'persistent': False, 'owned': False, 'size_bytes': SIZE, 'job': job, 'mode': 'managed'}
         if not self.supported:
             return {**result, 'detail': '仅支持以 root 运行的 Linux 主机；本地预览不操作 Swap。'}
         try:
-            active, owner, fstab = self._active(), self._owner(), self._fstab()
+            active = self._active()
+            result['enabled'] = bool(active)
+            owner, fstab = self._owner(), self._fstab()
+            saved_external = self._external() if not owner else []
             managed = next((row for row in active if row['path'] == str(self.path)), None)
             external = [row for row in active if row['path'] != str(self.path)]
             foreign_config = any(line.strip() and not line.lstrip().startswith('#') and
@@ -100,7 +180,15 @@ class Manager:
                 '面板 Swap 已启用。' if managed and result['persistent'] else
                 '面板 Swap 已启用，但尚未设置开机生效；重新开启可重试保存配置。' if managed else
                 '开启后创建 2 GiB Swap，并设为开机生效。')
+            if not owner and (external or saved_external):
+                missing = any(not any(row['path'] == item['path'] for row in active) for item in saved_external)
+                result.update(mode='external', editable=True, restore_pending=missing)
+                for row in external:
+                    self._identity(row['path'])
+                result['detail'] = ('系统 Swap 已启用；可临时关闭，交换文件和开机配置均保留。' if external else
+                                    '系统 Swap 已临时关闭；可再次开启，重启后可能自动恢复。')
         except (OSError, ValueError, KeyError) as exc:
+            result['editable'] = False
             result['detail'] = str(exc)
         return result
 
@@ -112,7 +200,7 @@ class Manager:
                 raise ValueError('Swap 操作正在进行，请等待完成')
             if not self.status()['editable']:
                 raise ValueError(self.status()['detail'])
-            self.job = {'state': 'running', 'detail': '正在开启 Swap…' if enabled else '正在关闭面板 Swap…'}
+            self.job = {'state': 'running', 'detail': '正在开启 Swap…' if enabled else '正在关闭 Swap…'}
             threading.Thread(target=self._work, args=(enabled, audit), daemon=True, name='host-swap').start()
         return self.status()
 
@@ -162,6 +250,8 @@ class Manager:
         state = self.status()
         if not state['editable']:
             raise ValueError(state['detail'])
+        if state['mode'] == 'external':
+            return self._apply_external(enabled)
         owner = self._owner()
         if enabled:
             if state['external_count'] and not state['managed_active']:
@@ -186,10 +276,7 @@ class Manager:
                 raise ValueError('没有可关闭的面板 Swap；不操作系统原有 Swap')
             active = next((row for row in self._active() if row['path'] == str(self.path)), None)
             if active:
-                memory = self._memory()
-                reserve = max(256 * 1024**2, memory.get('MemTotal', 0) // 10)
-                if memory.get('MemAvailable', 0) < active['used'] + reserve:
-                    raise ValueError('可用内存不足，已阻止关闭 Swap；请先释放内存后重试')
+                self._memory_guard(active['used'])
                 self.run(['swapoff', str(self.path)], timeout=120)
                 if any(row['path'] == str(self.path) for row in self._active()):
                     raise RuntimeError('Swap 仍在使用，未移除开机配置')
@@ -199,9 +286,9 @@ class Manager:
         ok, detail = False, ''
         try:
             with self.maintenance():
-                self._apply(enabled)
+                result = self._apply(enabled)
             ok = True
-            detail = '2 GiB Swap 已开启，重启后自动生效。' if enabled else '面板 Swap 已关闭；交换文件保留，再次开启无需重建。'
+            detail = result or ('2 GiB Swap 已开启，重启后自动生效。' if enabled else '面板 Swap 已关闭；交换文件保留，再次开启无需重建。')
         except Exception as exc:
             detail = f'操作未完成：{exc}。文件已保留，请核对当前状态后重试。'
         finally:

@@ -72,6 +72,39 @@ def test_existing_system_swap_is_displayed_without_enabling_mutation(preview):
     playwright.expect(page.locator('#hostSwapFeedback')).to_have_text('已有系统 Swap；面板保留原配置。')
 
 
+def test_existing_system_swap_can_be_temporarily_disabled_and_restored(preview):
+    page, _, _ = preview
+    state = {'active': True, 'posts': []}
+
+    def swap(route):
+        if route.request.method == 'POST':
+            state['posts'].append(route.request.post_data_json)
+            state['active'] = route.request.post_data_json['enabled']
+        route.fulfill(json={'supported': True, 'editable': True, 'mode': 'external',
+                            'owned': False, 'enabled': state['active'], 'job': {},
+                            'detail': '原交换文件和开机配置保留，重启后可能自动恢复。'})
+
+    page.route('**/system/swap', swap)
+    page.locator('#performancePanel > summary').click()
+    toggle = page.get_by_role('switch', name='启用 Swap')
+    playwright.expect(toggle).to_be_enabled()
+    playwright.expect(toggle).to_be_checked()
+    toggle.uncheck()
+    playwright.expect(page.locator('#confirmModal')).to_contain_text('临时关闭系统 Swap')
+    playwright.expect(page.locator('#confirmModal')).to_contain_text('重启后可能自动恢复')
+    page.locator('#confirmCancelBtn').click()
+    playwright.expect(toggle).to_be_checked()
+    assert state['posts'] == []
+    toggle.uncheck()
+    page.locator('#confirmOkBtn').click()
+    playwright.expect(toggle).not_to_be_checked()
+    playwright.expect(toggle).to_be_enabled()
+    playwright.expect(page.locator('#hostSwapRetry')).to_be_hidden()
+    toggle.check()
+    playwright.expect(toggle).to_be_checked()
+    assert state['posts'] == [{'enabled': False}, {'enabled': True}]
+
+
 def test_boot_config_retry_does_not_turn_active_swap_off(preview):
     page, _, _ = preview
     state = {'persistent': False, 'posts': []}

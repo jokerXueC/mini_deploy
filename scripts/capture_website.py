@@ -15,7 +15,7 @@ from PIL import Image  # noqa: E402
 from playwright.sync_api import sync_playwright, expect  # noqa: E402
 from scripts.preview_operations import examples  # noqa: E402
 from scripts.preview_request_export import seed  # noqa: E402
-from scripts.preview_security import examples as security_examples  # noqa: E402
+from scripts.preview_security import examples as security_examples, login_examples  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / 'website' / 'assets'
@@ -67,6 +67,9 @@ def main():
                 elif path == '/request-history':
                     query = parse_qs(parsed.query)
                     body = history.query(query.get('key', ['demo-api'])[0], layout=query.get('layout', ['tree'])[0])
+                elif path == '/security/logins':
+                    body = login_examples()
+                    body['items'] = body['items'][:10]
                 elif path in {'/security/center', '/security/fail2ban'}:
                     jail = parse_qs(parsed.query).get('jail', [''])[0]
                     body = security_examples(jail)
@@ -92,8 +95,8 @@ def main():
                 elif name == 'requests':
                     expect(page.locator('#requestSampleSummary')).to_contain_text('1840')
                 elif name == 'security':
-                    page.locator('#ipSecurityJail').select_option('mini-deploy-panel', force=True)
-                    expect(page.locator('#ipSecurityBanned')).to_contain_text('198.51.100.24')
+                    expect(page.locator('#securityMapDots circle')).to_have_count(4)
+                    expect(page.locator('#securityActivityList .security-login-row')).to_have_count(10)
                 else:
                     page.evaluate("window.PanelAI.open({kind:'incident',id:'demo'})")
                     expect(page.locator('#panelAIFeedback')).to_contain_text('已保存')

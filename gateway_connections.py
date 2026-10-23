@@ -420,14 +420,39 @@ class Connections:
         trusted_path(path)
         return path
 
-    def status(self, key: str) -> dict:
+    def status(self, key: str, *, verify: bool = False) -> dict:
         path = self.directory(key) / 'connection.json'
         if not path.exists():
             return {'state': 'not_connected'}
         trusted_path(path)
         data = read_record(path)
-        return {**{k: data[k] for k in ('state', 'site', 'kind', 'source', 'token')},
-                'scope': data.get('scope', '静态网站' if data['kind'] == 'static' else '已接入的转发规则')}
+        result = {**{k: data[k] for k in ('state', 'site', 'kind', 'source', 'token')},
+                  'scope': data.get('scope', '静态网站' if data['kind'] == 'static' else '已接入的转发规则')}
+        if verify and data['state'] == 'connected':
+            try:
+                text = read_config(Path(data['source']['path']))
+                if data.get('selector'):
+                    selected = next((route for route in routes(text, data['source']['kind'], data['source'].get('addresses'))
+                                     if route['_selector'] == data['selector']), None)
+                    proxy = selected['_proxy'] if selected else None
+                    if data.get('rule_scoped'):
+                        expected = next(node for node in parse(data['after'] + '\n', data['source']['kind'])
+                                        if node.words[:1] in (['reverse_proxy'], ['proxy_pass']))
+                        target = expected.words
+                    else:
+                        address = (f'mini-gateway-{key}:10000' if data['spec']['network'] != 'host'
+                                   else f'127.0.0.1:{data["spec"]["port"]}')
+                        target = ['reverse_proxy', address]
+                    matched = bool(proxy and proxy.words == target)
+                else:
+                    matched = text.count(data['after']) == 1
+                result['config_state'] = 'matched' if matched else 'changed'
+                if not matched:
+                    result['error'] = '代理配置已变化，请求可能绕过采集网关；请重新检测接入，已有历史保留'
+            except (OSError, ValueError, KeyError, StopIteration):
+                result['config_state'] = 'unavailable'
+                result['error'] = '无法核对当前代理配置，请检查代理配置文件和挂载；已有历史保留'
+        return result
 
     def inspect(self, raw: dict) -> dict:
         source = resolve(raw)
@@ -449,6 +474,8 @@ class Connections:
             raise CertificateError('此网关已有接入或待恢复操作，请先撤销接入')
         for record in self.root.glob('*/connection.json') if self.root.exists() else []:
             existing = read_record(record)
+            if existing['state'] == 'not_connected':
+                continue
             if existing['source']['path'] == source['path'] and existing['site'] == route['site']:
                 if route['kind'] != 'proxy' or not existing.get('rule_scoped'):
                     raise CertificateError('此站点已有整站接入记录，请先撤销原接入；分开的后端规则可独立接入')
@@ -606,6 +633,24 @@ class Connections:
             raise CertificateError(f'接入失败，原代理配置已恢复。{exc}') from exc
         return {'connection': self.status(plan['spec']['key'])}
 
+    def release(self, data: dict) -> dict:
+        directory = self.directory(data.get('key', ''))
+        record = read_record(directory / 'connection.json')
+        if data.get('token') != record['token'] or record['state'] != 'connected':
+            raise CertificateError('接入状态已变化，请刷新后重试')
+        source = resolve(record['source'])
+        current = read_config(Path(source['path']))
+        target = (f'mini-gateway-{record["spec"]["key"]}:10000' if record['spec']['network'] != 'host'
+                  else f'127.0.0.1:{record["spec"]["port"]}')
+        nodes = list(walk(parse(current, source['kind'])))
+        if target in current or any(node.words[:1] in (['import'], ['include']) for node in nodes):
+            raise CertificateError('当前配置仍引用采集网关，或存在导入配置；无法安全解除，请重新检查接入状态')
+        # Retire only panel metadata. Never restore an old configuration over a redeployed website.
+        record.update(state='not_connected', released_at=time.time())
+        atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
+        return {'connection': {'state': 'not_connected'},
+                'notice': '失效接入记录已解除，当前代理配置、容器和请求历史均保留；可重新检测接入'}
+
     def disconnect(self, data: dict) -> dict:
         directory = self.directory(data.get('key', ''))
         record = read_record(directory / 'connection.json')
@@ -673,4 +718,6 @@ class Connections:
                 return self.apply(data)
             if action == 'disconnect':
                 return self.disconnect(data)
+            if action == 'release':
+                return self.release(data)
             raise CertificateError('未知接入操作')

@@ -170,6 +170,37 @@ def test_limits_errors_and_removed_container_history_are_visible(tmp_path):
     assert result["total_requests"] == 1 and store.sources()[0]["key"] == "api"
 
 
+def test_empty_period_exposes_retained_history_and_last_request_after_restart(tmp_path):
+    store = history.History(tmp_path)
+    ingest(store, [line('/older', ts=NOW - 2 * 86400)])
+    store.ingest('api', 'API', 'container-a', [], NOW - 1, now=NOW,
+                 error='代理配置已变化，请求可能绕过采集网关')
+    restored = history.History(tmp_path)
+    result = restored.query('api', now=NOW)
+    assert result['total_requests'] == 0 and result['retained_requests'] == 1
+    assert result['latest_at'] == NOW - 2 * 86400 and result['checked_at'] == NOW
+    assert '绕过' in result['error']
+    assert restored.query('api', period='7d', now=NOW)['total_requests'] == 1
+
+
+def test_collector_keeps_route_warning_while_persisting_inflight_requests(tmp_path, monkeypatch):
+    from gateway_connections import Connections
+
+    store = history.History(tmp_path)
+    entry = {'spec': {'key': 'api', 'name': 'API'}}
+    gateway = SimpleNamespace(read=lambda _: entry, inspect=lambda _: {'Id': 'container-a'}, upgrade_logging=lambda *_: None)
+    monkeypatch.setattr(Connections, 'status', lambda *_a, **_kw: {'error': '代理配置已变化'})
+
+    def logs(_command, **kwargs):
+        kwargs['stdout'].write((line() + '\n').encode())
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(history.subprocess, 'run', logs)
+    history.Collector(store).collect(gateway, entry, now=NOW)
+    result = store.query('api', now=NOW)
+    assert result['total_requests'] == 1 and result['error'] == '代理配置已变化'
+
+
 def test_stopped_collector_does_not_touch_docker_or_database(tmp_path):
     stop = threading.Event()
     stop.set()

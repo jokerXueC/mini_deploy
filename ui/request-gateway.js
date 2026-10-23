@@ -1,6 +1,7 @@
 window.RequestGateway = (() => {
   let entries = [], loaded = false, loading = null, busy = false, editing = null, formVersion = 0;
   let historySources = [];
+  let loadedAt = 0;
   const feedback = $('gatewayFeedback');
   const states = {running: '运行中', exited: '已停止', created: '未启动', not_created: '待启动', restarting: '重启中', paused: '已暂停', unknown: '状态不可用'};
 
@@ -25,11 +26,11 @@ window.RequestGateway = (() => {
         <div class="request-gateway-title"><strong>${escapeHtml(entry.name)}</strong><span class="badge ${entry.state === 'running' ? 'success' : 'neutral'}">${escapeHtml(states[entry.state] || entry.state)}</span></div>
         <div class="request-gateway-route"><code>${escapeHtml(entry.caddy_upstream)}</code><span aria-hidden="true"> → </span><code>${escapeHtml(entry.upstream)}</code></div>
         <div class="muted">本机地址：${escapeHtml(entry.local_address)} · 网络：${escapeHtml(entry.network)}</div>
-        <p class="gateway-connection-state">${entry.connection?.state === 'connected' ? `路由已接入 · ${escapeHtml(entry.connection.site)}` : entry.connection && entry.connection.state !== 'not_connected' ? '接入操作待恢复，请撤销接入后重试' : '尚未通过向导接入网站流量'}</p>
+        <p class="gateway-connection-state">${entry.connection?.error ? escapeHtml(entry.connection.error) : entry.connection?.state === 'connected' ? `配置已指向采集网关 · ${escapeHtml(entry.connection.site)}` : entry.connection && entry.connection.state !== 'not_connected' ? '接入操作待恢复，请撤销接入后重试' : '尚未通过向导接入网站流量'}</p>
         <code class="gateway-caddy-command">reverse_proxy ${escapeHtml(entry.caddy_upstream)}</code>
         ${entry.error ? `<p class="form-error">${escapeHtml(entry.error)}</p>` : ''}
         <div class="request-actions">
-          ${entry.connection && entry.connection.state !== 'not_connected' ? `<button type="button" class="ghost-button compact-action" data-gateway-action="disconnect" data-key="${escapeHtml(entry.key)}">撤销接入</button>` : ''}
+          ${entry.connection && entry.connection.state !== 'not_connected' ? `<button type="button" class="ghost-button compact-action" data-gateway-action="disconnect" data-key="${escapeHtml(entry.key)}">${entry.connection.config_state === 'changed' ? '解除失效接入' : '撤销接入'}</button>` : ''}
           <button type="button" class="ghost-button compact-action" data-gateway-action="edit" data-key="${escapeHtml(entry.key)}" ${entry.connection && entry.connection.state !== 'not_connected' ? 'disabled title="请先撤销网站接入"' : ''}>编辑</button>
           <button type="button" class="ghost-button compact-action" data-gateway-action="records" data-key="${escapeHtml(entry.key)}">查看请求</button>
           <button type="button" class="ghost-button compact-action" data-gateway-action="${['running', 'paused', 'restarting'].includes(entry.state) ? 'stop' : 'start'}" data-key="${escapeHtml(entry.key)}" ${entry.connection && entry.connection.state !== 'not_connected' && ['running', 'paused', 'restarting'].includes(entry.state) ? 'disabled title="请先撤销网站接入"' : ''}>${['running', 'paused', 'restarting'].includes(entry.state) ? '停止' : '启动'}</button>
@@ -45,6 +46,7 @@ window.RequestGateway = (() => {
       entries = result.entries || [];
       historySources = result.history_sources || [];
       loaded = true;
+      loadedAt = Date.now();
       draw();
     })();
     try { await loading; } finally { loading = null; }
@@ -155,5 +157,5 @@ window.RequestGateway = (() => {
         : `删除 ${entry.name} 的网关容器、配置及容器日志。请确认前置代理已切回原业务上游。`;
     act({action, key: entry.key, revision: entry.revision}, message);
   });
-  return {refresh, list: () => entries.slice(), ensure: async () => { if (!loaded) await refresh(); }};
+  return {refresh, list: () => entries.slice(), ensure: async () => { if (!loaded || Date.now() - loadedAt > 30000) await refresh(); }};
 })();

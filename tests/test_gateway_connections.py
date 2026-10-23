@@ -331,6 +331,83 @@ def test_network_must_belong_to_front_proxy(setup):
         preview(store, source, network='host')
 
 
+@pytest.mark.parametrize('kind', ['proxy', 'static'])
+def test_live_status_detects_redeployed_config_without_changing_it(setup, kind):
+    store, source, path = setup
+    plan = preview(store, source, kind)
+    store.apply({'key': 'api', 'token': plan['token']})
+    assert store.status('api', verify=True)['config_state'] == 'matched'
+    current = path.read_text() + '\n# unrelated deployment change\n'
+    path.write_text(current)
+    assert store.status('api', verify=True)['config_state'] == 'matched'
+    # A business redeployment restores its own Caddyfile, bypassing both gateways.
+    path.write_text(CADDY)
+    status = store.status('api', verify=True)
+    assert status['config_state'] == 'changed' and '绕过' in status['error']
+    assert path.read_text() == CADDY
+    assert store.status('api')['state'] == 'connected'  # Mutation guards remain in force.
+
+
+def test_live_status_accepts_proxy_formatting_and_detects_missing_config(setup):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    path.write_text(path.read_text().replace('reverse_proxy mini-gateway-', 'reverse_proxy   mini-gateway-'))
+    assert store.status('api', verify=True)['config_state'] == 'matched'
+    path.rename(path.with_suffix('.moved'))
+    status = store.status('api', verify=True)
+    assert status['config_state'] == 'unavailable' and '无法核对' in status['error']
+    assert not path.exists()
+
+
+def test_release_stale_connection_preserves_files_history_and_allows_reconnect(setup, monkeypatch):
+    import request_history
+
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    history = request_history.History(store.root.parent)
+    history.ingest('api', 'API', 'old-container', [], 100, now=101)
+    history_bytes = history.path.read_bytes()
+    backup = (store.directory('api') / 'before.conf').read_bytes()
+    current = CADDY.replace('reverse_proxy aimore-cloud:8766', 'reverse_proxy aimore-cloud:8766 {\n flush_interval -1\n }')
+    path.write_text(current)
+    before = path.stat()
+    monkeypatch.setattr(store, 'activate', lambda *_: pytest.fail('must not restart a live website'))
+    result = store.operate({'action': 'release', 'key': 'api', 'token': plan['token'], 'confirmed': True})
+    assert result['connection']['state'] == 'not_connected'
+    assert path.read_text() == current and path.stat().st_mtime_ns == before.st_mtime_ns
+    assert history.path.read_bytes() == history_bytes
+    assert (store.directory('api') / 'before.conf').read_bytes() == backup
+    assert (store.directory('api') / 'connection.json').exists()
+    assert preview(store, source)['gateway']['key'] == 'api'
+
+
+@pytest.mark.parametrize('suffix', ['', '\nimport extra.caddy\n'])
+def test_release_refuses_active_gateway_or_imported_rules(setup, suffix):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    if suffix:
+        path.write_text(CADDY + suffix)
+    before = path.read_bytes()
+    with pytest.raises(CertificateError, match='无法安全解除'):
+        store.release({'key': 'api', 'token': plan['token']})
+    assert path.read_bytes() == before and store.status('api')['state'] == 'connected'
+
+
+def test_release_requires_confirmation_and_current_token(setup):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    path.write_text(CADDY)
+    with pytest.raises(CertificateError, match='确认'):
+        store.operate({'action': 'release', 'key': 'api', 'token': plan['token']})
+    with pytest.raises(CertificateError, match='状态已变化'):
+        store.release({'key': 'api', 'token': 'wrong'})
+    assert store.status('api')['state'] == 'connected'
+
+
 def test_stale_source_and_stale_confirmation_are_rejected(setup):
     store, source, path = setup
     plan = preview(store, source)
@@ -454,6 +531,7 @@ def test_nginx_attach_and_detach_preserve_headers(setup, slash):
     plan = preview(store, source, network='host')
     store.apply({'key': 'api', 'token': plan['token']})
     assert f'proxy_pass http://127.0.0.1:18080{slash};' in path.read_text()
+    assert store.status('api', verify=True)['config_state'] == 'matched'
     assert 'proxy_set_header Host $host;' in path.read_text()
     store.disconnect({'key': 'api', 'token': plan['token']})
     assert path.read_text() == original

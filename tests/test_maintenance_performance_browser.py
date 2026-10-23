@@ -40,6 +40,7 @@ def preview(dashboard):
                 'jobs': ([{'state': 'succeeded' if control['finished'] else 'running', 'phase': '更新完成' if control['finished'] else '健康检查', 'started_at': time.time()}] if control['running'] else [])}
         route.fulfill(json=result)
     page.route(re.compile(r'/panel-maintenance(?:/check)?$'), api)
+    page.route('**/performance/server?*', lambda r: r.fulfill(json={'points': [], 'incidents': [], 'interval_seconds': 30}))
     page.route('**/performance/containers?*', lambda r: r.fulfill(json={'points': [
         {'ts': time.time() - 600 + n * 30, 'cpu_percent': 150 + n, 'memory_percent': 20 + n / 2} for n in range(21)],
         'interval_seconds': 30, 'retention_days': 7, 'notice': '缺失采样不补零'}))

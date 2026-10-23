@@ -236,6 +236,20 @@ class Center:
         return {'checked_at': now, 'risks': risks[:200], 'limited': len(risks) > 200, 'checks': checks,
                 'notice': '只读检查常见位置与运行中容器。配置摘要首次建立基线；未覆盖项不代表安全。'}
 
+    def collect_logins(self, ssh):
+        """Lightweight collection between full host scans; preserve source cursors."""
+        now = self.clock()
+        with self.history.connection() as db:
+            db.executescript(SCHEMA)
+            records, auth = self._logins(db, ssh, now)
+            for item in records:
+                identity = hashlib.sha256(item['_identity'].encode()).hexdigest()
+                db.execute('INSERT OR IGNORE INTO security_activity VALUES (?,?,?,?,?,?,?,?)',
+                           (identity, item['ts'], item['source'], item['kind'], item['ip'], item['account'], item['target'], item['detail']))
+            db.execute('DELETE FROM security_activity WHERE ts < ?', (now - RETENTION,))
+            db.execute('DELETE FROM security_activity WHERE id IN (SELECT id FROM security_activity ORDER BY ts DESC LIMIT -1 OFFSET 20000)')
+            db.execute("INSERT OR REPLACE INTO cursors VALUES ('auth:status',?)", (json.dumps(auth),))
+
     def activity(self, page=0, source='all'):
         if type(page) is not int or not 0 <= page <= 4000 or source not in {'all', 'ssh', 'config', 'fail2ban'}:
             raise ValueError('安全事件筛选无效')

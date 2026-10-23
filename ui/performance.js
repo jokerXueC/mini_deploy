@@ -59,9 +59,11 @@
     swapToggle.checked = swapPending && swapDesired !== null ? swapDesired : Boolean(swapState.owned ? swapState.managed_active : swapState.enabled);
     swapToggle.disabled = swapPending || swapLoading || !swapState.editable;
     swapToggle.setAttribute('aria-busy', String(swapPending));
-    el('hostSwapRetry').hidden = !swapState.managed_active || swapState.persistent || !swapState.editable;
+    el('hostSwapRetry').hidden = !swapState.editable || (swapState.mode === 'external'
+      ? !swapState.enabled || !swapState.restore_pending : !swapState.managed_active || swapState.persistent);
+    el('hostSwapRetry').textContent = swapState.mode === 'external' ? '恢复其余系统 Swap' : '重试保存开机配置';
     el('hostSwapRetry').disabled = swapPending || swapLoading;
-    el('hostSwapFeedback').textContent = swapState.job?.detail || swapState.detail || '正在读取主机配置…';
+    el('hostSwapFeedback').textContent = (['running', 'failed'].includes(swapState.job?.state) ? swapState.job.detail : swapState.detail) || '正在读取主机配置…';
     swapToggle.title = swapPending ? '正在处理，请稍候' : swapState.detail || '启用 Swap';
   }
   async function loadSwap() {
@@ -85,7 +87,10 @@
   async function changeSwap(enabled) {
     if (swapPending || swapLoading || !swapState.editable) { renderSwap(); return; }
     clearTimeout(swapTimer); swapDesired = enabled; swapPending = true; renderSwap();
-    if (!enabled && !await showConfirmDialog({title:'关闭面板 Swap？', message:'关闭会将交换数据移回内存；内存不足时会拒绝操作。交换文件保留，系统原有 Swap 不受影响。', confirmText:'关闭 Swap'})) {
+    const external = swapState.mode === 'external';
+    if (!enabled && !await showConfirmDialog({title:external ? '临时关闭系统 Swap？' : '关闭面板 Swap？',
+      message:external ? '关闭会将交换数据移回内存；内存不足时会拒绝操作。保留系统原有交换文件和开机配置，可再次开启；重启后可能自动恢复。'
+        : '关闭会将交换数据移回内存；内存不足时会拒绝操作。交换文件保留，系统原有 Swap 不受影响。', confirmText:'关闭 Swap'})) {
       swapDesired = null; swapPending = false; renderSwap();
       if (el('performancePanel').open) swapTimer = setTimeout(loadSwap, 10000);
       return;

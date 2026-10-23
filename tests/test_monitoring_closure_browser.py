@@ -10,7 +10,7 @@ from test_server_performance import sample
 
 
 @pytest.mark.parametrize('width', [1440, 390])
-def test_resource_configuration_metrics_keys_and_persisted_incident_ui(page, http_server, runtime, monkeypatch, tmp_path, width):
+def test_resource_configuration_and_persisted_incident_ui(page, http_server, runtime, monkeypatch, tmp_path, width):
     page.unroute('**/monitoring')
     page.set_viewport_size({'width': width, 'height': 950})
     now = time.time()
@@ -33,21 +33,9 @@ def test_resource_configuration_metrics_keys_and_persisted_incident_ui(page, htt
     page.locator('#monitorSettingsForm button[type=submit]').click()
     playwright.expect(page.locator('#monitorFeedback')).to_contain_text('提醒规则已保存')
     assert monitor.settings['cpu_threshold'] == 92 and monitor.settings['resource_recovery_seconds'] == 35
-    page.locator('#prometheusPanel > summary').click()
-    page.locator('#prometheusEnable').click()
-    playwright.expect(page.locator('#prometheusCredentials')).to_be_visible()
-    assert 'credentials:' in page.locator('#prometheusConfig').input_value()
-    with page.expect_download() as download:
-        page.locator('#prometheusDownload').click()
-    assert 'job_name: mini_deploy' in open(download.value.path(), encoding='utf-8').read()
+    assert page.locator('#prometheusPanel, #incidentOperations').count() == 0
+    playwright.expect(page.locator('#eventTimeline')).not_to_contain_text('api 容器发生重启')
     page.screenshot(path=str(tmp_path / f'monitoring-closure-settings-{width}.png'), full_page=True)
-    page.locator('#prometheusPanel > summary').click()
-    page.locator('#prometheusPanel > summary').click()
-    assert page.locator('#prometheusCredentials').is_hidden()
-    assert page.locator('#prometheusConfig').input_value() == ''
-    page.locator('#prometheusDisable').click()
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#prometheusStatus')).to_contain_text('外部采集未开启')
     page.locator('#alertList summary').first.click()
     page.locator('[data-incident-diagnose]').first.click()
     playwright.expect(page.locator('#opsIncident')).to_contain_text('已保存的进程现场')

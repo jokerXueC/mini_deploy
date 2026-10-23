@@ -9,6 +9,12 @@ let systemStatusRequestId = 0;
 let currentContainerLogName = '';
 let currentContainerLogLineLimit = 200;
 let containerLogKeywordTimer = null;
+let containerLogTimer = null;
+let containerLogRequest = null;
+let containerLogGeneration = 0;
+let containerLogPaused = false;
+let containerLogFollowing = true;
+let containerLogRows = [];
 let systemTrendRange = '1h';
 let notificationDirty = false;
 const THEME_STORAGE_KEY = 'mini_deploy-theme';
@@ -423,7 +429,7 @@ function setView(view) {
   }
   const titles = {
     server: ['服务器健康面板', '查看服务器资源、网络吞吐和 Docker 容器运行状态。'],
-    events: ['异常中心', '当前异常与恢复记录'],
+    events: ['异常中心', '服务器、容器、网站与接口的异常及恢复'],
     notify: ['通知配置', '异常提醒与恢复通知。'],
     certificates: ['域名与证书', '已发现的网站、证书有效期与线上状态。'],
     requests: ['请求记录', '后端 HTTP 请求、响应状态与耗时'],
@@ -1291,6 +1297,11 @@ function renderSystemStatus(system = {}) {
 }
 
 function closeContainerLogsModal() {
+  clearTimeout(containerLogTimer);
+  clearTimeout(containerLogKeywordTimer);
+  containerLogGeneration++;
+  containerLogRequest?.abort();
+  containerLogRequest = null;
   window.AppSelects?.close();
   const modal = $('containerLogsModal');
   if (modal) modal.hidden = true;
@@ -1307,25 +1318,70 @@ function openContainerLogsModal(container, lines, meta = '') {
   $('containerLogsModal').hidden = false;
 }
 
-async function showContainerLogs(container, tail = currentContainerLogLineLimit) {
+async function showContainerLogs(container, tail = currentContainerLogLineLimit, updating = false) {
+  clearTimeout(containerLogTimer);
+  if (updating && (containerLogPaused || document.hidden || $('containerLogsModal').hidden)) return;
+  if (updating && containerLogRequest) return;
+  containerLogRequest?.abort();
+  const request = new AbortController();
+  containerLogRequest = request;
+  const generation = ++containerLogGeneration;
   const safeTail = positiveLineCount(tail, 200);
   const filterOptions = containerLogFilterOptions();
   currentContainerLogLineLimit = safeTail;
   currentContainerLogName = container;
-  openContainerLogsModal(container, ['加载中...'], `读取最近 ${safeTail} 行${containerLogFilterLabel(filterOptions)}`);
+  if (!updating) {
+    containerLogRows = [];
+    containerLogFollowing = true;
+    containerLogPaused = false;
+    openContainerLogsModal(container, [], `读取最近 ${safeTail} 行${containerLogFilterLabel(filterOptions)}`);
+    $('containerLogsContent').textContent = '正在读取日志…';
+    $('containerLogPause').setAttribute('aria-pressed', 'false');
+    $('containerLogPause').title = '暂停刷新';
+    $('containerLogPause').querySelector('img').src = 'ui/previews/ssh-ai/icons/pause.svg';
+    $('containerLogFollow').setAttribute('aria-pressed', 'true');
+  }
+  const timeout = setTimeout(() => request.abort(), 15000);
   try {
-    const data = await fetchJson(logsUrl('docker/logs', {
+    const response = await fetch(logsUrl('docker/logs', {
       container,
       tail: safeTail,
       ...filterOptions,
-    }));
+    }), {credentials:'same-origin', signal:request.signal, cache:'no-store'});
+    if (response.status === 401) { closeContainerLogsModal(); location.reload(); return; }
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || data.error || '日志暂不可读');
+    if (generation !== containerLogGeneration) return;
     const lines = data.lines || [];
     const meta = data.filtered
       ? `${data.filter_label || '筛选'}匹配 ${data.matched_count || 0} 条，显示 ${lines.length} 行，上下文 ${data.context || 0} 行`
       : `最近 ${lines.length} 行`;
-    openContainerLogsModal(data.container || container, lines, meta);
+    const content = $('containerLogsContent');
+    // Reuse the common prefix. Reading older lines freezes the visible snapshot.
+    if (containerLogFollowing || !updating) {
+      let prefix = 0;
+      while (prefix < containerLogRows.length && prefix < lines.length && containerLogRows[prefix] === lines[prefix]) prefix++;
+      if (!lines.length) content.innerHTML = '<span class="log-line">暂无匹配日志</span>';
+      else if (prefix && prefix === containerLogRows.length) content.insertAdjacentHTML('beforeend', renderLogLines(lines.slice(prefix)));
+      else if (JSON.stringify(lines) !== JSON.stringify(containerLogRows)) content.innerHTML = renderLogLines(lines);
+      containerLogRows = lines;
+      if (containerLogFollowing) content.scrollTop = content.scrollHeight;
+    }
+    $('containerLogsMeta').textContent = meta;
+    $('containerLogCount').textContent = `${lines.length} 行`;
+    $('containerLogLiveStatus').textContent = containerLogPaused ? '已暂停' : containerLogFollowing ? `已更新 ${new Date().toLocaleTimeString('zh-CN', {hour12:false})}` : '正在查看历史 · 新日志等待跟随';
   } catch (err) {
-    openContainerLogsModal(container, [`读取日志失败: ${err.message}`], '读取失败');
+    if (generation !== containerLogGeneration) return;
+    $('containerLogLiveStatus').textContent = `读取失败，稍后重试：${err.name === 'AbortError' ? '请求超时' : err.message}`;
+    if (!updating) $('containerLogsContent').textContent = '暂时无法读取日志';
+  } finally {
+    clearTimeout(timeout);
+    if (generation === containerLogGeneration) {
+      containerLogRequest = null;
+      if (!containerLogPaused && !document.hidden && !$('containerLogsModal').hidden) {
+        containerLogTimer = setTimeout(() => showContainerLogs(currentContainerLogName, currentContainerLogLineLimit, true), 2000);
+      }
+    }
   }
 }
 
@@ -1659,6 +1715,42 @@ $('testNotificationBtn')?.addEventListener('click', testNotificationConfig);
   });
 });
 $('closeContainerLogsBtn').addEventListener('click', closeContainerLogsModal);
+$('containerLogPause').addEventListener('click', () => {
+  containerLogPaused = !containerLogPaused;
+  $('containerLogPause').setAttribute('aria-pressed', String(containerLogPaused));
+  $('containerLogPause').title = containerLogPaused ? '继续刷新' : '暂停刷新';
+  $('containerLogPause').querySelector('img').src = `ui/previews/ssh-ai/icons/${containerLogPaused ? 'play' : 'pause'}.svg`;
+  $('containerLogLiveStatus').textContent = containerLogPaused ? '已暂停刷新' : '正在更新';
+  clearTimeout(containerLogTimer);
+  if (containerLogPaused) {
+    containerLogGeneration++;
+    containerLogRequest?.abort();
+    containerLogRequest = null;
+  }
+  if (!containerLogPaused) showContainerLogs(currentContainerLogName, currentContainerLogLineLimit, true);
+});
+$('containerLogFollow').addEventListener('click', () => {
+  containerLogFollowing = true;
+  $('containerLogFollow').setAttribute('aria-pressed', 'true');
+  const content = $('containerLogsContent');
+  content.scrollTop = content.scrollHeight;
+  if (!containerLogPaused) showContainerLogs(currentContainerLogName, currentContainerLogLineLimit, true);
+});
+$('containerLogsContent').addEventListener('scroll', () => {
+  const content = $('containerLogsContent');
+  containerLogFollowing = content.scrollHeight - content.scrollTop - content.clientHeight < 24;
+  $('containerLogFollow').setAttribute('aria-pressed', String(containerLogFollowing));
+});
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(containerLogTimer);
+  if (document.hidden) {
+    containerLogGeneration++;
+    containerLogRequest?.abort();
+    containerLogRequest = null;
+  } else if (!$('containerLogsModal').hidden && !containerLogPaused) {
+    showContainerLogs(currentContainerLogName, currentContainerLogLineLimit, true);
+  }
+});
 $('themeToggleBtn')?.addEventListener('click', toggleTheme);
 $('containerLogsModal').addEventListener('click', (event) => {
   if (event.target === $('containerLogsModal')) closeContainerLogsModal();

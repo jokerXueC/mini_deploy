@@ -319,19 +319,21 @@ window.GatewayConnect = (() => {
 
   async function disconnect(entry) {
     if (busy) return;
+    const expired = entry.connection.config_state === 'changed';
     panel.hidden = false;
     $('gatewayConnectTitle').textContent = '停止网站记录';
     $('gatewayConnectFields').hidden = true;
     $('connectHelp').hidden = true;
     await work('等待确认撤销…', async () => {
-      const confirmed = await showConfirmDialog({title: '停止网站请求记录',
-        message: `恢复 ${entry.connection.site} 原有访问路径。${entry.connection.source?.kind === 'nginx' ? 'Nginx 将重载。' : '代理配置将重新应用，已有连接可能短暂中断。'} 网站继续提供服务，采集容器保留。`,
-        confirmText: '停止记录', danger: true});
+      const confirmed = await showConfirmDialog({title: expired ? '解除失效接入记录' : '停止网站请求记录',
+        message: expired ? `${entry.connection.site} 的代理配置已变化。检查确认当前配置不再引用此网关后，仅解除面板保存的旧接入记录，保留当前业务配置、容器和请求历史。之后可重新检测并接入。`
+          : `恢复 ${entry.connection.site} 原有访问路径。${entry.connection.source?.kind === 'nginx' ? 'Nginx 将重载。' : '代理配置将重新应用，已有连接可能短暂中断。'} 网站继续提供服务，采集容器保留。`,
+        confirmText: expired ? '解除旧接入' : '停止记录', danger: !expired});
       if (!confirmed) { panel.hidden = true; return; }
       try {
-        await postJsonBody('gateway-connections', {action: 'disconnect', key: entry.key, token: entry.connection.token, confirmed: true});
+        const result = await postJsonBody('gateway-connections', {action: expired ? 'release' : 'disconnect', key: entry.key, token: entry.connection.token, confirmed: true});
         invalidate(true);
-        feedback.textContent = '原入口规则已恢复。网关仍保留，可按需停止或删除。';
+        feedback.textContent = result.notice || '原入口规则已恢复。网关仍保留，可按需停止或删除。';
       } finally { await window.RequestGateway.refresh(); }
       panel.hidden = true;
       window.NginxRequests?.refresh();

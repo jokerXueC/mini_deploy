@@ -18,6 +18,7 @@ import uuid
 from certificates import trusted_path, atomic_write
 import security_observation as observation
 from security_center import Center
+from login_guard import Guard
 
 JAIL = 'mini-deploy-panel'
 SSH_JAIL = 'mini-deploy-sshd'
@@ -84,6 +85,7 @@ class Manager:
         self.inspector = inspector or observation.Inspector()
         self.history = history or observation.History(home)
         self.center = Center(self.history, runner=self.inspector.run, which=self.which)
+        self.guard = Guard(self.history, maintenance=self.maintenance)
         self.scan_lock = threading.Lock()
         self.scan_worker = None
         self.observation = {}

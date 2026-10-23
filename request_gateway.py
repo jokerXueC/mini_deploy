@@ -212,7 +212,7 @@ class Store:
         return {**spec, "revision": revision(spec), "state": "unknown" if error else state,
                 "container": f'mini-gateway-{spec["key"]}', "error": error,
                 "local_address": address, "docker_address": docker_address,
-                "connection": Connections(self.root.parent).status(spec['key']),
+                "connection": Connections(self.root.parent).status(spec['key'], verify=live),
                 "caddy_upstream": docker_address or address}
 
     def save(self, raw: Any, expected: str = "") -> dict[str, Any]:

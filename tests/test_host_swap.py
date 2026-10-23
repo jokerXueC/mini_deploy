@@ -75,7 +75,7 @@ def test_enable_disable_and_reenable_preserve_file_and_external_configuration(en
 
 
 @pytest.mark.parametrize('configured', [False, True])
-def test_external_swap_is_not_modified_or_duplicated(engine, configured):
+def test_unresolved_system_swap_is_not_modified_or_duplicated(engine, configured):
     manager, state, active, original = engine
     if configured:
         manager.fstab.write_text(original + '/existing-swap none swap sw 0 0\n')
@@ -84,11 +84,109 @@ def test_external_swap_is_not_modified_or_duplicated(engine, configured):
         active()
     before = manager.fstab.read_bytes()
     assert not manager.status()['editable']
-    with pytest.raises(ValueError, match='系统 Swap'):
+    with pytest.raises(ValueError):
         manager._apply(True)
     with pytest.raises(ValueError):
         manager.start(False)
     assert not state['commands'] and manager.fstab.read_bytes() == before
+
+
+def external_swap(engine, count=1):
+    manager, state, active, original = engine
+    paths = [manager.home.parent / f'existing-swap-{index}' for index in range(count)]
+    for path in paths:
+        path.write_bytes(b'preserved external swap content')
+    state['active'] = [str(path) for path in paths]
+    active()
+    manager.fstab.write_text(original + ''.join(f'{path} none swap sw 0 0\n' for path in paths))
+    return paths
+
+
+def test_existing_swap_can_be_disabled_and_reenabled_after_agent_restart(engine):
+    manager, state, _, _ = engine
+    paths = external_swap(engine, 2)
+    before = manager.fstab.read_bytes()
+    assert manager.status()['editable'] and manager.status()['mode'] == 'external'
+    manager._apply(False)
+    assert not state['active'] and not manager.status()['enabled'] and manager.status()['editable']
+    assert manager.external_record.exists() and not manager.path.exists()
+    restored = host_swap.Manager(manager.home, proc=manager.proc, fstab=manager.fstab, runner=manager.run,
+                                 supported=True, directory=manager.directory)
+    restored._apply(True)
+    assert set(state['active']) == {str(path) for path in paths}
+    assert manager.fstab.read_bytes() == before
+    assert all(path.read_bytes() == b'preserved external swap content' for path in paths)
+    assert [command[0] for command in state['commands']] == ['swapoff', 'swapoff', 'swapon', 'swapon']
+
+
+def test_existing_swap_memory_guard_and_failure_preserve_files_and_configuration(engine):
+    manager, state, _, _ = engine
+    paths = external_swap(engine)
+    before = manager.fstab.read_bytes()
+    (manager.proc / 'meminfo').write_text('MemTotal: 2097152 kB\nMemAvailable: 1024 kB\n')
+    with pytest.raises(ValueError, match='内存不足'):
+        manager._apply(False)
+    assert not state['commands'] and not manager.external_record.exists()
+    (manager.proc / 'meminfo').write_text('MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\n')
+    state['fail'] = 'swapoff'
+    with pytest.raises(RuntimeError):
+        manager._apply(False)
+    assert state['active'] == [str(paths[0])] and manager.fstab.read_bytes() == before
+    assert paths[0].exists() and manager.external_record.exists()
+
+
+def test_external_swap_partial_disable_failure_restores_already_disabled_sources(engine, monkeypatch):
+    manager, state, _, _ = engine
+    paths = external_swap(engine, 2)
+    runner = manager.run
+
+    def fail_second(command, **kwargs):
+        if command == ['swapoff', str(paths[1])]:
+            raise RuntimeError('second swapoff failed')
+        return runner(command, **kwargs)
+
+    monkeypatch.setattr(manager, 'run', fail_second)
+    with pytest.raises(RuntimeError, match='second swapoff'):
+        manager._apply(False)
+    assert set(state['active']) == {str(path) for path in paths}
+    assert all(path.exists() for path in paths)
+
+
+def test_replaced_external_swap_is_not_reenabled(engine):
+    manager, state, _, _ = engine
+    paths = external_swap(engine)
+    manager._apply(False)
+    paths[0].rename(paths[0].with_suffix('.saved'))
+    paths[0].write_text('different business file')
+    calls = len(state['commands'])
+    assert not manager.status()['editable']
+    with pytest.raises(ValueError, match='身份已变化'):
+        manager._apply(True)
+    assert len(state['commands']) == calls and paths[0].read_text() == 'different business file'
+
+
+def test_partial_external_restore_exposes_retry_without_allocating_or_formatting(engine):
+    manager, state, _, _ = engine
+    paths = external_swap(engine, 2)
+    manager._apply(False)
+    state['active'] = [str(paths[0])]
+    (manager.proc / 'swaps').write_text('Filename Type Size Used Priority\n' + f'{paths[0]} file 2048 0 -2\n')
+    status = manager.status()
+    assert status['enabled'] and status['restore_pending'] and status['editable']
+    manager._apply(True)
+    assert set(state['active']) == {str(path) for path in paths}
+    assert not manager.status()['restore_pending'] and state['fills'] == 0
+    assert all(command[0] in {'swapon', 'swapoff'} for command in state['commands'])
+
+
+def test_invalid_external_restore_record_keeps_actual_active_status(engine):
+    manager, state, _, _ = engine
+    external_swap(engine)
+    manager.external_record.parent.mkdir(parents=True)
+    manager.external_record.write_text('[]')
+    status = manager.status()
+    assert status['enabled'] and not status['editable'] and '记录无效' in status['detail']
+    assert not state['commands']
 
 
 def test_low_disk_unsupported_filesystem_and_unowned_file_are_kept(engine, monkeypatch):

@@ -114,7 +114,7 @@ window.NginxRequests = (() => {
     $('requestHistoryNext').disabled = !historyResult?.has_more;
     $('requestHistoryPage').textContent = `第 ${historyPage + 1} 页`;
     if (!groups.length) {
-      rows.innerHTML = '<p class="request-empty">暂无匹配的请求</p>';
+      rows.innerHTML = `<p class="request-empty">${historyResult?.error ? '采集需要检查，当前没有匹配的已保存请求；请查看上方提示。' : '暂无匹配的请求'}</p>`;
       return;
     }
     let header = rows.querySelector('.request-summary-head');
@@ -295,23 +295,27 @@ window.NginxRequests = (() => {
         if (result.container && !$('requestContainer').value.trim()) $('requestContainer').value = result.container;
       }
       const entry = backend === 'gateway' ? window.RequestGateway.list().find(item => item.key === $('requestGatewayKey').value) : null;
-      const attached = entry?.connection?.state === 'connected';
+      const collectionError = entry?.connection?.error || result.error;
+      const attached = entry?.connection?.state === 'connected' && !collectionError;
       const needsRecovery = entry?.connection && !['connected', 'not_connected'].includes(entry.connection.state);
       source.textContent = backend === 'gateway'
         ? attached ? `${entry.connection.site} · ${entry.state === 'running' ? '已开启' : '采集服务未运行'} · ${entry.connection.scope || '已接入的转发规则'}`
-          : needsRecovery ? `${entry.connection.site} · 接入操作待恢复`
+          : entry?.connection && collectionError ? `${entry.connection.site} · 采集需检查`
+            : needsRecovery ? `${entry.connection.site} · 接入操作待恢复`
             : entry ? `自定义入口 · ${entry.name} · 仅记录经过该入口的请求` : '尚未开启后端请求记录'
         : `正在查看已有${backend === 'caddy' ? ' Caddy' : ' Nginx'}日志${result.container ? ` · ${result.container}` : ''}`;
       $('requestStopMonitoring').hidden = !entry?.connection || entry.connection.state === 'not_connected';
-      $('requestStopMonitoring').textContent = attached ? '停止记录' : '恢复原入口';
+      $('requestStopMonitoring').textContent = entry?.connection?.config_state === 'changed' ? '解除失效接入' : attached ? '停止记录' : '恢复原入口';
       notice.textContent = result.notice || '';
       if (historyResult) {
         const checked = result.checked_at ? new Date(result.checked_at * 1000).toLocaleTimeString('zh-CN') : '';
-        notice.textContent = `${checked ? `最近采集 ${checked}` : '等待首次后台采集'} · 最多保留 7 天（受容量限制）。`;
+        notice.textContent = `${checked ? `最近检查 ${checked}` : '等待首次后台采集'} · 最多保留 7 天（受容量限制）。`;
+        notice.textContent += result.latest_at ? ` 最后一条请求：${new Date(result.latest_at * 1000).toLocaleString('zh-CN')}。` : ' 尚未保存请求。';
         if (result.error) notice.textContent += ` ${result.error}。`;
         if (result.checked_at && Date.now() / 1000 - result.checked_at > 60) notice.textContent += ' 采集延迟，当前统计可能不完整。';
         if (result.limited_at) notice.textContent += ' 曾达到单批采集上限，可能存在缺口。';
         if (result.earliest_at) notice.textContent += ` 当前最早记录：${new Date(result.earliest_at * 1000).toLocaleString('zh-CN')}。`;
+        if (!result.total_requests && result.retained_requests) notice.textContent += ` 当前时段无匹配记录，此入口仍保留 ${result.retained_requests} 条历史，可切换时段或筛选查看。`;
         if (!entry && $('requestGatewayKey').value) source.textContent = '已保存的历史记录 · 原采集入口不可用';
       }
       $('requestEnable').hidden = backend !== 'nginx' || (result.enabled && result.details_enabled !== false) || result.mode === 'none';

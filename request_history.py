@@ -130,7 +130,7 @@ class History:
             size -= row[1]
         db.executemany("DELETE FROM requests WHERE id=?", doomed)
 
-    def ingest(self, key, name, stream, lines, until, *, limited=False, now=None):
+    def ingest(self, key, name, stream, lines, until, *, limited=False, now=None, error=""):
         now = time.time() if now is None else now
         occurrences, batch = {}, []
         for line in lines:
@@ -160,10 +160,10 @@ class History:
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", batch)
             self._prune(db, now)
             # The cursor and rows commit together: failures never acknowledge unpersisted logs.
-            db.execute("""INSERT INTO sources(key,name,stream,cursor,checked,limited,error) VALUES(?,?,?,?,?,?,'')
+            db.execute("""INSERT INTO sources(key,name,stream,cursor,checked,limited,error) VALUES(?,?,?,?,?,?,?)
                 ON CONFLICT(key) DO UPDATE SET name=excluded.name,stream=excluded.stream,
-                cursor=excluded.cursor,checked=excluded.checked,error='',
-                limited=MAX(sources.limited,excluded.limited)""", (key, name, stream, until, now, now if limited else 0))
+                cursor=excluded.cursor,checked=excluded.checked,error=excluded.error,
+                limited=MAX(sources.limited,excluded.limited)""", (key, name, stream, until, now, now if limited else 0, error[:300]))
 
     def query(self, key, *, period="24h", layout="tree", search="", status="all", slow_ms=1000, page=0, now=None):
         if not request_gateway.KEY.fullmatch(key) or period not in PERIODS or layout not in {"tree", "flat"}:
@@ -219,11 +219,12 @@ class History:
                 group["upstreamAverage"] = group["upstreamSum"] / group["upstreamCount"] if group["upstreamCount"] else None
                 group["successRate"] = group["successes"] / group["count"] * 100
             source = db.execute("SELECT * FROM sources WHERE key=?", (key,)).fetchone()
-            earliest = db.execute("SELECT MIN(ts) FROM requests WHERE source=?", (key,)).fetchone()[0]
+            retained = db.execute("SELECT MIN(ts),MAX(ts),COUNT(*) FROM requests WHERE source=?", (key,)).fetchone()
         state = dict(source) if source else {}
         return {"mode": "gateway", "history": True, "groups": groups, "total_groups": total[0],
                 "total_requests": total[1], "page": page, "has_more": (page + 1) * 100 < total[0],
-                "checked_at": state.get("checked", 0), "earliest_at": earliest,
+                "checked_at": state.get("checked", 0), "earliest_at": retained[0],
+                "latest_at": retained[1], "retained_requests": retained[2],
                 "limited_at": state.get("limited", 0), "error": state.get("error", ""),
                 "retention_days": self.retention // 86400, "slow_ms": slow_ms, "detail_filter": status,
                 "notice": "历史仅包含已采集且仍保留的请求；每类展开显示最近最多 30 条明细。"}
@@ -235,6 +236,8 @@ class Collector:
         self.position = 0
 
     def collect(self, store, entry, now=None):
+        from gateway_connections import Connections
+
         now = time.time() if now is None else now
         key, name = entry["spec"]["key"], entry["spec"]["name"]
         with self.history.maintenance(), request_gateway.LOCK:
@@ -246,6 +249,7 @@ class Collector:
         if not item:
             self.history.failure(key, name, "采集容器不存在，已保存的历史仍可查询")
             return
+        connection = Connections(self.history.home).status(key, verify=True)
         stream = item["Id"]
         previous = self.history.source(key)
         until = int(now) - 1
@@ -264,7 +268,8 @@ class Collector:
             lines = output.read(limit).decode("utf-8", errors="replace").splitlines()
         if size > limit:
             lines = lines[1:]
-        self.history.ingest(key, name, stream, lines, until, limited=len(lines) >= MAX_LINES or size > limit, now=now)
+        self.history.ingest(key, name, stream, lines, until, limited=len(lines) >= MAX_LINES or size > limit,
+                            now=now, error=connection.get('error', ''))
 
     def cycle(self):
         store = request_gateway.Store(self.history.home)

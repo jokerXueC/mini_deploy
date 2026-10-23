@@ -49,6 +49,8 @@ def dashboard():
                         "alerts": [], "events": [], "csrf_token": "test-token"}
                 elif path == "/system-metrics":
                     result = {"server": {}}
+                elif path == "/performance/server":
+                    result = {"points": [], "summary": {}, "coverage": {}}
                 elif path == "/sites":
                     result = {"sites": state["sites"], "notifications": {}}
                 elif path == "/sites/save":

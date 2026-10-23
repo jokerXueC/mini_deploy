@@ -8,9 +8,8 @@
   let generation = 0;
   let loaded = false;
   let loadError = '';
-  const pageSize = 50;
+  const historyPageSize = 5;
   let historyPage = 0;
-  let operationPage = 0;
   const el = id => document.getElementById(id);
   const visible = () => ['events', 'certificates'].includes(activeView);
   const text = value => escapeHtml(String(value ?? ''));
@@ -18,15 +17,12 @@
   const duration = value => Number.isFinite(value) ? (value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(2)} ms`) : '-';
   const feedback = message => { el('monitorFeedback').textContent = message; };
   const sources = {docker: '容器', container: '容器', server: '服务器资源', cpu: '处理器', memory: '内存', disk: '磁盘',
-    resource: '服务器资源', website: '网站探测', health: '服务健康检查', certificate: '证书', monitoring: '监测服务', security: '基础防护', docker_events: '容器生命周期'};
+    resource: '服务器资源', website: '网站与接口', health: '服务健康检查', certificate: '证书', monitoring: '监测服务', security: '基础防护'};
   const sourceName = source => sources[source] || (source ? `其他来源（${source}）` : '来源未提供');
   const severityName = level => ({critical: '严重', warning: '警告', info: '提示', success: '恢复'}[level] || '提示');
   const activeAlerts = () => (snapshot.alerts || []).filter(item => item.active !== false);
-  const operationKinds = new Set(['audit', 'operation', 'config', 'configured', 'settings', 'mute', 'save', 'remove', 'toggle', 'check']);
-  const isOperation = item => operationKinds.has(item.kind) || String(item.kind || '').startsWith('monitoring_');
-  const operationNames = {operation: '面板操作', audit: '操作审计', config: '配置变更', configured: '配置变更',
-    settings: '提醒规则', mute: '通知静音', save: '保存监测地址', remove: '移除监测', toggle: '切换监测', check: '手动检查',
-    monitoring_save: '保存监测地址', monitoring_remove: '移除监测', monitoring_toggle: '切换监测', monitoring_settings: '提醒规则', monitoring_mute: '通知静音', monitoring_check: '手动检查'};
+  const incidentKinds = new Set(['alert', 'recovery', 'recovered', 'resolved', 'disappeared', 'container_missing', 'container_disappeared']);
+  const isIncident = item => incidentKinds.has(item.kind) || (!item.kind && ['warning', 'critical'].includes(item.level));
   const reasonNames = {oom: '内存溢出', oom_killed: '内存溢出退出', restarts: '反复重启', restart_storm: '反复重启',
     health: '健康检查失败', unhealthy: '健康检查失败', exit: '异常退出', abnormal_exit: '异常退出',
     configured_container_missing: '配置容器未找到', container_disappeared: '容器消失', missing: '容器未找到', not_running: '容器未运行',
@@ -41,9 +37,7 @@
 
   function historyStatus(item) {
     const kind = String(item.kind || '');
-    if (kind === 'lifecycle' || item.source === 'docker_events') return 'lifecycle';
     if (['recovery', 'recovered', 'resolved'].includes(kind)) return 'recovery';
-    if (['acknowledged', 'acknowledge'].includes(kind)) return 'acknowledged';
     if (['disappeared', 'container_missing', 'container_disappeared'].includes(kind)
       || /configured_container_missing|container_disappeared/.test(String(item.metadata?.reason || ''))
       || /配置.*容器.*(消失|不存在|未找到)/.test(item.title || '')) return 'disappeared';
@@ -123,7 +117,7 @@
 
   function row(item, index, current) {
     const status = current ? item.acknowledged_at ? 'acknowledged' : 'alert' : historyStatus(item);
-    const state = current ? item.acknowledged_at ? '已知晓 · 仍异常' : '待处理' : {alert: '异常', recovery: '已恢复', acknowledged: '已知晓', disappeared: '配置容器消失', lifecycle: '容器生命周期'}[status];
+    const state = current ? item.acknowledged_at ? '已知晓 · 仍异常' : '待处理' : {alert: '异常', recovery: '已恢复', disappeared: '容器未找到'}[status];
     const key = current ? item.incident_id || item.id || index : item.id || `${item.incident_id || ''}:${item.kind}:${item.at_ts || item.at || index}`;
     const since = current && item.first_seen ? `首次发现 ${time(item.first_seen)} · 持续 ${elapsed(Date.now() / 1000 - item.first_seen)}` : item.at_ts ? time(item.at_ts) : item.at || '时间未提供';
     const totalDuration = !current && Number.isFinite(item.duration_seconds) ? ` · 持续 ${elapsed(item.duration_seconds)}` : '';
@@ -138,8 +132,7 @@
   }
 
   function renderIncidents() {
-    const alerts = activeAlerts(), history = (snapshot.events || []).filter(item => !isOperation(item));
-    const operations = (snapshot.events || []).filter(isOperation);
+    const alerts = activeAlerts(), history = (snapshot.events || []).filter(isIncident);
     syncSources('incidentSource', alerts);
     syncSources('historySource', history);
     const critical = alerts.filter(item => item.level === 'critical').length;
@@ -148,13 +141,13 @@
     el('alertBadge').textContent = alerts.length ? `${alerts.length} 项异常` : loaded ? '暂无当前异常' : '等待采样';
     el('eventTimelineHint').textContent = alerts.length ? `${critical} 项严重 · ${alerts.length - critical} 项其他异常 · ${acknowledged} 项已知晓` : loaded ? '暂无当前异常，采样覆盖见下方' : '等待监测采样';
     const coverage = snapshot.coverage || {};
-    const coverageKeys = ['server', 'docker', ...(coverage.docker_events ? ['docker_events'] : []), ...(coverage.security ? ['security'] : [])];
+    const coverageKeys = ['server', 'docker', ...(coverage.security ? ['security'] : [])];
     const latestSample = Math.max(0, ...coverageKeys.map(key => Number(coverage[key]?.checked_at) || 0));
     el('incidentCoverage').innerHTML = coverageKeys.map(key => {
       const sample = coverage[key] || {};
       const fresh = Number(sample.checked_at) > 0 && Date.now() / 1000 - sample.checked_at <= 120;
       const available = !loadError && sample.status === 'healthy' && fresh;
-      return `<span class="incident-coverage-item ${available ? 'available' : ''}" title="${text(sample.detail || '服务未提供采样详情')}">${{server: '服务器', docker: '容器', docker_events: '容器生命周期', security: '基础防护'}[key]} · ${available ? '采样可用' : sample.status === 'disabled' ? '告警暂停' : sample.status === 'not_installed' ? '未安装' : '采样未知'}</span>`;
+      return `<span class="incident-coverage-item ${available ? 'available' : ''}" title="${text(sample.detail || '服务未提供采样详情')}">${{server: '服务器', docker: '容器', security: '基础防护'}[key]} · ${available ? '采样可用' : sample.status === 'disabled' ? '告警暂停' : sample.status === 'not_installed' ? '未安装' : '采样未知'}</span>`;
     }).join('') + (latestSample ? `<small>最近采样 ${text(time(latestSample))}</small>` : '');
     el('acknowledgeAllBtn').disabled = busy || !alerts.some(item => !item.acknowledged_at);
     const severity = el('incidentSeverity').value, source = el('incidentSource').value, state = el('incidentStatus').value;
@@ -166,40 +159,19 @@
     const selected = history.filter(item => (historySource === 'all' || item.source === historySource) && (historyState === 'all' || historyStatus(item) === historyState))
       .sort((a, b) => (b.at_ts || 0) - (a.at_ts || 0));
     const retention = Number(snapshot.history_retention_days), limit = Number(snapshot.history_limit);
-    el('incidentHistoryHint').textContent = `${history.length} 条异常、恢复、知晓与生命周期记录${retention > 0 ? ` · 保留 ${retention} 天` : ''}${limit > 0 ? ` · 最多 ${limit} 条` : ''}`;
-    historyPage = updatePager('history', historyPage, selected.length, history.length);
-    replaceRows('eventTimeline', selected.length ? selected.slice(historyPage * pageSize, (historyPage + 1) * pageSize).map((item, i) => row(item, i, false)).join('') : `<p class="incident-empty">${history.length ? '没有符合筛选的历史记录。' : '暂无异常历史记录'}</p>`);
-    el('incidentOperationCount').textContent = operations.length ? `· ${operations.length} 条` : '';
-    if (el('incidentOperations').open) renderOperations();
-    else el('incidentOperationList').replaceChildren();
+    el('incidentHistoryHint').textContent = `${history.length} 条异常与恢复记录 · 每页 ${historyPageSize} 条${retention > 0 ? ` · 保留 ${retention} 天` : ''}${limit > 0 ? ` · 历史库最多 ${limit} 条` : ''}`;
+    historyPage = updatePager('history', historyPage, selected.length, history.length, historyPageSize);
+    replaceRows('eventTimeline', selected.length ? selected.slice(historyPage * historyPageSize, (historyPage + 1) * historyPageSize).map((item, i) => row(item, i, false)).join('') : `<p class="incident-empty">${history.length ? '没有符合筛选的历史记录。' : '暂无异常历史记录'}</p>`);
     window.AppSelects?.syncAll();
   }
 
-  function updatePager(prefix, page, filtered, total) {
-    const pages = Math.max(1, Math.ceil(filtered / pageSize));
+  function updatePager(prefix, page, filtered, total, size = historyPageSize) {
+    const pages = Math.max(1, Math.ceil(filtered / size));
     const current = Math.min(page, pages - 1);
     el(`${prefix}PageInfo`).textContent = `筛选 ${filtered} / 共 ${total} 条 · 第 ${current + 1} / ${pages} 页`;
     el(`${prefix}Prev`).disabled = current === 0;
     el(`${prefix}Next`).disabled = current >= pages - 1;
     return current;
-  }
-
-  function renderOperations() {
-    if (!el('incidentOperations').open) { el('incidentOperationList').replaceChildren(); return; }
-    const operations = (snapshot.events || []).filter(isOperation);
-    const selectedOperation = el('operationKind').value;
-    const kinds = new Set(operations.map(item => item.kind));
-    if (selectedOperation !== 'all') kinds.add(selectedOperation);
-    const ordered = [...kinds].sort(), signature = JSON.stringify(ordered);
-    if (el('operationKind').dataset.kinds !== signature) {
-      el('operationKind').innerHTML = '<option value="all">全部操作</option>' + ordered.map(kind => `<option value="${text(kind)}">${text(operationNames[kind] || '其他操作')}</option>`).join('');
-      el('operationKind').value = selectedOperation;
-      el('operationKind').dataset.kinds = signature;
-    }
-    const selectedOperations = operations.filter(item => selectedOperation === 'all' || item.kind === selectedOperation);
-    operationPage = updatePager('operation', operationPage, selectedOperations.length, operations.length);
-    el('incidentOperationList').innerHTML = selectedOperations.length ? selectedOperations.slice(operationPage * pageSize, (operationPage + 1) * pageSize).map(item => `<div class="incident-operation"><strong>${text(item.title || '操作记录')}</strong><small>${text(sourceName(item.source))} · ${text(item.at_ts ? time(item.at_ts) : item.at || '')}</small><p>${text(item.detail)}</p></div>`).join('') : `<p class="incident-empty">${operations.length ? '没有符合筛选的操作记录。' : '当前接口未提供操作记录'}</p>`;
-    window.AppSelects?.syncAll();
   }
 
   function certificateText(result) {
@@ -233,7 +205,7 @@
           <button type="button" data-monitor-action="remove" data-key="${text(target.key)}">移除监测</button>
         </div></details>
       </div>`;
-    }).join('') : '<div class="project-empty compact-empty">暂无监测网站</div>';
+    }).join('') : '<div class="project-empty compact-empty">暂无监测地址</div>';
     el('monitorCertificates').innerHTML = rows.length ? rows.map(target => {
       const result = target.result || {};
       const cert = result.certificate || {};
@@ -371,12 +343,8 @@
   el('acknowledgeAllBtn').addEventListener('click', acknowledgeAll);
   ['incidentSeverity', 'incidentSource', 'incidentStatus'].forEach(id => el(id).addEventListener('change', renderIncidents));
   ['historySource', 'historyStatus'].forEach(id => el(id).addEventListener('change', () => { historyPage = 0; renderIncidents(); }));
-  el('operationKind').addEventListener('change', () => { operationPage = 0; renderOperations(); });
-  el('incidentOperations').addEventListener('toggle', renderOperations);
   el('historyPrev').addEventListener('click', () => { historyPage = Math.max(0, historyPage - 1); renderIncidents(); });
   el('historyNext').addEventListener('click', () => { historyPage += 1; renderIncidents(); });
-  el('operationPrev').addEventListener('click', () => { operationPage = Math.max(0, operationPage - 1); renderOperations(); });
-  el('operationNext').addEventListener('click', () => { operationPage += 1; renderOperations(); });
   el('resetIncidentFilters').addEventListener('click', () => {
     ['incidentSeverity', 'incidentSource', 'incidentStatus'].forEach(id => { el(id).value = 'all'; });
     renderIncidents();

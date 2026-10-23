@@ -95,8 +95,16 @@ class Handler(PerformanceHandler):
         path = agent._normal_path(urlparse(self.path).path)
         if path in {'/', '/ui', '/ui/'}:
             self._write_html(200, agent._render_ui().replace('mini_deploy Monitor', 'mini_deploy · 本地模拟预览'))
-        elif path in {'/security/center', '/security/fail2ban'}:
+        elif path in {'/security/center', '/security/fail2ban', '/security/logins', '/security/protection'}:
             SecurityHandler.do_GET(self)
+        elif path == '/docker/logs':
+            query = parse_qs(urlparse(self.path).query)
+            tail = min(5000, max(1, int(query.get('tail', ['200'])[0])))
+            now = int(time.time())
+            lines = [time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(at)) +
+                     (' WARN  slow request /cloud/health duration=1.24s' if at % 13 == 0 else ' INFO  GET /cloud/health status=200 duration=4.20ms')
+                     for at in range(now - tail, now)]
+            self._write_json(200, {'container': query.get('container', ['api-service'])[0], 'lines': lines})
         elif path in {'/request-history', '/request-export', '/request-gateways', '/nginx-requests', '/caddy-requests'}:
             RequestHandler.do_GET(self)
         elif path == '/certificate-discovery':

@@ -25,7 +25,6 @@ html[data-theme="light"] body.panel-workspace {
   --field-bg: #fff;
   --control-accent: #007c9e;
 }
-.panel-workspace::before { display: none; }
 .panel-workspace .page { max-width: 1440px; padding-top: 22px; }
 .panel-workspace .top-bar { position: absolute; top: 30px; right: 24px; }
 .panel-workspace .back-pill { display: none; }
@@ -116,4 +115,37 @@ html[data-theme="light"] body.panel-workspace {
   #observationStatus { flex-basis: 100%; }
   .load-summary[data-metric="network_total_kbps"] .load-summary-primary > strong { font-size: 24px; }
   #serverView .trend-card-grid[data-container="true"] { grid-template-columns: minmax(0, 1fr); }
+}
+
+.panel-workspace .container-log-modal { display: flex; flex-direction: column; max-height: calc(100dvh - 32px); width: min(1180px, 100%); padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--card); overflow: visible; }
+.panel-workspace .container-log-modal .modal-head { padding: 18px 22px; margin: 0; border-bottom: 1px solid var(--line); }
+.container-log-eyebrow { font-size: 10px; color: var(--muted); }
+.panel-workspace .container-log-modal h2 { font-size: 17px; font-weight: 500; margin: 5px 0; overflow-wrap: anywhere; }
+.panel-workspace .container-log-modal .modal-head p { margin: 0; font-size: 11px; }
+.panel-workspace .container-log-actions { padding: 12px 22px; margin: 0; gap: 12px 18px; background: var(--surface-soft); }
+.panel-workspace .container-log-actions .log-control { gap: 8px; font-weight: 400; font-size: 11px; }
+.panel-workspace .container-log-actions .form-select { width: 106px; }
+.panel-workspace .container-log-actions .form-select-button { height: 30px; }
+.panel-workspace .container-log-actions .log-download { border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 4px; padding: 7px 10px; font-size: 11px; font-weight: 400; }
+.container-log-streambar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 9px 22px; border-block: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.container-log-streambar > div { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.container-log-streambar [aria-pressed=true] { color: var(--control-accent); background: var(--surface-muted); }
+.panel-workspace :is(.security-center, .container-log-modal) .toolbar-icon img { opacity: .8; }
+html[data-theme=dark] .panel-workspace :is(.security-center, .container-log-modal) .toolbar-icon img { filter: invert(1); }
+.panel-workspace .container-log-content { font-size: 12px; line-height: 1.8; background: var(--bg); color: var(--fg); border: 0; border-radius: 0 0 6px 6px; box-shadow: none; padding: 16px 22px; height: min(540px, 55dvh); max-height: 55dvh; tab-size: 4; overflow-anchor: none; }
+.panel-workspace .container-log-modal > :not(.container-log-content) { flex-shrink: 0; }
+.panel-workspace .container-log-content { flex: 1 1 auto; min-height: 120px; }
+.panel-workspace .container-log-content .log-ok { color: #168060; }
+.panel-workspace .container-log-content .log-error { color: #ce4251; background: color-mix(in srgb, #ce4251 8%, transparent); }
+.panel-workspace .container-log-content .log-warn { color: #a97922; background: color-mix(in srgb, #a97922 8%, transparent); }
+html[data-theme=dark] .panel-workspace .container-log-content .log-error { color: #fb838b; }
+html[data-theme=dark] .panel-workspace .container-log-content .log-warn { color: #e9b866; }
+html[data-theme=dark] .panel-workspace .container-log-content .log-ok { color: #64c9a6; }
+@media(max-width:600px) {
+  .panel-workspace .container-log-modal { max-width: calc(100vw - 20px); }
+  .panel-workspace .container-log-modal .modal-head, .panel-workspace .container-log-actions, .container-log-streambar { padding: 10px 12px; }
+  .panel-workspace .container-log-actions { gap: 9px; }
+  .panel-workspace .container-log-actions .log-control:not(.log-check-control) { flex: 1 1 40%; grid-template-columns: 32px minmax(0,1fr); }
+  .panel-workspace .container-log-actions .form-select { width: 100%; }
+  .panel-workspace .container-log-content { padding: 12px; font-size: 11px; height: 48dvh; max-height: 48dvh; }
 }

@@ -61,6 +61,7 @@ import ssh_terminal
 import terminal_ai
 import panel_diagnostics
 import ip_security
+import basic_protection
 import terminal_history
 import server_operations
 import performance_metrics
@@ -2072,6 +2073,17 @@ _docker_image_cleanup_lock = threading.Lock()
 _docker_image_cleanup_status: dict[str, Any] = {}
 _ip_security_instance = None
 _ip_security_lock = threading.Lock()
+_basic_protection_instance = None
+_basic_protection_lock = threading.Lock()
+
+
+def _basic_protection():
+    global _basic_protection_instance
+    with _basic_protection_lock:
+        if _basic_protection_instance is None or _basic_protection_instance.home != STATE_FILE.parent:
+            _basic_protection_instance = basic_protection.Protection(STATE_FILE.parent, _ip_security().guard,
+                maintenance=_maintenance_shared_lock, serial=lambda: _nginx_lock)
+        return _basic_protection_instance
 
 
 def _ip_security():
@@ -2471,14 +2483,27 @@ def _certificate_discovery_sampler() -> None:
 
 
 def _security_sampler(stop: threading.Event) -> None:
+    scanned_at = 0
+    located_at = 0
     while not stop.is_set():
         try:
             manager = _ip_security()
-            manager.scan()
-            ip_security.evaluate(_monitor(), {'history': manager.history.snapshot(), 'activity': manager.center.activity()})
+            now = time.time()
+            if now - scanned_at >= 60:
+                manager.scan()
+                _basic_protection().request_check()
+                ip_security.evaluate(_monitor(), {'history': manager.history.snapshot(), 'activity': manager.center.activity()})
+                scanned_at = now
+            else:
+                with manager.maintenance():
+                    manager.center.collect_logins(manager.observation.get('ssh', {}))
+            manager.guard.tick(manager.observation.get('ssh', {}))
+            if now - located_at >= 60:
+                manager.guard.update_locations()
+                located_at = now
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             _log(f'security observation failed: {type(exc).__name__}')
-        stop.wait(60)
+        stop.wait(10)
 
 
 @_maintenance_shared_operation
@@ -2859,6 +2884,7 @@ UI_ASSET_TYPES = {
     "panel-ai.css": "text/css; charset=utf-8",
     "ip-security.js": "application/javascript; charset=utf-8",
     "ip-security.css": "text/css; charset=utf-8",
+    "world-land.geojson": "application/geo+json; charset=utf-8",
     "terminal-ai.css": "text/css; charset=utf-8",
     "previews/ssh-ai/index.html": "text/html; charset=utf-8",
     "previews/ssh-ai/preview.js": "application/javascript; charset=utf-8",
@@ -3545,6 +3571,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == '/security/protection':
+            if self._require_auth_json():
+                try:
+                    payload = _basic_protection().status()
+                    payload.update(csrf_token=self._csrf_token_for_request())
+                    self._write_json(200, payload)
+                except (ValueError, OSError, RuntimeError, sqlite3.Error):
+                    self._write_json(503, {'detail': '基础防护状态暂不可读，请稍后刷新。'})
+            return
+        if path == '/security/logins':
+            if self._require_auth_json():
+                try:
+                    query = parse_qs(parsed.query)
+                    payload = _ip_security().guard.status(int(query.get('page', ['0'])[0]), query.get('source', ['all'])[0],
+                                                         query.get('outcome', ['all'])[0], int(query.get('ban_page', ['0'])[0]))
+                    payload.update(csrf_token=self._csrf_token_for_request(), client_ip=_request_client_ip(self))
+                    self._write_json(200, payload)
+                except (ValueError, OSError, RuntimeError, sqlite3.Error):
+                    self._write_json(503, {'detail': '登录记录暂不可读，已保存的数据保持不变。'})
+            return
         if path == '/metrics/access':
             if self._require_auth_json():
                 try:
@@ -3867,6 +3913,33 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == '/security/protection':
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=2048)
+                    client = _request_client_ip(self)
+                    result = _basic_protection().start(data.get('enabled'), client, _ip_security().observation.get('ssh', {}))
+                    _audit_event('basic_protection_requested', actor=client, detail={'enabled': data.get('enabled')})
+                    self._write_json(202, result)
+                except ValueError as exc:
+                    self._write_json(400, {'detail': str(exc)})
+                except (OSError, RuntimeError, sqlite3.Error):
+                    self._write_json(503, {'detail': '防护操作未能提交，请刷新确认实际状态。'})
+            return
+        if path == '/security/logins':
+            if self._require_auth_json():
+                try:
+                    data = _read_json_body(self, max_bytes=8192)
+                    manager = _ip_security()
+                    manager.guard.change(data, _request_client_ip(self))
+                    manager.guard.tick(manager.observation.get('ssh', {}))
+                    _audit_event('login_guard_' + str(data.get('action')), actor=_request_client_ip(self))
+                    self._write_json(200, {'ok': True})
+                except ValueError as exc:
+                    self._write_json(400, {'detail': str(exc)})
+                except (OSError, RuntimeError, sqlite3.Error):
+                    self._write_json(503, {'detail': '防护设置未能完整应用，请刷新查看实际状态。'})
+            return
         if path in {'/security/center', '/security/fail2ban'}:
             if self._require_auth_json():
                 try:
@@ -4106,6 +4179,12 @@ class Handler(BaseHTTPRequestHandler):
             self._write_html(500, _render_login("面板密码尚未初始化。"))
             return
         ip = _request_client_ip(self)
+        try:
+            if _ip_security().guard.blocked(ip):
+                self._write_html(429, _render_login('当前 IP 因连续认证失败暂时封禁，请到期后重试。'))
+                return
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            _log('login guard unavailable; existing login rate limit remains active')
         if not _reserve_login_attempt(ip):
             self._write_html(429, _render_login("登录失败次数过多，请稍后再试。"))
             return
@@ -4119,11 +4198,19 @@ class Handler(BaseHTTPRequestHandler):
         password = fields.get("password", [""])[0]
         if not _verify_password(password):
             _audit_event("login", actor=ip, success=False, detail={"reason": "bad_password"})
+            try:
+                _ip_security().guard.record_panel(ip, False)
+            except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                _log('panel login observation unavailable')
             self._write_html(401, _render_login("密码错误。"))
             return
 
         _clear_login_attempts(ip)
         _audit_event("login", actor=ip, success=True)
+        try:
+            _ip_security().guard.record_panel(ip, True)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            _log('panel login observation unavailable')
         self.send_response(303)
         self.send_header("Location", "ui")
         self._set_session_cookie()

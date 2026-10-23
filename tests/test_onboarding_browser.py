@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import request_gateway
+from scripts.preview_security import login_examples, protection_example
 
 playwright = pytest.importorskip('playwright.sync_api')
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,11 @@ def browser_page():
                 result = dict(sites=[], notifications={})
             elif path == '/notifications':
                 result = dict(notifications={})
+            elif path == '/security/logins':
+                result = login_examples()
+                result['items'] = result['items'][:10]
+            elif path == '/security/protection':
+                result = protection_example()
             elif path == '/nginx-requests':
                 result = state.get('nginx_requests', {'mode': 'none', 'enabled': False, 'records': [], 'notice': 'No Nginx'})
             elif path == '/caddy-requests':

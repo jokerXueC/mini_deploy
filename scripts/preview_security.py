@@ -10,6 +10,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent  # noqa: E402
 from security_center import ACTIVITY_PAGE_SIZE, finding  # noqa: E402
 from scripts.preview_operations import Handler as OperationsHandler  # noqa: E402
+from login_guard import DEFAULTS  # noqa: E402
+
+
+def login_examples():
+    now = time.time()
+    places = [('203.0.113.24', '中国 · 上海', 31.23, 121.47),
+              ('198.51.100.42', '日本 · 东京', 35.68, 139.69),
+              ('192.0.2.8', '德国 · 法兰克福', 50.11, 8.68),
+              ('203.0.113.56', '美国 · 旧金山', 37.77, -122.42)]
+    items = [{'id': 'login-demo-' + str(index), 'ts': now - index * 42, 'source': 'panel' if index % 3 == 0 else 'ssh',
+              'kind': 'login_failure' if index % 3 else 'login_success', 'ip': places[index % 4][0],
+              'account': 'root' if index % 3 else '', 'detail': '本地模拟 · 登录认证' + ('失败' if index % 3 else '成功'),
+              'location': {'label': places[index % 4][1]}}
+             for index in range(23)]
+    return {'demo': True, 'settings': dict(DEFAULTS), 'checked_at': now, 'client_ip': '127.0.0.1',
+            'ssh': {'ready': True, 'ports': [22], 'detail': '本地模拟 · SSH 临时封禁已同步到主机防火墙'},
+            'auth': {'readable': True}, 'items': items, 'page': 0, 'page_size': 10, 'total': len(items),
+            'success_24h': 8, 'failure_24h': 15, 'bans_24h': 2, 'ban_total': 2, 'ban_page': 0,
+            'bans': [{'ip': places[i][0], 'source': 'ssh', 'started': now - 300, 'expires': now + (i + 1) * 1800,
+                      'reason': '10 分钟内认证失败 5 次', 'enforced': True} for i in (1, 2)],
+            'location_total': 4,
+            'locations': [{'ip': ip, 'label': label, 'latitude': lat, 'longitude': lon,
+                           'count': sum(item['ip'] == ip for item in items),
+                           'failures': sum(item['ip'] == ip and item['kind'] == 'login_failure' for item in items),
+                           'last_at': now - i * 15}
+                          for i, (ip, label, lat, lon) in enumerate(places)]}
+
+
+def protection_example():
+    return {'demo': True, 'enabled': True, 'phase': 'on', 'busy': False, 'checked_at': time.time(), 'csrf_token': 'demo',
+            'errors': [], 'connections': {'state': 'active', 'detail': '本地模拟 · 每来源 TCP 新连接 60 次/秒，突发 120'},
+            'entries': [{'label': '网站入口', 'kind': 'nginx', 'state': 'active', 'detail': '本地模拟 · 2 个站点已启用请求与并发限制'},
+                        {'label': '业务入口', 'kind': 'caddy', 'state': 'unavailable', 'detail': '标准 Caddy 无内置请求限流；保留业务配置，使用主机连接防护'}],
+            'downloads': {'state': 'off', 'detail': '下载限速未启用，避免影响正常大文件和流式响应'}}
 
 
 def examples(jail='mini-deploy-panel'):
@@ -63,7 +97,17 @@ class Handler(OperationsHandler):
 
     def do_GET(self):  # noqa: N802
         parsed = urlparse(self.path)
-        if agent._normal_path(parsed.path) in {'/security/center', '/security/fail2ban'}:
+        if agent._normal_path(parsed.path) == '/security/protection':
+            self._write_json(200, protection_example())
+        elif agent._normal_path(parsed.path) == '/security/logins':
+            query = parse_qs(parsed.query)
+            data = login_examples()
+            source, outcome = query.get('source', ['all'])[0], query.get('outcome', ['all'])[0]
+            rows = [item for item in data['items'] if (source == 'all' or item['source'] == source) and (outcome == 'all' or item['kind'] == outcome)]
+            page = max(0, int(query.get('page', ['0'])[0]))
+            data.update(items=rows[page * 10:(page + 1) * 10], page=page, total=len(rows), csrf_token='demo')
+            self._write_json(200, data)
+        elif agent._normal_path(parsed.path) in {'/security/center', '/security/fail2ban'}:
             query = parse_qs(parsed.query)
             jail = query.get('jail', [''])[0]
             data = examples(jail)

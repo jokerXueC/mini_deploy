@@ -1,217 +1,201 @@
-"""Exercise authenticated Fail2ban UI against an isolated command runner."""
+"""Exercise the native login workspace without installing Fail2ban or changing host rules."""
+import json
+from types import SimpleNamespace
+
 import pytest
-import time
 
 import agent
-from test_ip_security import engine as engine
+import basic_protection
+from test_login_guard import guard as guard
 from test_ssh_browser import page as page, playwright
 from test_deployment_removal import http_server as http_server, runtime as runtime
-from test_security_observation import native_line
-from scripts.preview_security import examples as preview_examples
 
 
-def test_failed_refresh_marks_retained_results_unknown_and_recovers(page, http_server, monkeypatch, engine):
-    manager, _, _ = engine
-    manager.scan()
-    manager.observation = preview_examples()['observation']
-    monkeypatch.setattr(manager, 'request_scan', lambda: None)
-    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
-    page.goto(http_server.origin + '/ui?view=security')
-    playwright.expect(page.locator('#securityRiskCount')).to_have_text('3')
-    failed = False
-
-    def status_response(route):
-        if failed:
-            route.fulfill(status=503, json={'detail': '临时读取失败'})
-        else:
-            route.continue_()
-
-    page.route('**/security/center?*', status_response)
-    failed = True
-    page.locator('#ipSecurityRefresh').click()
-    playwright.expect(page.locator('#securitySummaryNote')).to_contain_text('临时读取失败')
-    playwright.expect(page.locator('#securityRiskCount')).to_have_text('—')
-    playwright.expect(page.locator('#securityRisks .security-risk')).to_have_count(3)
-    page.locator('#securityProtection > summary').click()
-    playwright.expect(page.locator('#ipSecuritySetup')).to_be_disabled()
-    failed = False
-    page.locator('#ipSecurityRefresh').click()
-    playwright.expect(page.locator('#securityRiskCount')).to_have_text('3')
-    playwright.expect(page.locator('#ipSecuritySetup')).to_be_enabled()
-
-
-@pytest.mark.parametrize('lost_submission', [False, True])
-def test_job_poll_retries_read_failure_without_resubmitting_operation(page, http_server, monkeypatch, engine, lost_submission):
-    manager, _, _ = engine
-    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
-    page.goto(http_server.origin + '/ui?view=security')
-    playwright.expect(page.locator('#ipSecurityStatus')).to_have_text('Fail2ban 运行中')
-    page.clock.install()
-    posts = []
-    polls = []
-
-    def job_response(route):
-        if route.request.method == 'POST':
-            posts.append(route.request.post_data_json)
-            route.fulfill(status=503 if lost_submission else 202, json={'job': {'state': 'running'}})
-        elif 'job=1' in route.request.url:
-            polls.append(route.request.url)
-            if len(polls) == 1:
-                route.fulfill(status=503, json={'detail': '临时读取失败'})
-            else:
-                route.fulfill(json={'job': {'state': 'succeeded', 'message': '操作验证完成'}})
-        else:
-            route.continue_()
-
-    page.route('**/security/center?*', job_response)
-    page.locator('#securityProtection > summary').click()
-    page.locator('#ipSecuritySetup').click()
-    page.locator('#confirmOkBtn').click()
-    if lost_submission:
-        playwright.expect(page.locator('#ipSecurityFeedback')).to_contain_text('提交结果暂未确认')
-        page.clock.fast_forward(1001)
-    playwright.expect(page.locator('#ipSecurityFeedback')).to_contain_text('正在重新读取结果')
-    playwright.expect(page.locator('#ipSecuritySetup')).to_be_disabled()
-    page.clock.fast_forward(5001)
-    playwright.expect(page.locator('#ipSecurityFeedback')).to_have_text('操作验证完成')
-    playwright.expect(page.locator('#ipSecuritySetup')).to_be_enabled()
-    assert len(posts) == 1 and len(polls) == 2
-
-
-@pytest.mark.parametrize('width', [1440, 390])
-def test_ban_confirmations_admin_protection_and_pause(page, http_server, monkeypatch, engine, tmp_path, width):
-    manager, state, _ = engine
-    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
-    page.set_viewport_size({'width': width, 'height': 1000})
-    page.goto(http_server.origin + '/ui?view=security')
-    playwright.expect(page.locator('#ipSecurityStatus')).to_have_text('Fail2ban 运行中')
-    page.locator('#securityProtection > summary').click()
-    page.get_by_role('combobox', name='现有防护规则').click()
-    page.get_by_role('option', name='sshd', exact=True).click()
-    playwright.expect(page.locator('#ipSecurityBanned')).to_contain_text('198.51.100.20')
-    page.locator('[data-unban-ip]').click()
-    page.locator('#confirmCancelBtn').click()
-    assert '198.51.100.20' in state['banned']['sshd']
-    page.locator('[data-unban-ip]').click()
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#ipSecurityBanned')).to_contain_text('暂无封禁')
-    page.locator('#ipSecurityAddress').fill('127.0.0.1')
-    page.locator('#ipSecurityBan').click()
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#ipSecurityFeedback')).to_contain_text('不能封禁当前访问 IP')
-    page.locator('#ipSecurityAddress').fill('198.51.100.66')
-    page.locator('#ipSecurityBan').click()
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#ipSecurityBanned')).to_contain_text('198.51.100.66')
-    page.locator('#ipSecuritySetup').click()
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#ipSecuritySetup')).to_have_text('保存面板防护设置')
-    playwright.expect(page.locator('#ipSecurityDisable')).to_be_visible()
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=str(tmp_path / f'ip-security-{width}.png'), full_page=True)
-    page.locator('#ipSecurityDisable').click()
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#ipSecurityDisable')).to_be_hidden()
-    assert 'sshd' in state['banned']
-
-
-@pytest.mark.parametrize('width', [1440, 390])
-def test_ssh_discovery_history_pagination_and_preserved_settings(page, http_server, monkeypatch, engine, tmp_path, width):
-    manager, state, root = engine
-    state['banned'].pop('sshd')
-    manager.history.log_root.mkdir()
-    (manager.history.log_root / 'fail2ban.log').write_text(''.join(
-        native_line(ip=f'198.51.100.{n}', fraction=f'{n:03}') for n in range(1, 62)))
-    manager.scan()
-    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
-    page.set_viewport_size({'width': width, 'height': 1000})
-    page.goto(http_server.origin + '/ui?view=security')
-    playwright.expect(page.locator('#ipSecuritySSHInfo')).to_contain_text('2222')
-    page.locator('#securityProtection > summary').click()
-    playwright.expect(page.locator('#ipSecuritySSHSetup')).to_be_enabled()
-    page.locator('.ip-security-settings > summary').click()
-    page.locator('#ipSecuritySettingsTarget').select_option('ssh', force=True)
-    page.locator('#ipSecurityIncrement').check()
-    page.locator('#ipSecuritySSHSetup').click()
-    playwright.expect(page.locator('#confirmMessage')).to_contain_text('2222')
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#ipSecuritySSHDisable')).to_be_visible()
-    assert 'port = 2222' in (root / 'jail.d/mini-deploy-sshd.local').read_text()
-    assert 'bantime.increment = true' in (root / 'jail.d/mini-deploy-sshd.local').read_text()
-    page.locator('#ipSecuritySettingsTarget').select_option('panel', force=True)
-    playwright.expect(page.locator('#ipSecurityIncrement')).not_to_be_checked()
-    page.locator('#ipSecurityMaxretry').fill('9')
-    page.locator('#ipSecuritySettingsTarget').select_option('ssh', force=True)
-    playwright.expect(page.locator('#ipSecurityIncrement')).to_be_checked()
-    playwright.expect(page.locator('#ipSecurityMaxretry')).to_have_value('5')
-    page.locator('#ipSecuritySettingsTarget').select_option('panel', force=True)
-    playwright.expect(page.locator('#ipSecurityMaxretry')).to_have_value('9')
-    page.locator('.ip-security-settings > summary').click()
-    page.get_by_text('Fail2ban 封禁历史', exact=True).click()
-    playwright.expect(page.locator('#ipSecurityEvents .ip-security-event')).to_have_count(50)
-    page.locator('#ipSecurityHistoryNext').click()
-    playwright.expect(page.locator('#ipSecurityEvents .ip-security-event')).to_have_count(11)
-    playwright.expect(page.locator('#ipSecurityHistoryPage')).to_contain_text('第 2 页')
-    page.locator('#ipSecurityHistoryPrev').click()
-    playwright.expect(page.locator('#ipSecurityEvents .ip-security-event')).to_have_count(50)
-    page.get_by_text('Fail2ban 封禁历史', exact=True).click()
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=str(tmp_path / f'ssh-security-{width}.png'), full_page=True)
-    page.locator('#ipSecuritySSHDisable').click()
-    page.locator('#confirmOkBtn').click()
-    playwright.expect(page.locator('#ipSecuritySSHDisable')).to_be_hidden()
+@pytest.fixture
+def native(guard, monkeypatch):
+    engine, now, kernel = guard
+    for index in range(23):
+        source = 'panel' if index % 3 == 0 else 'ssh'
+        with engine.history.connection() as db:
+            engine._event(db, source, 'login_success' if index % 3 == 0 else 'login_failure',
+                          '8.8.8.8' if index % 2 else '1.1.1.1', '<script>not markup</script>',
+                          now[0] - index * 42)
+    with engine.history.connection() as db:
+        for ip, lat, lon in [('8.8.8.8', 31.23, 121.47), ('1.1.1.1', 35.68, 139.69)]:
+            db.execute('INSERT INTO login_guard_geo VALUES (?,?,?)',
+                       (ip, now[0], json.dumps({'label': '测试 · 地区', 'latitude': lat, 'longitude': lon})))
+    monkeypatch.setattr(agent, '_ip_security', lambda: SimpleNamespace(guard=engine, observation={'ssh': {}}))
+    protection = basic_protection.Protection(engine.history.path.parent.parent, engine,
+        discovery=lambda: ([], [], []))
+    monkeypatch.setattr(agent, '_basic_protection', lambda: protection)
+    return engine, now, kernel
 
 
 @pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'light'), (320, 'dark')])
-def test_security_center_risks_unified_events_filters_and_refresh(page, http_server, monkeypatch, engine, tmp_path, width, theme):
-    manager, _, _ = engine
-    manager.scan()
-    manager.observation = preview_examples()['observation']
-    monkeypatch.setattr(manager, 'request_scan', lambda: None)
-    monkeypatch.setattr(agent, '_ip_security', lambda: manager)
-    now = time.time()
-    with manager.history.connection() as db:
-        for n in range(9):
-            db.execute('INSERT INTO security_activity VALUES (?,?,?,?,?,?,?,?)',
-                       (str(n), now - 5 - n, 'ssh', 'login_failure', f'198.51.100.{n + 1}', 'root', 'SSH', 'SSH password 认证失败'))
-        db.execute('INSERT INTO security_activity VALUES (?,?,?,?,?,?,?,?)', ('success', now - 100, 'ssh', 'login_success', '192.0.2.8', 'deploy', 'SSH', '认证成功'))
-        db.execute('INSERT INTO security_activity VALUES (?,?,?,?,?,?,?,?)', ('change', now - 110, 'config', 'config_change', '', '', '/etc/crontab', '检测到内容摘要变化'))
-        db.execute('INSERT INTO events VALUES (?,?,?,?,?,?)', ('ban', now - 120, 'sshd', 'ban', '192.0.2.3', 'Fail2ban 封禁'))
+def test_login_map_real_records_filter_pagination_theme_and_retained_errors(page, http_server, native, tmp_path, width, theme):
     page.set_viewport_size({'width': width, 'height': 1000})
-    page.add_init_script(f"try {{ localStorage.setItem('mini_deploy-theme','{theme}'); }} catch (_) {{}}")
-    errors = []
-    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.add_init_script('try { localStorage.setItem("mini_deploy-theme", ' + json.dumps(theme) + ') } catch (_) {}')
     page.goto(http_server.origin + '/ui?view=security')
-    playwright.expect(page.locator('#panelTitle')).to_have_text('安全中心')
-    playwright.expect(page.locator('#securityRiskCount')).to_have_text('3')
-    assert page.locator('#securityProtection').get_attribute('open') is None
-    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(10)
-    playwright.expect(page.locator('#securityActivityPage')).to_have_text('第 1 / 2 页 · 1–10 条，共 12 条')
-    playwright.expect(page.locator('#securityActivityPrev')).to_be_disabled()
-    playwright.expect(page.locator('#securityActivityNext')).to_be_enabled()
-    assert page.locator('#securityActivityList').evaluate('(el) => el.scrollHeight <= el.clientHeight + 1')
-    page.screenshot(path=str(tmp_path / f'security-pagination-{width}-{theme}.png'), full_page=True)
+    playwright.expect(page.locator('#securityActivityList .security-login-row')).to_have_count(10)
+    playwright.expect(page.locator('#securityMapLand path').first).to_be_visible()
+    playwright.expect(page.locator('#securityMapDots circle')).to_have_count(2)
+    assert page.locator('#securityCoverage, #securityRisks, #ipSecurityJail').count() == 0
+    assert page.locator('body').evaluate('el => el.scrollWidth <= innerWidth')
+    assert page.locator('#securityMapDots circle').first.evaluate('el => getComputedStyle(el).animationName') == 'none'
+    assert page.locator('#securityMap').evaluate('el => el.getBoundingClientRect().height') > 100
+    assert page.locator('#securityMapLand path').first.evaluate('el => el.getBBox().width') > 1
     page.locator('#securityActivityNext').click()
-    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(2)
-    playwright.expect(page.locator('#securityActivityPage')).to_have_text('第 2 / 2 页 · 11–12 条，共 12 条')
+    playwright.expect(page.locator('#securityActivityPage')).to_contain_text('第 2 / 3 页')
+    page.locator('#securityActivityNext').click()
+    playwright.expect(page.locator('#securityActivityList .security-login-row')).to_have_count(3)
     playwright.expect(page.locator('#securityActivityNext')).to_be_disabled()
-    page.locator('#securityActivityPrev').click()
-    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(10)
-    playwright.expect(page.locator('#securityActivityPrev')).to_be_disabled()
-    page.get_by_role('combobox', name='事件来源').click()
-    page.get_by_role('option', name='配置变化', exact=True).click()
-    playwright.expect(page.locator('#securityActivityList .security-event')).to_have_count(1)
-    playwright.expect(page.locator('#securityActivityList')).to_contain_text('/etc/crontab')
-    page.locator('#securityActivityList summary').click()
-    page.locator('.security-risk summary').first.click()
+    page.get_by_role('combobox', name='结果', exact=True).click()
+    page.get_by_role('option', name='登录成功', exact=True).click()
+    playwright.expect(page.locator('#securityActivityList .security-login-row')).to_have_count(8)
+    playwright.expect(page.locator('#securityActivityPage')).to_contain_text('第 1 / 1 页')
+    assert page.locator('#securityActivityList script').count() == 0
+    page.locator('#securityActivityList summary').first.click()
+    playwright.expect(page.locator('#securityActivityList details').first).to_contain_text('<script>not markup</script>')
+    page.route('**/security/logins?*', lambda route: route.fulfill(status=503, json={'detail': '临时读取失败'}))
+    page.locator('#ipSecurityRefresh').click()
+    playwright.expect(page.locator('#securitySummaryNote')).to_contain_text('临时读取失败')
+    playwright.expect(page.locator('#securityActivityList .security-login-row')).to_have_count(8)
+    playwright.expect(page.locator('#securityGuardToggle')).to_be_disabled()
+    page.screenshot(path=str(tmp_path / ('login-security-' + str(width) + '-' + theme + '.png')), full_page=True)
+
+
+def test_policy_draft_survives_refresh_and_save_protects_current_client(page, http_server, native):
+    engine, _, _ = native
+    page.goto(http_server.origin + '/ui?view=security')
+    playwright.expect(page.locator('#securityGuardToggle')).to_be_enabled()
+    assert not page.locator('#securityPolicyForm').is_visible()
+    page.locator('#securityPolicyOpen').click()
+    page.locator('#securityMaxretry').fill('7')
+    page.locator('#securityIgnore').fill('192.168.0.0/16')
     page.locator('#ipSecurityRefresh').click()
     playwright.expect(page.locator('#ipSecurityRefresh')).to_be_enabled()
-    assert page.locator('.security-risk').first.get_attribute('open') is not None
-    assert page.locator('#securityActivityList details').get_attribute('open') is not None
-    page.get_by_role('combobox', name='检查范围').click()
-    page.get_by_role('option', name='容器权限', exact=True).click()
-    playwright.expect(page.locator('.security-risk')).to_have_count(1)
-    playwright.expect(page.locator('.security-risk')).to_contain_text('Docker 控制接口')
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    assert not errors
-    page.screenshot(path=str(tmp_path / f'security-center-{width}-{theme}.png'), full_page=True)
+    assert page.locator('#securityMaxretry').input_value() == '7'
+    page.locator('#securityPolicyForm button[type=submit]').click()
+    playwright.expect(page.locator('#ipSecurityFeedback')).to_have_text('已保存。')
+    playwright.expect(page.locator('#securityPolicySummary')).to_contain_text('失败 7 次')
+    settings = engine.status()['settings']
+    assert '127.0.0.1/32' in settings['ignoreip'] and '192.168.0.0/16' in settings['ignoreip']
+    assert settings['maxretry'] == 7
+    page.locator('#securityGuardToggle').click()
+    playwright.expect(page.locator('#confirmModal')).to_be_visible()
+    page.locator('#confirmCancelBtn').click()
+    assert engine.status()['settings']['enabled']
+    page.locator('#securityGuardToggle').click()
+    page.locator('#confirmOkBtn').click()
+    playwright.expect(page.locator('#securityGuardToggle')).to_have_attribute('aria-checked', 'false')
+    assert not engine.status()['settings']['enabled']
+
+
+def test_auto_refresh_displays_new_logins_and_unban_preserves_records(page, http_server, native):
+    engine, now, _ = native
+    page.clock.install()
+    page.goto(http_server.origin + '/ui?view=security')
+    playwright.expect(page.locator('#securityActivityList .security-login-row')).to_have_count(10)
+    before = engine.status()['total']
+    now[0] += 1
+    engine.record_panel('9.9.9.9', False)
+    page.clock.fast_forward(5100)
+    playwright.expect(page.locator('#securityActivityList')).to_contain_text('9.9.9.9')
+    playwright.expect(page.locator('#securityActivityPage')).to_contain_text('共 24 条')
+    with engine.history.connection() as db:
+        db.execute('INSERT INTO login_guard_bans VALUES (?,?,?,?,?)', ('9.9.9.9', 'panel', now[0], now[0] + 3600, '连续失败'))
+    page.locator('#ipSecurityRefresh').click()
+    playwright.expect(page.locator('#securityBans [data-unban="9.9.9.9"]')).to_have_count(1)
+    page.locator('#securityBans [data-unban="9.9.9.9"]').click()
+    page.locator('#confirmOkBtn').click()
+    playwright.expect(page.locator('#securityBans [data-unban="9.9.9.9"]')).to_have_count(0)
+    assert engine.status()['total'] == before + 1
+
+
+@pytest.mark.parametrize('width,theme', [(1440, 'dark'), (390, 'light'), (320, 'dark')])
+def test_map_point_details_group_ips_counts_keyboard_and_refresh(page, http_server, native, tmp_path, width, theme):
+    engine, now, _ = native
+    with engine.history.connection() as db:
+        db.execute('UPDATE login_guard_geo SET value=?',
+                   (json.dumps({'label': '测试 · 同一地区', 'latitude': 31.23, 'longitude': 121.47}),))
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.add_init_script('try { localStorage.setItem("mini_deploy-theme", ' + json.dumps(theme) + ') } catch (_) {}')
+    page.clock.install()
+    page.goto(http_server.origin + '/ui?view=security')
+    point = page.locator('#securityMapDots [role=button]')
+    playwright.expect(point).to_have_count(1)
+    playwright.expect(page.locator('#securityMapDetail')).to_be_hidden()
+    point.click()
+    playwright.expect(page.locator('#securityMapDetailTitle')).to_have_text('测试 · 同一地区')
+    playwright.expect(page.locator('#securityMapDetailBody')).to_contain_text('2 个 IP · 23 次登录')
+    rows = page.locator('.security-map-ip')
+    playwright.expect(rows).to_have_count(2)
+    playwright.expect(rows.nth(0)).to_contain_text('1.1.1.1')
+    playwright.expect(rows.nth(0).locator('b')).to_have_text('12 次')
+    playwright.expect(rows.nth(0).locator('p')).to_have_text('成功 4失败 8')
+    playwright.expect(rows.nth(1)).to_contain_text('8.8.8.8')
+    playwright.expect(rows.nth(1).locator('b')).to_have_text('11 次')
+    playwright.expect(rows.nth(1).locator('p')).to_have_text('成功 4失败 7')
+    playwright.expect(page.locator('#securityRegions')).to_be_hidden()
+    point.focus()
+    point.evaluate('el => { window.originalMapPoint = el; }')
+    now[0] += 1
+    engine.record_panel('1.1.1.1', True)
+    page.clock.fast_forward(5100)
+    playwright.expect(page.locator('#securityMapDetailBody')).to_contain_text('24 次登录')
+    playwright.expect(rows.nth(0).locator('p')).to_have_text('成功 5失败 8')
+    assert point.evaluate('el => el === window.originalMapPoint && document.activeElement === el')
+    assert page.locator('body').evaluate('el => el.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / ('map-detail-' + str(width) + '-' + theme + '.png')), full_page=True)
+    page.keyboard.press('Escape')
+    playwright.expect(page.locator('#securityMapDetail')).to_be_hidden()
+    playwright.expect(page.locator('#securityRegions')).to_be_visible()
+    playwright.expect(point).to_be_focused()
+    page.keyboard.press('Enter')
+    playwright.expect(page.locator('#securityMapDetail')).to_be_visible()
+    page.locator('#securityMapDetailClose').click()
+    playwright.expect(point).to_be_focused()
+    page.keyboard.press('Space')
+    playwright.expect(page.locator('#securityMapDetail')).to_be_visible()
+
+
+def test_basic_protection_click_progress_failure_and_explicit_coverage(page, http_server, native, tmp_path):
+    state = {'enabled': False, 'phase': 'off', 'entries': [], 'errors': [], 'busy': False, 'csrf_token': 'test'}
+    posts = []
+
+    def route_api(route):
+        if route.request.method == 'POST':
+            posts.append(route.request.post_data_json)
+            state.update(enabled=True, busy=True, phase='applying')
+            route.fulfill(status=202, json=state)
+        else:
+            route.fulfill(json=state)
+
+    page.route('**/security/protection', route_api)
+    page.clock.install()
+    page.goto(http_server.origin + '/ui?view=security')
+    toggle = page.locator('#securityBasicToggle')
+    playwright.expect(toggle).to_be_enabled()
+    assert not page.locator('#securityBasicDetails').evaluate('el => el.open')
+    toggle.click()
+    playwright.expect(toggle).to_be_disabled()
+    playwright.expect(page.locator('#securityBasicSummary')).to_contain_text('正在检测并应用')
+    assert posts == [{'enabled': True}]
+    state.update(busy=False, phase='on', connections={'state': 'active', 'detail': 'TCP 新连接限制'},
+                 entries=[{'state': 'unavailable', 'label': 'Caddy', 'detail': '无内置请求限流，原配置保留'}])
+    page.clock.fast_forward(5100)
+    playwright.expect(toggle).to_be_enabled()
+    playwright.expect(page.locator('#securityBasicSummary')).to_contain_text('部分能力未接入')
+    page.locator('#securityBasicDetails summary').click()
+    playwright.expect(page.locator('#securityBasicCoverage')).to_contain_text('无内置请求限流')
+    for width, theme in [(1440, 'dark'), (320, 'light')]:
+        page.set_viewport_size({'width': width, 'height': 900})
+        page.evaluate('(theme) => applyTheme(theme)', theme)
+        page.clock.run_for(350)
+        assert page.locator('body').evaluate('el => el.scrollWidth <= innerWidth')
+        page.screenshot(path=str(tmp_path / ('basic-coverage-' + str(width) + '.png')), full_page=True, animations='disabled')
+    page.route('**/security/protection', lambda route: route.fulfill(status=503, json={'detail': '状态暂不可读'}))
+    page.clock.fast_forward(5100)
+    playwright.expect(page.locator('#securityBasicFeedback')).to_contain_text('状态暂不可读')
+    playwright.expect(toggle).to_be_disabled()
+    playwright.expect(toggle).to_have_attribute('aria-checked', 'true')
