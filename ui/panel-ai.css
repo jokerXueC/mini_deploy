@@ -2,6 +2,10 @@
 .panel-ai-toolbar, .panel-ai-compose { padding: 12px 22px; }
 .panel-ai-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; border-bottom: 1px solid var(--line); }
 .panel-ai-toolbar p { flex: 1 1 240px; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.panel-ai-code { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 22px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.panel-ai-code select { flex: 1 1 240px; min-width: 0; max-width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--field-bg); color: var(--fg); font: inherit; }
+.panel-ai-code .form-select { flex: 1 1 240px; min-width: 0; }
+.panel-ai-code > span { width: 100%; overflow-wrap: anywhere; color: var(--muted); }
 .panel-ai-messages { flex: 1; overflow: auto; min-height: 100px; padding: 16px 22px; }
 .panel-ai-entry { margin-bottom: 24px; }
 .panel-ai-question { font-size: 13px; margin: 0 0 12px; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -18,5 +22,5 @@ html[data-theme=light] .panel-ai-loading img { filter: none; }
 .panel-ai-bottom p { flex: 1; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .panel-ai-http { padding: 12px 22px; font-size: 12px; }
 .panel-ai-http label { display: block; margin-bottom: 8px; }
-@media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-http { padding-left: 14px; padding-right: 14px; } }
+@media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-http, .panel-ai-code { padding-left: 14px; padding-right: 14px; } }
 @media (prefers-reduced-motion:reduce) { .panel-ai-loading img { animation: none; } }

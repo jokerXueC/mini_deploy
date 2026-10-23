@@ -2,8 +2,26 @@
 const DashboardMotion = (() => {
   const states = new WeakMap();
   const readings = new WeakMap();
+  const viewports = new WeakMap();
   const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const ease = t => t * t * (3 - 2 * t);
+
+  function followLatest(element, scope) {
+    if (!element) return;
+    let state = viewports.get(element);
+    if (!state) {
+      state = {scope, following: true};
+      viewports.set(element, state);
+      element.addEventListener('scroll', () => {
+        state.following = element.scrollWidth - element.clientWidth - element.scrollLeft < 8;
+      }, {passive: true});
+    }
+    if (scope !== undefined && state.scope !== scope) {
+      state.scope = scope;
+      state.following = true;
+    }
+    if (state.following) element.scrollLeft = element.scrollWidth;
+  }
 
   // Keep text on real samples; chart and bar interpolation is independent.
   function reading(element, target, formatter, interval = 3000) {
@@ -190,5 +208,5 @@ const DashboardMotion = (() => {
     if (changes.length) value(svg, 1, t => changes.forEach(draw => draw(t)), {initial: 0, duration: 850});
   }
 
-  return {value, reading, cancel, curve, show, morph, reduced};
+  return {value, reading, cancel, curve, show, morph, reduced, followLatest};
 })();

@@ -52,7 +52,7 @@ html[data-theme="light"] #serverView {
 .load-map-heading > span { color: var(--muted); font-size: 12px; }
 .load-map-grid { display: grid; gap: 5px; }
 .load-map-row { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 12px; align-items: center; }
-.load-map-label { font-size: 11px; color: var(--muted); }
+.load-map-label { position: sticky; left: 0; z-index: 1; background: var(--monitor-surface); box-shadow: 8px 0 0 var(--monitor-surface); font-size: 11px; color: var(--muted); }
 .load-map-scroll { overflow-x: auto; padding: 3px; }
 .load-map-time { min-width: 560px; }
 .load-map-tiles { display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); gap: 3px; }

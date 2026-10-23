@@ -77,7 +77,7 @@ def test_automatic_poll_updates_existing_canvas_preserves_reading_and_stops_when
     frame = page.frame_locator('#serverPerformanceFrame')
     playwright.expect(frame.locator('#summary')).to_contain_text('CPU', timeout=15000)
     frame.locator('canvas').first.evaluate('(canvas) => { window.originalCanvas = canvas; window.beforePixels = Array.from(canvas.getContext("2d").getImageData(0,0,canvas.width,canvas.height).data).join(","); window.liveMarker = 1; }')
-    original_url = page.locator('#serverPerformanceFrame').get_attribute('src')
+    original_document = page.locator('#serverPerformanceFrame').get_attribute('srcdoc')
     frame.locator('#sceneAbnormal').check()
     frame.locator('#sceneRows button').first.click()
     frame.locator('.scene-detail:not([hidden]) summary').first.click()
@@ -91,7 +91,7 @@ def test_automatic_poll_updates_existing_canvas_preserves_reading_and_stops_when
     page.clock.run_for(15500)
     playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text(f'{expected_count} 次有效采样')
     page.clock.run_for(550)
-    assert page.locator('#serverPerformanceFrame').get_attribute('src') == original_url
+    assert page.locator('#serverPerformanceFrame').get_attribute('srcdoc') == original_document
     assert frame.locator('body').evaluate('() => window.liveMarker') == 1
     assert frame.locator('canvas').first.evaluate('(canvas) => canvas === window.originalCanvas')
     assert frame.locator('canvas').first.evaluate('(canvas) => Array.from(canvas.getContext("2d").getImageData(0,0,canvas.width,canvas.height).data).join(",") !== window.beforePixels')
@@ -117,12 +117,12 @@ def test_background_poll_errors_keep_report_and_hidden_page_stops_polling(page, 
     page.locator('#serverPerformanceOpen').click()
     frame = page.frame_locator('#serverPerformanceFrame')
     playwright.expect(frame.locator('#summary')).to_contain_text('CPU', timeout=15000)
-    url = page.locator('#serverPerformanceFrame').get_attribute('src')
+    document = page.locator('#serverPerformanceFrame').get_attribute('srcdoc')
     original = demo.query
     monkeypatch.setattr(demo, 'query', lambda *args: (_ for _ in ()).throw(OSError('disk full')))
     page.clock.run_for(15500)
     playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text('保留当前图表')
-    assert page.locator('#serverPerformanceFrame').get_attribute('src') == url
+    assert page.locator('#serverPerformanceFrame').get_attribute('srcdoc') == document
     monkeypatch.setattr(demo, 'query', original)
     page.evaluate("Object.defineProperty(document, 'hidden', {get: () => true, configurable: true}); document.dispatchEvent(new Event('visibilitychange'))")
     polls = []
@@ -142,7 +142,7 @@ def test_open_scene_survives_leaving_the_rolling_range_and_manual_refresh_keeps_
     playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text('已读取')
     frame.locator('#sceneRows button').first.click()
     playwright.expect(frame.locator('.scene-detail:not([hidden])')).to_contain_text('aimore-cloud')
-    original_url = page.locator('#serverPerformanceFrame').get_attribute('src')
+    original_document = page.locator('#serverPerformanceFrame').get_attribute('srcdoc')
     data = demo.query('1h')
     data['contexts'], data['context_details'] = [], []
     page.evaluate("next => document.getElementById('serverPerformanceFrame').contentWindow.postMessage({type:'performance-report-update', data:next}, '*')", data)
@@ -151,4 +151,4 @@ def test_open_scene_survives_leaving_the_rolling_range_and_manual_refresh_keeps_
     page.locator('#serverPerformanceRefresh').click()
     playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text('已更新')
     assert page.locator('[data-server-period="1h"]').get_attribute('aria-pressed') == 'true'
-    assert page.locator('#serverPerformanceFrame').get_attribute('src') == original_url
+    assert page.locator('#serverPerformanceFrame').get_attribute('srcdoc') == original_document

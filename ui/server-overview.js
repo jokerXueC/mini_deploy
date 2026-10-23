@@ -109,7 +109,7 @@ window.ServerOverview = (() => {
     const interval = Math.max(30, Number(history?.interval_seconds) || 30);
     const now = Number.isFinite(Date.parse(history?.until)) ? Date.parse(history.until) / 1000 : Date.now() / 1000;
     // Keep saved sampling intervals wholly within a tile, including its process scenes.
-    const windowEnd = Math.ceil(now / interval) * interval;
+    let windowEnd = Math.ceil(now / interval) * interval;
     const windowSeconds = range === 'realtime' ? 1800 : range === '1h' ? 3600 : range === '6h' ? 21600 : period === '7d' ? 604800 : 86400;
     const points = (history?.points || []).filter(point => Number.isFinite(point.ts) && point.ts >= now - windowSeconds && point.ts <= now)
       .map(point => {
@@ -119,6 +119,8 @@ window.ServerOverview = (() => {
           network_total_kbps: rx == null || tx == null ? null : rx + tx};
       })
       .slice().sort((a, b) => a.ts - b.ts);
+    // Tile ends are exclusive; include a sample exactly on the current boundary.
+    if (points.at(-1)?.ts === windowEnd) windowEnd += interval;
     // Keep gaps visible in the shared chart instead of connecting unrelated samples.
     const filled = [];
     points.forEach(point => {
@@ -135,7 +137,7 @@ window.ServerOverview = (() => {
       emptyMessage: historyError ? '历史暂时无法读取，将自动重试' : history?.error ? '历史采样保存失败，请查看上方原因'
         : history?.stale || !points.length && history?.last_saved_at ? '所选时段没有新的已保存采样' : '',
       contexts: history?.contexts || [],
-      hint: `${select.selectedOptions[0]?.textContent} · ${rangeLabel} · 每 30 秒采集 · ${points.length} 个时间点${target ? ' · 区间均值' : ''}`};
+      hint: `${select.selectedOptions[0]?.textContent} · ${rangeLabel} · 每 30 秒采集 · ${points.length} 个时间点${target ? ' · 区间均值' : ''}${points.length ? ` · 最新 ${clock(points.at(-1).ts)}` : ''}`};
     return derived;
   }
   const number = value => value == null || value === '' || typeof value === 'boolean' || !Number.isFinite(Number(value))
@@ -391,6 +393,7 @@ window.ServerOverview = (() => {
       : history?.stale || history?.last_saved_at ? '所选时段没有已保存的采样'
       : request ? '正在读取已保存的采样…' : requestKey ? '所选时段暂无采样，首次保存通常需要 30 秒' : '等待首次采样';
     highlight();
+    DashboardMotion.followLatest(grid.closest('.load-map-scroll'), options.viewportKey);
   }
   return {update, source, pause};
 })();

@@ -61,6 +61,7 @@ import http_limits
 import ssh_terminal
 import terminal_ai
 import panel_diagnostics
+import panel_code
 import ip_security
 import basic_protection
 import terminal_history
@@ -2559,6 +2560,42 @@ def _operations_inventory(sort="cpu", pid=None) -> dict[str, Any]:
     return _operations().inventory(docker, sort, pid)
 
 
+_panel_code_catalog_instance = None
+
+
+def _panel_code_docker():
+    with _system_status_lock:
+        containers = ((_system_status_cache.get('payload') or {}).get('docker') or {}).get('containers') or []
+        identifiers = [c['id'] for c in containers if re.fullmatch('[a-f0-9]{64}', str(c.get('id', '')))][:256]
+    result, deadline = [], time.monotonic() + 4
+    template = ('{"id":{{json .Id}},"working_dir":{{json (index .Config.Labels '
+                '"com.docker.compose.project.working_dir")}},"mounts":{{json .Mounts}}}')
+    for offset in range(0, len(identifiers), 32):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        code, output = _run_command(['docker', 'inspect', '--type', 'container', '--format', template,
+                                     *identifiers[offset:offset + 32]], timeout=min(2, remaining))
+        if code:
+            continue
+        for line in output.splitlines():
+            try:
+                item = json.loads(line)
+                result.append({'id': item['id'], 'working_dir': item.get('working_dir'),
+                    'binds': [m['Source'] for m in item.get('mounts', []) if m.get('Type') == 'bind']})
+            except (ValueError, KeyError, TypeError):
+                continue
+    return result
+
+
+def _panel_code_catalog():
+    global _panel_code_catalog_instance
+    excluded = (Path(__file__).resolve().parent, STATE_FILE.parent.absolute())
+    if _panel_code_catalog_instance is None or _panel_code_catalog_instance.excluded != excluded:
+        _panel_code_catalog_instance = panel_code.Catalog(excluded=excluded, docker=_panel_code_docker)
+    return _panel_code_catalog_instance
+
+
 def _incident_diagnostics(key: str, sort="cpu", pid=None) -> dict[str, Any]:
     snapshot = _monitor().snapshot()
     item = next((row for row in snapshot["alerts"] + snapshot["events"] if row.get("id") == key), None)
@@ -3052,6 +3089,21 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             if not self._terminal_access_allowed():
                 self.close_connection = True
                 raise terminal_ai.AIError("请先在远程终端确认允许本次登录使用 HTTP，或改用 HTTPS / 本地隧道。", 403)
+            if self.command == 'GET' and path == '/terminal-ai/code-projects':
+                refresh = parse_qs(parsed.query).get('refresh', [''])[0] == '1'
+                projects = _panel_code_catalog().snapshot(refresh=refresh) if panel_code.supported() else []
+                incident_id = parse_qs(parsed.query).get('incident_id', [''])[0]
+                selected = ''
+                if incident_id and len(incident_id) <= 200:
+                    snapshot = _monitor().snapshot()
+                    incident = next((r for r in snapshot['alerts'] + snapshot['events'] if r.get('id') == incident_id), {})
+                    meta = incident.get('metadata') or {}
+                    container = meta.get('container_id') or meta.get('id')
+                    matches = [p for p in projects if container in p['containers']]
+                    if len(matches) == 1:
+                        selected = matches[0]['id']
+                self._write_json(200, {'projects': projects, 'recommended': selected, 'supported': panel_code.supported()})
+                return
             if self.command == "GET" and path == "/terminal-ai/jobs":
                 key = parse_qs(parsed.query).get("id", [""])[0]
                 self._write_json(200, manager.job(owner, key))
@@ -3093,13 +3145,22 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                 except (OSError, UnicodeError):
                     identity = str(STATE_FILE.parent.resolve())
                 target = f'面板主机：{socket.gethostname()} / {hashlib.sha256(identity.encode()).hexdigest()[:12]}'
+                project_id = data.get('code_project', '')
+                code_reader = None
+                if project_id:
+                    catalog = _panel_code_catalog()
+                    code_reader = panel_code.Reader(catalog.project(project_id), excluded=catalog.excluded)
+                    target += f" · 代码范围：{code_reader.project['path']}"
+                elif not isinstance(project_id, str):
+                    raise panel_code.CodeError('代码项目编号无效')
                 try:
                     backend = panel_diagnostics.Backend(data.get('selection', {'kind': 'overview'}), target,
                         incident=_incident_diagnostics, history=_server_performance, monitor=lambda: _monitor().snapshot(),
-                        realtime=lambda: _realtime_metrics_payload()['server'], logs=lambda source, **options: _operations().logs(source, **options))
+                        realtime=lambda: _realtime_metrics_payload()['server'], logs=lambda source, **options: _operations().logs(source, **options),
+                        code=code_reader)
                 except ValueError as exc:
                     raise terminal_ai.AIError(str(exc)) from exc
-                result = manager.submit(owner, action='chat', data=data, session_id='panel-monitoring',
+                result = manager.submit(owner, action='chat', data=data, session_id='panel-monitoring' + (':' + project_id if project_id else ''),
                     target=target, executor=backend.execute, evidence_backend=backend)
                 result['target'] = target
                 _audit_event('ai_panel_diagnosis', actor=self.client_address[0], target=target, success=True,
@@ -3163,7 +3224,7 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                 raise terminal_ai.AIError("不支持的模型操作。", 404)
             self._write_json(200, result)
         except (terminal_ai.AIError, ssh_terminal.SSHError, ValueError, OSError) as exc:
-            detail = str(exc) if isinstance(exc, (terminal_ai.AIError, ssh_terminal.SSHError, terminal_history.HistoryError)) else (
+            detail = str(exc) if isinstance(exc, (terminal_ai.AIError, ssh_terminal.SSHError, terminal_history.HistoryError, panel_code.CodeError)) else (
                 "无法读写模型配置，请检查目录权限；原文件已保留。")
             self._write_json(getattr(exc, "status", 400), {"error": "ai_failed", "detail": detail})
 

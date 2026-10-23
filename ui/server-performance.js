@@ -11,7 +11,7 @@
   aiAnalyze.className = 'ghost-button compact-action'; aiAnalyze.textContent = 'AI 分析';
   dialog.querySelector('.server-performance-actions').append(aiAnalyze);
   aiAnalyze.addEventListener('click', () => { const selected = period; dialog.close(); window.PanelAI.open({kind:'performance', period:selected}); });
-  let period = '24h', controller, revision = 0, requestVersion = 0, url = '', busy = false;
+  let period = '24h', controller, revision = 0, requestVersion = 0, busy = false;
   let ready = false, refreshing = false, timer, liveController, contextController, etag = '';
   let retryInitial = false, failures = 0;
   async function requestHistory(path, options = {}, format = 'json') {
@@ -20,7 +20,7 @@
     options.signal?.addEventListener('abort', cancel, {once:true});
     if (options.signal?.aborted) cancel();
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; abort.abort(); }, format === 'blob' ? 60000 : 30000);
+    const timeout = setTimeout(() => { timedOut = true; abort.abort(); }, format === 'json' ? 30000 : 60000);
     try {
       const response = await fetch(path, {...options, credentials:'same-origin', cache:'no-store', signal:abort.signal});
       if (response.status === 304) return {response};
@@ -30,7 +30,7 @@
         error.retry = response.status === 409 || response.status === 429 || response.status >= 500;
         throw error;
       }
-      return {response, data:format === 'blob' ? await response.blob() : await response.json()};
+      return {response, data:format === 'blob' ? await response.blob() : format === 'text' ? await response.text() : await response.json()};
     } catch (error) {
       if (timedOut) throw Object.assign(new Error('性能历史读取超时，请检查服务器连接或稍后重试。'), {retry:true});
       if (error.name === 'AbortError' || typeof error.retry === 'boolean') throw error;
@@ -57,7 +57,7 @@
   }
   function clearFrame() {
     stopAutomatic(); contextController?.abort(); contextController = new AbortController(); ready = false; etag = ''; revision++;
-    if (url) URL.revokeObjectURL(url); url = ''; $('serverPerformanceFrame').removeAttribute('src'); $('serverPerformanceFrame').hidden = true;
+    $('serverPerformanceFrame').removeAttribute('srcdoc'); $('serverPerformanceFrame').hidden = true;
   }
   async function refreshData(force = false) {
     clearTimeout(timer);
@@ -92,11 +92,14 @@
     try {
       const parameters = new URLSearchParams({period, format, theme: format === 'html' ? document.documentElement.dataset.theme || 'light' : 'light'});
       if (format === 'html') parameters.set('preview', '1');
-      const {response, data:blob} = await requestHistory(`performance/server/export?${parameters}`, {signal:controller.signal}, 'blob');
+      const {response, data} = await requestHistory(`performance/server/export?${parameters}`, {signal:controller.signal}, format === 'html' ? 'text' : 'blob');
       if (run !== requestVersion || !dialog.open) return;
-      const target = URL.createObjectURL(blob), count = response.headers.get('X-Performance-Samples') || '0';
-      if (format === 'html') { failures = 0; url = target; $('serverPerformanceFrame').src = target; $('serverPerformanceFrame').hidden = false; }
+      const count = response.headers.get('X-Performance-Samples') || '0';
+      // WebKit applies the parent's frame-ancestors policy to Blob URLs.
+      // srcdoc keeps the sandbox and the report's own CSP without that inherited navigation.
+      if (format === 'html') { failures = 0; $('serverPerformanceFrame').srcdoc = data; $('serverPerformanceFrame').hidden = false; }
       else {
+        const target = URL.createObjectURL(data);
         const link = document.createElement('a'); link.href = target;
         link.download = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '')?.[1] || `mini-deploy-performance.${format}`;
         document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(target), 60000);

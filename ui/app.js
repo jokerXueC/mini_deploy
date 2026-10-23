@@ -1064,7 +1064,8 @@ function renderSystemTrend(system = {}) {
   const signature = JSON.stringify([observation?.target, observation?.revision, systemTrendRange, intervalSeconds, points, availability]);
   if (chart.dataset.signature === signature) return;
   chart.dataset.signature = signature;
-  window.ServerOverview?.update(points, {realtime, intervalSeconds, container, ...observation});
+  const viewportKey = JSON.stringify([systemTrendRange, observation?.target || '']);
+  window.ServerOverview?.update(points, {realtime, intervalSeconds, container, ...observation, viewportKey});
   const intervalMinutes = Math.round(Number(system.history_interval_seconds || 1800) / 60);
   const latest = points[points.length - 1] || (observation ? {} : rawHistory[0]) || {};
   const hint = $('systemTrendHint');
@@ -1101,6 +1102,7 @@ function renderSystemTrend(system = {}) {
   const cards = Array.from(chart.querySelectorAll('.trend-card'));
   if (cards.length !== metricKeys.length) {
     chart.replaceChildren(template.content);
+    chart.querySelectorAll('.trend-chart-scroll').forEach(scroll => DashboardMotion.followLatest(scroll, viewportKey));
     DashboardMotion.reading(chart.querySelector('.cpu .trend-card-head strong'), latest.cpu_percent, formatPercent);
     return;
   }
@@ -1122,11 +1124,11 @@ function renderSystemTrend(system = {}) {
     }
     if (!svg || !nextSvg) {
       card.replaceWith(next);
+      DashboardMotion.followLatest(next.querySelector('.trend-chart-scroll'), viewportKey);
       if (i === 0) DashboardMotion.reading(next.querySelector('strong'), latest.cpu_percent, formatPercent);
       return;
     }
     const scroll = card.querySelector('.trend-chart-scroll');
-    const atEnd = scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft < 8;
     card.style.cssText = next.style.cssText;
     ['.trend-card-head', '.trend-card-meta', '.trend-card-foot', '.trend-window-stats'].forEach(selector => {
       if (i === 0 && selector === '.trend-card-head') {
@@ -1136,7 +1138,7 @@ function renderSystemTrend(system = {}) {
       card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
     });
     DashboardMotion.morph(svg, nextSvg);
-    if (atEnd) scroll.scrollLeft = scroll.scrollWidth;
+    DashboardMotion.followLatest(scroll, viewportKey);
   });
 }
 
@@ -1623,6 +1625,7 @@ function refreshResourceTracks() {
 }
 
 window.addEventListener('resize', () => {
+  document.querySelectorAll('.load-map-scroll, .trend-chart-scroll').forEach(scroll => DashboardMotion.followLatest(scroll));
   if (resourceResizeTimer) window.clearTimeout(resourceResizeTimer);
   resourceResizeTimer = window.setTimeout(refreshResourceTracks, 120);
 });

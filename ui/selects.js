@@ -2,7 +2,7 @@
 window.AppSelects = (() => {
   const controls = new Map();
   let opened = null;
-  const selector = '#observationTarget, #certificatesView select, #projectForm select, #requestsView select, #eventsView select, #terminalView select, #securityView select, #containerLogsModal select, #operationsDialog select, #maintenanceDialog select, #requestExportDialog select';
+  const selector = '#observationTarget, #certificatesView select, #projectForm select, #requestsView select, #eventsView select, #terminalView select, #securityView select, #containerLogsModal select, #operationsDialog select, #maintenanceDialog select, #requestExportDialog select, #panelAIDialog select';
   const anchorObserver = new ResizeObserver(() => { if (opened) position(opened); });
 
   function close(focus = false) {

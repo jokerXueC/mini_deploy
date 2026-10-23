@@ -7,6 +7,7 @@ import pytest
 
 import agent
 import panel_diagnostics as diagnostics
+import panel_code
 import terminal_ai
 import terminal_tools
 import test_terminal_ai as ai_tests
@@ -18,6 +19,38 @@ from server_performance import History
 
 manager = ai_tests.manager
 model_server = ai_tests.model_server
+
+
+@pytest.fixture
+def code_projects(monkeypatch):
+    projects = [{'id': 'a' * 32, 'name': 'aimore', 'path': '/opt/aimore', 'containers': ['c' * 64]},
+                {'id': 'b' * 32, 'name': 'other', 'path': '/srv/other', 'containers': []}]
+    reads = []
+
+    def project(identity):
+        item = next((p for p in projects if p['id'] == identity), None)
+        if not item:
+            raise panel_code.CodeError('项目无效')
+        return item
+
+    def reader(scope, *, excluded):
+        def search(path, query, pattern, offset, limit, check):
+            check()
+            reads.append((scope['id'], 'search', query))
+            return {'matches': [{'path': 'backend/api.py', 'matches': [{'line': 42, 'text': 'async def claim():'}]}]}
+
+        def read(path, start, lines, check):
+            check()
+            reads.append((scope['id'], 'read', path))
+            return {'path': scope['path'] + '/' + path, 'lines': [{'line': 42, 'text': 'async def claim():'}]}
+
+        return SimpleNamespace(project=scope, search=search, read=read)
+
+    monkeypatch.setattr(agent, '_panel_code_catalog', lambda: SimpleNamespace(
+        snapshot=lambda **kwargs: projects, project=project, excluded=()))
+    monkeypatch.setattr(panel_code, 'supported', lambda: True)
+    monkeypatch.setattr(panel_code, 'Reader', reader)
+    return SimpleNamespace(projects=projects, reads=reads)
 
 
 @pytest.fixture
@@ -141,6 +174,77 @@ def test_model_cannot_escalate_panel_diagnosis_to_modify_server(http_server, man
     done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
     assert done['events'][1]['status'] == 'blocked'
     assert done['status'] == 'done'
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_model_receives_project_tools_and_searches_then_reads_without_ssh(
+        http_server, manager, model_server, evidence, code_projects, protocol):
+    manager.save(ai_tests.config(model_server, protocol))
+
+    def responses(body, count):
+        names = {t.get('name') or t.get('function', {}).get('name') for t in body['tools']}
+        assert {'search_code', 'read_code_file', 'list_code_directory'} <= names
+        assert 'write_file' not in names and 'execute_command' not in names
+        if count == 1:
+            return tool_response(protocol, 'search_code', {'query': '/cloud/runtime/commands/claim'})
+        if count == 2:
+            return tool_response(protocol, 'read_code_file', {'path': 'backend/api.py', 'start_line': 42}, call_id='call_read')
+        text = json.dumps(body, ensure_ascii=False)
+        assert 'async def claim' in text and '/opt/aimore/backend/api.py' in text and '42' in text
+        return answer(protocol)
+
+    model_server.content = responses
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', {
+        **ai_tests.chat_data(manager, permission='readonly'), 'code_project': 'a' * 32,
+        'question': '只检查 aimore 的 claim 接口代码，不修改', 'selection': {'kind': 'overview'}})
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    assert done['status'] == 'done' and all(e['status'] == 'done' for e in done['events']), done
+    assert code_projects.reads == [('a' * 32, 'search', '/cloud/runtime/commands/claim'), ('a' * 32, 'read', 'backend/api.py')]
+    detail = manager.history.detail(result['history_id'])
+    assert '/opt/aimore' in detail['conversation']['target']
+    assert 'backend/api.py' in str(detail['turns'][0]['events'])
+
+
+def test_project_scope_is_bound_to_live_and_archived_conversations(
+        http_server, manager, model_server, evidence, code_projects):
+    manager.save(ai_tests.config(model_server))
+    model_server.content = answer('openai')
+    data = {**ai_tests.chat_data(manager, permission='readonly'), 'code_project': 'a' * 32,
+            'selection': {'kind': 'overview'}}
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', data)
+    assert status == 200
+    ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    for project_id in ('b' * 32, ''):
+        assert request(http_server, 'POST', '/terminal-ai/panel', {
+            **data, 'code_project': project_id, 'conversation_id': result['conversation_id']})[0] == 409
+        assert request(http_server, 'POST', '/terminal-ai/panel', {
+            **data, 'code_project': project_id, 'history_id': result['history_id']})[0] == 400
+    assert len(model_server.calls) == 1
+
+
+def test_project_discovery_requires_login_and_recommends_only_unique_container_match(
+        http_server, evidence, code_projects, monkeypatch):
+    assert request(http_server, 'GET', '/terminal-ai/code-projects', authenticated=False)[0] == 401
+    monkeypatch.setattr(agent, '_monitor', lambda: SimpleNamespace(snapshot=lambda: {
+        'alerts': [{'id': 'incident-code', 'metadata': {'container_id': 'c' * 64}}], 'events': []}))
+    status, result = request(http_server, 'GET', '/terminal-ai/code-projects?incident_id=incident-code')
+    assert status == 200 and result['recommended'] == 'a' * 32
+    code_projects.projects[1]['containers'] = ['c' * 64]
+    assert request(http_server, 'GET', '/terminal-ai/code-projects?incident_id=incident-code')[1]['recommended'] == ''
+
+
+def test_unselected_or_invalid_project_cannot_read_source(http_server, manager, model_server, evidence, code_projects):
+    manager.save(ai_tests.config(model_server))
+    data = {**ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'overview'}}
+    for invalid in ('/etc', 'f' * 32, None, []):
+        assert request(http_server, 'POST', '/terminal-ai/panel', {**data, 'code_project': invalid})[0] == 400
+    model_server.content = lambda body, count: tool_response('openai', 'read_code_file', {'path': 'backend/api.py'}) if count == 1 else answer('openai')
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', data)
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    assert done['events'][1]['status'] == 'blocked' and '选择代码项目' in done['events'][1]['result']
+    assert not code_projects.reads
 
 
 def test_panel_route_enforces_auth_origin_csrf_consent_and_scope(http_server, manager, model_server, evidence):

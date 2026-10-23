@@ -6,6 +6,7 @@ import pytest
 import agent
 from test_ssh_browser import page as page, playwright
 from test_panel_diagnostics import evidence as evidence, manager as manager, model_server as model_server
+from test_panel_diagnostics import code_projects as code_projects
 from test_deployment_removal import http_server as http_server, runtime as runtime
 import test_terminal_ai as ai_tests
 
@@ -88,3 +89,51 @@ def test_unconfigured_model_entry_offers_settings_without_sending_or_ssh(
     page.locator('#panelAISettings').click()
     playwright.expect(page.locator('#aiSettingsDialog')).to_be_visible()
     assert not manager.jobs
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_code_scope_selection_starts_separate_conversations_and_restores_scope(
+        page, http_server, manager, model_server, evidence, code_projects, tmp_path, width):
+    manager.save(ai_tests.config(model_server))
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.goto(http_server.origin + '/ui?view=server')
+    page.evaluate("window.PanelAI.open({kind:'overview'})")
+    playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
+    page.get_by_role('combobox', name='代码范围').click()
+    page.get_by_role('option', name='aimore · /opt/aimore', exact=True).click()
+    playwright.expect(page.locator('#panelAIMessages .panel-ai-entry')).to_have_count(0)
+    playwright.expect(page.locator('#panelAICodeStatus')).to_have_text('/opt/aimore · 只读')
+    page.locator('#panelAIQuestion').fill('检查 aimore 的 claim 接口代码，不修改')
+    page.locator('#panelAISend').click()
+    playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
+    playwright.expect(page.locator('#panelAITarget')).to_contain_text('代码范围：/opt/aimore')
+    scoped = next(c for c in manager.history.list()['conversations'] if '/opt/aimore' in c['target'])
+    for theme in ('dark', 'light'):
+        page.evaluate('(theme) => applyTheme(theme)', theme)
+        assert page.locator('#panelAIDialog').evaluate('el => el.scrollWidth <= el.clientWidth')
+        page.screenshot(path=str(tmp_path / f'panel-code-scope-{theme}-{width}.png'))
+    page.get_by_role('combobox', name='代码范围').click()
+    page.get_by_role('option', name='other · /srv/other', exact=True).click()
+    page.locator('#panelAIQuestion').fill('检查这个项目')
+    page.locator('#panelAISend').click()
+    playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
+    assert len(manager.history.list()['conversations']) == 3
+    # The queued close event must not cancel an immediately restored dialog.
+    page.evaluate('''(id) => {
+        document.querySelector('#panelAIDialog').close();
+        return window.PanelAI.restore(id);
+    }''', scoped['id'])
+    playwright.expect(page.locator('#panelAICodeProject')).to_have_value('a' * 32)
+    playwright.expect(page.locator('#panelAICodeStatus')).to_contain_text('/opt/aimore')
+    playwright.expect(page.locator('#panelAIMessages .panel-ai-entry')).to_have_count(1)
+    code_projects.projects.pop(0)
+    page.evaluate('''(id) => {
+        document.querySelector('#panelAIDialog').close();
+        return window.PanelAI.restore(id);
+    }''', scoped['id'])
+    playwright.expect(page.locator('#panelAISend')).to_be_disabled()
+    playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('历史代码目录已不可用')
+    page.get_by_role('combobox', name='代码范围').click()
+    page.get_by_role('option', name='仅运维证据', exact=True).click()
+    playwright.expect(page.locator('#panelAIMessages .panel-ai-entry')).to_have_count(0)
+    playwright.expect(page.locator('#panelAISend')).to_be_enabled()
