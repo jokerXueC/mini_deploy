@@ -535,6 +535,46 @@ def test_repair_existing_binding_updates_runtime_identity_without_reload(setup, 
     assert connections.read_record(store.directory('api') / 'connection.json')['source']['container_id'] == 'b' * 64
 
 
+@pytest.mark.parametrize('failure', [False, True])
+def test_only_explicit_repair_tightens_supported_config_permissions(setup, monkeypatch, failure):
+    from types import SimpleNamespace
+    import stat
+
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    fixed = []
+
+    def resolve(_):
+        if not fixed:
+            raise connections.PathPermissionError(path, path.parent,
+                  SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_uid=0, st_gid=0), 'writable')
+        return dict(source)
+
+    def fix(record, error):
+        assert error.target == path and record['spec']['key'] == 'api'
+        if failure:
+            raise CertificateError('目录权限修复未完成')
+        fixed.append(True)
+        store.permission_repairs.append({'path': str(path.parent), 'before': '0775', 'after': '0755'})
+
+    monkeypatch.setattr(connections, 'resolve', resolve)
+    monkeypatch.setattr(store, 'repair_config_permissions', fix)
+    monkeypatch.setattr(connections, 'discover', lambda: pytest.fail('permission recovery must not fall back to another proxy'))
+    assert store.status('api', verify=True)['config_state'] == 'unavailable' and not fixed
+    with pytest.raises(CertificateError, match='确认'):
+        store.operate({'action': 'repair', 'key': 'api', 'token': plan['token']})
+    assert not fixed
+    if failure:
+        with pytest.raises(CertificateError, match='权限修复未完成'):
+            store.operate({'action': 'repair', 'key': 'api', 'token': plan['token'], 'confirmed': True})
+        assert not fixed
+        return
+    result = store.operate({'action': 'repair', 'key': 'api', 'token': plan['token'], 'confirmed': True})
+    assert result['status'] == 'repaired' and '1 个目录' in result['notice']
+    assert fixed == [True] and store.status('api', verify=True)['config_state'] == 'matched'
+
+
 def test_repair_restores_original_route_after_redeploy_and_retains_history(setup):
     import request_history
     from test_request_history import NOW, line

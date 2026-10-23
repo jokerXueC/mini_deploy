@@ -23,6 +23,14 @@ class CertificateError(ValueError):
     pass
 
 
+class PathPermissionError(CertificateError):
+    def __init__(self, target: Path, path: Path, info: os.stat_result, reason: str):
+        self.target, self.path, self.reason = target, path, reason
+        detail = '所有者不是 root 或当前服务用户' if reason == 'owner' else '允许组或其他用户写入'
+        super().__init__(f'路径的所有权或写权限不安全：{path} '
+                         f'（权限 {stat.S_IMODE(info.st_mode):04o}，UID {info.st_uid}，GID {info.st_gid}；{detail}）')
+
+
 def trusted_path(path: Path) -> None:
     """Reject links and writable ancestors before touching root-owned files."""
     for item in reversed((path, *path.parents)):
@@ -35,8 +43,11 @@ def trusted_path(path: Path) -> None:
             if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
                 raise CertificateError("证书或 Nginx 文件不能包含硬链接")
             sticky_parent = item != path and stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX
-            if os.name == "posix" and (info.st_uid not in {0, os.geteuid()} or (info.st_mode & 0o022 and not sticky_parent)):
-                raise CertificateError("证书或 Nginx 路径的所有权或写权限不安全")
+            if os.name == "posix":
+                if info.st_uid not in {0, os.geteuid()}:
+                    raise PathPermissionError(path, item, info, 'owner')
+                if info.st_mode & 0o022 and not sticky_parent:
+                    raise PathPermissionError(path, item, info, 'writable')
 
 
 def atomic_write(path: Path, content: str) -> None:

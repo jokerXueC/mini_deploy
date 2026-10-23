@@ -10,6 +10,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -20,7 +21,7 @@ from urllib.parse import urlsplit
 
 import nginx_runtime
 import request_gateway as gateway
-from certificates import CertificateError, atomic_write, trusted_path
+from certificates import CertificateError, PathPermissionError, atomic_write, trusted_path
 
 MAX_CONFIG = 256 * 1024
 SOURCE_CACHE: dict[tuple, tuple[float, dict | str]] = {}
@@ -423,6 +424,7 @@ class Connections:
     def __init__(self, data_home: Path):
         self.root = data_home / 'gateway-connections'
         self.gateways = gateway.Store(data_home)
+        self.permission_repairs: list[dict] = []
 
     def directory(self, key: str) -> Path:
         self.gateways.directory(key)
@@ -437,7 +439,84 @@ class Connections:
                 SOURCE_CACHE.pop(next(iter(SOURCE_CACHE)))
             SOURCE_CACHE[key] = (time.monotonic(), value)
 
-    def current_source(self, record: dict, *, cached: bool = False) -> dict:
+    def repair_config_permissions(self, record: dict, error: PathPermissionError) -> None:
+        if os.name != 'posix' or os.geteuid() != 0 or error.reason != 'writable':
+            raise error
+        target = error.target
+        if not target.is_absolute() or '..' in target.parts:
+            raise error
+        protected = {'/', '/opt', '/etc', '/usr', '/usr/local', '/var', '/var/lib', '/var/log',
+                     '/home', '/root', '/srv', '/mnt', '/media', '/run', '/tmp', '/var/tmp'}
+        handles, changes, applied = [], [], []
+        journal = None
+        audit = {'target': str(target), 'created': time.time(), 'state': 'planned', 'directories': []}
+        try:
+            # Hold each ancestor open without following links; inspect the complete chain before changing modes.
+            for item in reversed((target, *target.parents)):
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+                if item != target:
+                    flags |= os.O_DIRECTORY
+                fd = os.open(str(item) if not handles else item.name, flags,
+                             **({'dir_fd': handles[-1]} if handles else {}))
+                handles.append(fd)
+                info = os.fstat(fd)
+                directory = stat.S_ISDIR(info.st_mode)
+                if info.st_uid != 0:
+                    raise PathPermissionError(target, item, info, 'owner')
+                if not (directory or stat.S_ISREG(info.st_mode)) or not directory and info.st_nlink != 1:
+                    raise CertificateError(f'路径类型或硬链接不支持自动权限修复：{item}')
+                sticky_parent = item != target and directory and info.st_mode & stat.S_ISVTX
+                if info.st_mode & 0o022 and not sticky_parent:
+                    if str(item) in protected:
+                        raise CertificateError(f'系统目录的写权限不自动修改：{item}（权限 {stat.S_IMODE(info.st_mode):04o}）')
+                    if not directory or item == target or info.st_gid != 0 or info.st_mode & 0o002:
+                        raise PathPermissionError(target, item, info, 'writable')
+                    changes.append((fd, info, item))
+            if not changes:
+                raise error
+            audit['directories'] = [{'path': str(item), 'before': f'{stat.S_IMODE(info.st_mode):04o}',
+                                     'after': f'{stat.S_IMODE(info.st_mode) & ~0o020:04o}'} for _, info, item in changes]
+            journal = self.directory(record['spec']['key']) / f'permissions-before-repair-{secrets.token_hex(8)}.json'
+            atomic_write(journal, json.dumps(audit, ensure_ascii=False))
+            for fd, original, item in changes:
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid) != (
+                        original.st_dev, original.st_ino, original.st_mode, original.st_uid, original.st_gid):
+                    raise CertificateError(f'目录权限在修复前发生变化，已停止：{item}')
+                os.fchmod(fd, stat.S_IMODE(original.st_mode) & ~0o020)
+                applied.append((fd, original))
+            trusted_path(target)
+            audit['state'] = 'completed'
+            atomic_write(journal, json.dumps(audit, ensure_ascii=False))
+            self.permission_repairs.extend(audit['directories'])
+        except (ValueError, OSError) as exc:
+            rollback_failed = False
+            for fd, original in reversed(applied):
+                try:
+                    current = os.fstat(fd)
+                    if (current.st_uid, current.st_gid, current.st_mode) != (
+                            original.st_uid, original.st_gid, original.st_mode & ~0o020):
+                        rollback_failed = True
+                        continue
+                    os.fchmod(fd, stat.S_IMODE(original.st_mode))
+                except OSError:
+                    rollback_failed = True
+            if journal:
+                audit['state'] = 'recovery_required' if rollback_failed else 'rolled_back'
+                try:
+                    atomic_write(journal, json.dumps(audit, ensure_ascii=False))
+                except (ValueError, OSError):
+                    pass
+            if rollback_failed:
+                raise CertificateError(f'目录权限修复未完成，部分目录已收紧；修复记录：{journal}') from exc
+            if isinstance(exc, CertificateError):
+                raise
+            raise CertificateError(f'目录权限无法自动修复，已停止配置修改：{error.path}') from exc
+        finally:
+            for fd in reversed(handles):
+                os.close(fd)
+
+    def current_source(self, record: dict, *, cached: bool = False, repair_permissions: bool = False) -> dict:
         raw = record['source']
         cache_key = (str(self.root), raw.get('kind'), raw.get('mode'), raw.get('container'), raw.get('config_path'), raw.get('path'))
         if cached:
@@ -447,9 +526,24 @@ class Connections:
                     if isinstance(saved[1], str):
                         raise CertificateError(saved[1])
                     return saved[1]
+        permission_attempted = False
+
+        def locate(raw):
+            nonlocal permission_attempted
+            try:
+                return resolve(raw)
+            except PathPermissionError as exc:
+                if not repair_permissions:
+                    raise
+                permission_attempted = True
+                self.repair_config_permissions(record, exc)
+                return resolve(raw)
+
         try:
-            source = resolve(raw)
+            source = locate(raw)
         except (OSError, ValueError) as original:
+            if permission_attempted:
+                raise
             if cached:
                 # Polling only checks the saved source; broad rediscovery belongs to an explicit action.
                 self.cache_source(cache_key, str(original) if isinstance(original, CertificateError) else '配置无法读取')
@@ -468,8 +562,10 @@ class Connections:
                     else:
                         paths = []
                     if len(paths) == 1 and paths[0] != raw.get('config_path'):
-                        candidates.append(resolve({**raw, 'config_path': paths[0]}))
+                        candidates.append(locate({**raw, 'config_path': paths[0]}))
                 except (OSError, ValueError, KeyError, IndexError):
+                    if permission_attempted:
+                        raise
                     pass
             # A renamed container is eligible only when its bind still maps to the saved host file.
             for candidate in [] if candidates else discover()['sources']:
@@ -489,8 +585,8 @@ class Connections:
         self.cache_source(cache_key, source)
         return source
 
-    def current_config(self, record: dict, *, cached: bool = False) -> tuple[dict, str]:
-        source = self.current_source(record, cached=cached)
+    def current_config(self, record: dict, *, cached: bool = False, repair_permissions: bool = False) -> tuple[dict, str]:
+        source = self.current_source(record, cached=cached, repair_permissions=repair_permissions)
         try:
             return source, read_config(Path(source['path']))
         except (OSError, ValueError):
@@ -749,18 +845,20 @@ class Connections:
                 'notice': '失效接入记录已解除，当前代理配置、容器和请求历史均保留；可重新检测接入'}
 
     def repair(self, data: dict) -> dict:
+        self.permission_repairs = []
         key = data.get('key', '')
         directory = self.directory(key)
         record = read_record(directory / 'connection.json')
         if data.get('token') != record['token'] or record['state'] != 'connected':
             raise CertificateError('接入状态已变化，请刷新后重试')
-        source, current = self.current_config(record)
+        source, current = self.current_config(record, repair_permissions=True)
+        permission_notice = f'已自动收紧 {len(self.permission_repairs)} 个目录的组写权限。' if self.permission_repairs else ''
         if self.matches(record, source, current):
             # Rebind metadata after a normal container recreation, without bouncing the service.
             record['source'] = source
             atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
             return {'status': 'repaired', 'key': key, 'connection': self.status(key, verify=True),
-                    'notice': '已自动核对当前容器、挂载及采集规则，绑定信息已更新；请通过业务入口验证新请求'}
+                    'notice': permission_notice + '已自动核对当前容器、挂载及采集规则，绑定信息已更新；请通过业务入口验证新请求'}
         if self.references(record, source, current):
             raise CertificateError('已重新定位代理，但仍有网关引用或导入规则，暂不能确定完整流量路径；业务配置和历史已保留')
 
@@ -787,7 +885,7 @@ class Connections:
         self.release(data)
         if len(candidates) != 1 or spec['network'] not in source['networks']:
             return {'status': 'needs_selection', 'key': key, 'source': source,
-                    'notice': '旧绑定已自动处理，当前配置和历史保留。原规则或网络发生变化，请选择现在需要记录的入口。'}
+                    'notice': permission_notice + '旧绑定已自动处理，当前配置和历史保留。原规则或网络发生变化，请选择现在需要记录的入口。'}
         route = candidates[0]
         try:
             plan = self.preview({'source': source, 'source_revision': digest(current), 'route_id': route['id'],
@@ -797,10 +895,10 @@ class Connections:
         except (OSError, ValueError) as exc:
             detail = str(exc) if isinstance(exc, CertificateError) else '当前配置暂不可读取'
             return {'status': 'needs_selection', 'key': key, 'source': source,
-                    'notice': f'旧绑定已自动处理，原配置和历史保留。自动接入尚未完成：{detail}'}
+                    'notice': permission_notice + f'旧绑定已自动处理，原配置和历史保留。自动接入尚未完成：{detail}'}
         result = self.apply({'key': key, 'token': plan['token']})
         return {**result, 'status': 'repaired', 'key': key,
-                'notice': '已自动恢复原规则的请求采集，沿用原网关和请求历史；其他业务规则保留'}
+                'notice': permission_notice + '已自动恢复原规则的请求采集，沿用原网关和请求历史；其他业务规则保留'}
 
     def disconnect(self, data: dict) -> dict:
         directory = self.directory(data.get('key', ''))
