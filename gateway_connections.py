@@ -11,16 +11,20 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 import nginx_runtime
 import request_gateway as gateway
 from certificates import CertificateError, atomic_write, trusted_path
 
 MAX_CONFIG = 256 * 1024
+SOURCE_CACHE: dict[tuple, tuple[float, dict | str]] = {}
+SOURCE_CACHE_LOCK = threading.Lock()
 
 
 def digest(text: str) -> str:
@@ -283,6 +287,12 @@ def read_record(path: Path) -> dict:
     return value
 
 
+def caddy_config_args(args: list[str]) -> list[str]:
+    return [arg.split('=', 1)[1] if arg.startswith('--config=') else args[index + 1]
+            for index, arg in enumerate(args)
+            if arg.startswith('--config=') or arg == '--config' and index + 1 < len(args)]
+
+
 def resolve(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get('kind') not in ('caddy', 'nginx') or raw.get('mode') not in ('docker', 'local'):
         raise CertificateError('请选择代理类型和运行位置')
@@ -323,7 +333,7 @@ def resolve(raw: Any) -> dict[str, Any]:
         if '--resume' in args:
             raise CertificateError('Caddy 使用 --resume，文件可能不是运行配置，请先核对启动方式')
         if kind == 'caddy':
-            if '--config' not in args or args.index('--config') + 1 >= len(args) or args[args.index('--config') + 1] != config_path:
+            if caddy_config_args(args) != [config_path]:
                 raise CertificateError('配置路径与 Caddy 容器启动参数不一致，请按查询指令核对')
             command(['docker', 'exec', item['Id'], 'caddy', 'version'])
         else:
@@ -420,6 +430,104 @@ class Connections:
         trusted_path(path)
         return path
 
+    @staticmethod
+    def cache_source(key: tuple, value: dict | str) -> None:
+        with SOURCE_CACHE_LOCK:
+            if len(SOURCE_CACHE) >= 32:
+                SOURCE_CACHE.pop(next(iter(SOURCE_CACHE)))
+            SOURCE_CACHE[key] = (time.monotonic(), value)
+
+    def current_source(self, record: dict, *, cached: bool = False) -> dict:
+        raw = record['source']
+        cache_key = (str(self.root), raw.get('kind'), raw.get('mode'), raw.get('container'), raw.get('config_path'), raw.get('path'))
+        if cached:
+            with SOURCE_CACHE_LOCK:
+                saved = SOURCE_CACHE.get(cache_key)
+                if saved and time.monotonic() - saved[0] < 15:
+                    if isinstance(saved[1], str):
+                        raise CertificateError(saved[1])
+                    return saved[1]
+        try:
+            source = resolve(raw)
+        except (OSError, ValueError) as original:
+            if cached:
+                # Polling only checks the saved source; broad rediscovery belongs to an explicit action.
+                self.cache_source(cache_key, str(original) if isinstance(original, CertificateError) else '配置无法读取')
+                raise
+            candidates = []
+            if raw.get('kind') == 'caddy':
+                try:
+                    if raw.get('mode') == 'docker' and gateway.DOCKER_NAME.fullmatch(raw.get('container', '')):
+                        item = json.loads(command(['docker', 'inspect', '--type', 'container', raw['container']]))[0]
+                        config = item.get('Config') or {}
+                        args = (config.get('Entrypoint') or []) + (config.get('Cmd') or [])
+                        paths = caddy_config_args(args) if '--resume' not in args else []
+                    elif raw.get('mode') == 'local':
+                        startup = command(['systemctl', 'show', 'caddy', '--property=ExecStart', '--value'])
+                        paths = re.findall(r'--config(?:=|\s+)(/[^\s;"\x27]+)', startup) if '--resume' not in startup else []
+                    else:
+                        paths = []
+                    if len(paths) == 1 and paths[0] != raw.get('config_path'):
+                        candidates.append(resolve({**raw, 'config_path': paths[0]}))
+                except (OSError, ValueError, KeyError, IndexError):
+                    pass
+            # A renamed container is eligible only when its bind still maps to the saved host file.
+            for candidate in [] if candidates else discover()['sources']:
+                if candidate.get('kind') != raw.get('kind') or candidate.get('mode') != raw.get('mode'):
+                    continue
+                try:
+                    resolved = resolve({**candidate, 'config_path': raw.get('config_path')})
+                except (OSError, ValueError):
+                    continue
+                if raw.get('path') and resolved['path'] == raw['path']:
+                    candidates.append(resolved)
+            if len(candidates) != 1:
+                if len(candidates) > 1:
+                    raise CertificateError('发现多个代理使用原配置，无法唯一确定原入口；请选择当前代理') from original
+                raise original
+            source = candidates[0]
+        self.cache_source(cache_key, source)
+        return source
+
+    def current_config(self, record: dict, *, cached: bool = False) -> tuple[dict, str]:
+        source = self.current_source(record, cached=cached)
+        try:
+            return source, read_config(Path(source['path']))
+        except (OSError, ValueError):
+            if not cached:
+                raise
+            source = self.current_source(record)
+            return source, read_config(Path(source['path']))
+
+    @staticmethod
+    def target(record: dict) -> str:
+        spec = record['spec']
+        return f'mini-gateway-{spec["key"]}:10000' if spec['network'] != 'host' else f'127.0.0.1:{spec["port"]}'
+
+    @staticmethod
+    def references(record: dict, source: dict, text: str) -> bool:
+        nodes = list(walk(parse(text, source['kind'])))
+        # Imports can contain references that are not visible in this file.
+        target = Connections.target(record)
+        return any(target in word for node in nodes for word in node.words) or any(n.words[:1] in (['import'], ['include']) for n in nodes)
+
+    @staticmethod
+    def matches(record: dict, source: dict, text: str) -> bool:
+        if not record.get('rule_scoped') and text.count(record['after']) == 1:
+            return True
+        if not record.get('selector'):
+            return False
+        selected = next((route for route in routes(text, source['kind'], source.get('addresses'))
+                         if route['_selector'] == record['selector']), None)
+        proxy = selected['_proxy'] if selected else None
+        if record.get('rule_scoped'):
+            expected = next(node for node in parse(record['after'] + '\n', source['kind'])
+                            if node.words[:1] in (['reverse_proxy'], ['proxy_pass']))
+            target = expected.words
+        else:
+            target = ['reverse_proxy', Connections.target(record)]
+        return bool(proxy and proxy.words == target)
+
     def status(self, key: str, *, verify: bool = False) -> dict:
         path = self.directory(key) / 'connection.json'
         if not path.exists():
@@ -430,28 +538,16 @@ class Connections:
                   'scope': data.get('scope', '静态网站' if data['kind'] == 'static' else '已接入的转发规则')}
         if verify and data['state'] == 'connected':
             try:
-                text = read_config(Path(data['source']['path']))
-                if data.get('selector'):
-                    selected = next((route for route in routes(text, data['source']['kind'], data['source'].get('addresses'))
-                                     if route['_selector'] == data['selector']), None)
-                    proxy = selected['_proxy'] if selected else None
-                    if data.get('rule_scoped'):
-                        expected = next(node for node in parse(data['after'] + '\n', data['source']['kind'])
-                                        if node.words[:1] in (['reverse_proxy'], ['proxy_pass']))
-                        target = expected.words
-                    else:
-                        address = (f'mini-gateway-{key}:10000' if data['spec']['network'] != 'host'
-                                   else f'127.0.0.1:{data["spec"]["port"]}')
-                        target = ['reverse_proxy', address]
-                    matched = bool(proxy and proxy.words == target)
-                else:
-                    matched = text.count(data['after']) == 1
+                source, text = self.current_config(data, cached=True)
+                matched = self.matches(data, source, text)
+                result['source'] = source
                 result['config_state'] = 'matched' if matched else 'changed'
                 if not matched:
-                    result['error'] = '代理配置已变化，请求可能绕过采集网关；请重新检测接入，已有历史保留'
-            except (OSError, ValueError, KeyError, StopIteration):
+                    result['error'] = '代理配置已变化，请求可能绕过采集网关；点击自动修复，已有历史保留'
+            except (OSError, ValueError, KeyError, StopIteration) as exc:
                 result['config_state'] = 'unavailable'
-                result['error'] = '无法核对当前代理配置，请检查代理配置文件和挂载；已有历史保留'
+                detail = str(exc) if isinstance(exc, CertificateError) else '配置无法读取或旧接入记录不完整'
+                result['error'] = f'无法核对当前代理配置：{detail}；可自动重新检测，已有历史保留'
         return result
 
     def inspect(self, raw: dict) -> dict:
@@ -460,7 +556,7 @@ class Connections:
         return {'source': source, 'revision': digest(text), 'routes': [public_route(r) for r in routes(text, source['kind'], source.get('addresses'))],
                 'networks': source['networks'], 'help': help_items(source)}
 
-    def preview(self, data: dict) -> dict:
+    def preview(self, data: dict, *, repair: bool = False) -> dict:
         source = resolve(data.get('source'))
         text = read_config(Path(source['path']))
         if data.get('source_revision') != digest(text):
@@ -527,7 +623,8 @@ class Connections:
             candidate = text[:site.start] + after + text[site.end:] + extra
         entry_path = self.gateways.directory(key) / 'entry.json'
         old = self.gateways.read(key) if entry_path.exists() else None
-        if old and any(old['spec'].get(k) != spec.get(k) for k in ('upstream', 'network', 'port', 'bind', 'image', 'max_body_bytes', 'connect_timeout_ms')):
+        compared = ('upstream', 'network', 'port', 'bind', 'image') if repair else ('upstream', 'network', 'port', 'bind', 'image', 'max_body_bytes', 'connect_timeout_ms')
+        if old and any(old['spec'].get(k) != spec.get(k) for k in compared):
             raise CertificateError('该标识已有不同的网关配置，请使用新的入口标识，或先在网关管理中核对配置')
         plan = {'token': secrets.token_hex(16), 'created': time.time(), 'source': source, 'site': route['site'],
                 'kind': route['kind'], 'scope': route['label'], 'rule_scoped': bool(proxy), 'selector': route['_selector'],
@@ -638,29 +735,82 @@ class Connections:
         record = read_record(directory / 'connection.json')
         if data.get('token') != record['token'] or record['state'] != 'connected':
             raise CertificateError('接入状态已变化，请刷新后重试')
-        source = resolve(record['source'])
-        current = read_config(Path(source['path']))
-        target = (f'mini-gateway-{record["spec"]["key"]}:10000' if record['spec']['network'] != 'host'
-                  else f'127.0.0.1:{record["spec"]["port"]}')
-        nodes = list(walk(parse(current, source['kind'])))
-        if target in current or any(node.words[:1] in (['import'], ['include']) for node in nodes):
+        source, current = self.current_config(record)
+        if self.references(record, source, current):
             raise CertificateError('当前配置仍引用采集网关，或存在导入配置；无法安全解除，请重新检查接入状态')
+        return self.retire(directory, record, source)
+
+    @staticmethod
+    def retire(directory: Path, record: dict, source: dict) -> dict:
         # Retire only panel metadata. Never restore an old configuration over a redeployed website.
-        record.update(state='not_connected', released_at=time.time())
+        record.update(state='not_connected', source=source, released_at=time.time())
         atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
         return {'connection': {'state': 'not_connected'},
                 'notice': '失效接入记录已解除，当前代理配置、容器和请求历史均保留；可重新检测接入'}
+
+    def repair(self, data: dict) -> dict:
+        key = data.get('key', '')
+        directory = self.directory(key)
+        record = read_record(directory / 'connection.json')
+        if data.get('token') != record['token'] or record['state'] != 'connected':
+            raise CertificateError('接入状态已变化，请刷新后重试')
+        source, current = self.current_config(record)
+        if self.matches(record, source, current):
+            # Rebind metadata after a normal container recreation, without bouncing the service.
+            record['source'] = source
+            atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
+            return {'status': 'repaired', 'key': key, 'connection': self.status(key, verify=True),
+                    'notice': '已自动核对当前容器、挂载及采集规则，绑定信息已更新；请通过业务入口验证新请求'}
+        if self.references(record, source, current):
+            raise CertificateError('已重新定位代理，但仍有网关引用或导入规则，暂不能确定完整流量路径；业务配置和历史已保留')
+
+        available = [route for route in routes(current, source['kind'], source.get('addresses'))
+                     if route['site'] == record['site'] and route['supported']]
+        spec = self.gateways.read(key)['spec']
+        candidates = [route for route in available if route['_selector'] == record.get('selector')]
+        if not candidates and not record.get('rule_scoped'):
+            # Older versions saved the whole site. Recover the original rule from that snapshot.
+            old_routes = routes(record['before'] + '\n', source['kind'], record['source'].get('addresses'))
+            old = [route for route in old_routes if route['site'] == record['site'] and
+                   (record['kind'] == 'static' and route['kind'] == 'static' or route['upstream'] == spec['upstream'])]
+            if len(old) == 1:
+                candidates = [route for route in available if route['label'] == old[0]['label'] and route['kind'] == old[0]['kind']]
+        candidates = [route for route in candidates if route['kind'] == record['kind'] and
+                      (not record.get('scope') or route['label'] == record['scope']) and
+                      (route['kind'] == 'static' or route['upstream'] == spec['upstream'])]
+
+        # Keep the old recovery material even if the new apply creates a fresh before.conf.
+        backup_id = secrets.token_hex(8)
+        atomic_write(directory / f'connection-before-repair-{backup_id}.json', json.dumps(record, ensure_ascii=False))
+        if (directory / 'before.conf').exists():
+            atomic_write(directory / f'before-repair-{backup_id}.conf', read_config(directory / 'before.conf'))
+        self.release(data)
+        if len(candidates) != 1 or spec['network'] not in source['networks']:
+            return {'status': 'needs_selection', 'key': key, 'source': source,
+                    'notice': '旧绑定已自动处理，当前配置和历史保留。原规则或网络发生变化，请选择现在需要记录的入口。'}
+        route = candidates[0]
+        try:
+            plan = self.preview({'source': source, 'source_revision': digest(current), 'route_id': route['id'],
+                'key': key, 'name': spec['name'], 'port': spec['port'], 'network': spec['network'], 'image': spec['image'],
+                'internal_port': urlsplit(spec['upstream']).port if record['kind'] == 'static' else 18081,
+                'probe_path': record.get('probe_path', '/')}, repair=True)
+        except (OSError, ValueError) as exc:
+            detail = str(exc) if isinstance(exc, CertificateError) else '当前配置暂不可读取'
+            return {'status': 'needs_selection', 'key': key, 'source': source,
+                    'notice': f'旧绑定已自动处理，原配置和历史保留。自动接入尚未完成：{detail}'}
+        result = self.apply({'key': key, 'token': plan['token']})
+        return {**result, 'status': 'repaired', 'key': key,
+                'notice': '已自动恢复原规则的请求采集，沿用原网关和请求历史；其他业务规则保留'}
 
     def disconnect(self, data: dict) -> dict:
         directory = self.directory(data.get('key', ''))
         record = read_record(directory / 'connection.json')
         if data.get('token') != record['token']:
             raise CertificateError('接入状态已变化，请刷新后再撤销')
-        source = resolve(record['source'])
-        if source != record['source']:
-            raise CertificateError('代理容器或挂载已变化，请人工核对后恢复备份')
+        source, current = self.current_config(record)
         path = Path(source['path'])
-        current = read_config(path)
+        if not self.references(record, source, current):
+            return self.retire(directory, record, source)
         if record.get('rule_scoped'):
             selected = next((route for route in routes(current, source['kind'], source.get('addresses'))
                              if route['_selector'] == record.get('selector')), None)
@@ -681,6 +831,7 @@ class Connections:
             raise CertificateError('接入规则已被外部修改，请核对备份；其他站点不会被覆盖')
         atomic_write(directory / 'disconnect-before.conf', current)
         previous_state = record['state']
+        record['source'] = source
         record['state'] = 'disconnecting'
         atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
         try:
@@ -720,4 +871,6 @@ class Connections:
                 return self.disconnect(data)
             if action == 'release':
                 return self.release(data)
+            if action == 'repair':
+                return self.repair(data)
             raise CertificateError('未知接入操作')

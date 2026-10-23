@@ -328,28 +328,48 @@ window.GatewayConnect = (() => {
 
   async function disconnect(entry) {
     if (busy) return;
-    const expired = entry.connection.config_state === 'changed';
-    let released = false;
     panel.hidden = false;
     $('gatewayConnectTitle').textContent = '停止网站记录';
     $('gatewayConnectFields').hidden = true;
     $('connectHelp').hidden = true;
     await work('等待确认撤销…', async () => {
-      const confirmed = await showConfirmDialog({title: expired ? '重新接入请求记录' : '停止网站请求记录',
-        message: expired ? `${entry.connection.site} 的代理配置已变化。检查确认当前配置不再引用此网关后，解除旧接入并重新检测当前规则，保留当前业务配置、容器和请求历史。确认新方案后才修改转发配置。`
-          : `恢复 ${entry.connection.site} 原有访问路径。${entry.connection.source?.kind === 'nginx' ? 'Nginx 将重载。' : '代理配置将重新应用，已有连接可能短暂中断。'} 网站继续提供服务，采集容器保留。`,
-        confirmText: expired ? '检测当前规则' : '停止记录', danger: !expired});
+      const confirmed = await showConfirmDialog({title: '停止网站请求记录',
+        message: `恢复 ${entry.connection.site} 原有访问路径。${entry.connection.source?.kind === 'nginx' ? 'Nginx 将重载。' : '代理配置将重新应用，已有连接可能短暂中断。'} 网站继续提供服务，采集容器保留。`,
+        confirmText: '停止记录', danger: true});
       if (!confirmed) { panel.hidden = true; return; }
       try {
-        const result = await postJsonBody('gateway-connections', {action: expired ? 'release' : 'disconnect', key: entry.key, token: entry.connection.token, confirmed: true});
-        released = expired;
+        const result = await postJsonBody('gateway-connections', {action: 'disconnect', key: entry.key, token: entry.connection.token, confirmed: true});
         invalidate(true);
         feedback.textContent = result.notice || '原入口规则已恢复。网关仍保留，可按需停止或删除。';
       } finally { await window.RequestGateway.refresh(); }
       panel.hidden = true;
       window.NginxRequests?.refresh();
     });
-    if (released) await openConnect(entry);
   }
-  return {disconnect, isBusy: () => busy};
+
+  async function repair(entry) {
+    if (busy) return;
+    let selection = null;
+    invalidate(true);
+    panel.hidden = false;
+    $('gatewayConnectTitle').textContent = '自动修复采集';
+    $('gatewayConnectFields').hidden = true;
+    $('connectHelp').hidden = true;
+    panel.scrollIntoView({block: 'nearest'});
+    await work('正在重新定位代理并核对当前规则…', async () => {
+      if (!csrfToken) csrfToken = (await fetchJson('status')).csrf_token || '';
+      try {
+        const result = await postJsonBody('gateway-connections', {
+          action: 'repair', key: entry.key, token: entry.connection.token, confirmed: true});
+        feedback.textContent = result.notice;
+        if (result.status === 'needs_selection') selection = result;
+      } finally { await window.RequestGateway.refresh(); }
+      window.NginxRequests?.refresh();
+    });
+    if (selection) {
+      await openConnect({...entry, connection: {...entry.connection, source: selection.source}});
+      $('connectDiscoveryNotice').textContent = [selection.notice, $('connectDiscoveryNotice').textContent].filter(Boolean).join(' ');
+    }
+  }
+  return {disconnect, repair, isBusy: () => busy};
 })();

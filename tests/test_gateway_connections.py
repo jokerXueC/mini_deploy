@@ -505,9 +505,175 @@ def test_detach_does_not_overwrite_changed_rule(setup):
     store.apply({'key': 'api', 'token': plan['token']})
     changed = path.read_text().replace('mini-gateway-api:10000', 'custom-upstream:9000')
     path.write_text(changed)
-    with pytest.raises(CertificateError, match='外部修改'):
-        store.disconnect({'key': 'api', 'token': plan['token']})
+    result = store.disconnect({'key': 'api', 'token': plan['token']})
+    assert result['connection']['state'] == 'not_connected'
     assert path.read_text() == changed
+
+
+def test_disconnect_relocates_recreated_container_and_preserves_old_file(setup):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    attached = path.read_text()
+    moved = path.with_name('new-Caddyfile')
+    moved.write_text(attached)
+    source.update(container_id='b' * 64, path=str(moved))
+    assert store.status('api', verify=True)['config_state'] == 'matched'
+    store.disconnect({'key': 'api', 'token': plan['token']})
+    assert moved.read_text() == CADDY
+    assert path.read_text() == attached
+
+
+def test_repair_existing_binding_updates_runtime_identity_without_reload(setup, monkeypatch):
+    store, source, _ = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    source['container_id'] = 'b' * 64
+    monkeypatch.setattr(store, 'activate', lambda *_: pytest.fail('unchanged rules need no reload'))
+    result = store.operate({'action': 'repair', 'key': 'api', 'token': plan['token'], 'confirmed': True})
+    assert result['status'] == 'repaired'
+    assert connections.read_record(store.directory('api') / 'connection.json')['source']['container_id'] == 'b' * 64
+
+
+def test_repair_restores_original_route_after_redeploy_and_retains_history(setup):
+    import request_history
+    from test_request_history import NOW, line
+
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    history = request_history.History(store.root.parent)
+    history.ingest('api', 'API', 'container', [line('/old')], NOW - 1, now=NOW)
+    current = CADDY.replace('    handle /cloud/* {', '    handle @admin_ui {\n        reverse_proxy aimore-cloud:8766\n    }\n    handle /cloud/* {')
+    path.write_text(current)
+    source['container_id'] = 'b' * 64
+    result = store.operate({'action': 'repair', 'key': 'api', 'token': plan['token'], 'confirmed': True})
+    assert result['status'] == 'repaired' and result['key'] == 'api'
+    restored = connections.routes(path.read_text(), 'caddy')
+    assert next(r for r in restored if r['label'] == 'handle /cloud/*')['upstream'] == 'http://mini-gateway-api:10000'
+    assert next(r for r in restored if r['label'] == 'handle @admin_ui')['upstream'] == 'http://aimore-cloud:8766'
+    assert history.query('api', now=NOW)['total_requests'] == 1
+    assert len(list(store.directory('api').glob('connection-before-repair-*.json'))) == 1
+    assert store.status('api', verify=True)['config_state'] == 'matched'
+
+
+def test_repair_migrates_legacy_whole_site_binding_without_losing_new_routes(setup):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    record_path = store.directory('api') / 'connection.json'
+    record = connections.read_record(record_path)
+    record.update(rule_scoped=False, selector='legacy-selector', before=CADDY, after=path.read_text())
+    atomic_write(record_path, json.dumps(record))
+    path.write_text(CADDY + '\nother.test {\n    reverse_proxy other:8080\n}\n')
+    result = store.repair({'key': 'api', 'token': plan['token']})
+    assert result['status'] == 'repaired'
+    assert 'reverse_proxy other:8080' in path.read_text()
+    assert connections.read_record(record_path)['rule_scoped']
+
+
+def test_repair_changed_backend_releases_stale_binding_without_overwriting(setup, monkeypatch):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    current = CADDY.replace('aimore-cloud:8766', 'new-backend:9090')
+    path.write_text(current)
+    monkeypatch.setattr(store, 'activate', lambda *_: pytest.fail('changed destination must not be replaced'))
+    result = store.repair({'key': 'api', 'token': plan['token']})
+    assert result['status'] == 'needs_selection'
+    assert path.read_text() == current and store.status('api')['state'] == 'not_connected'
+
+
+def test_repair_changed_matcher_scope_requires_selection(setup, monkeypatch):
+    store, source, path = setup
+    path.write_text(ZHUNKEDA.replace('{$PUBLIC_DOMAIN}', 'api.test'))
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    current = ZHUNKEDA.replace('{$PUBLIC_DOMAIN}', 'api.test').replace('@api path /ad/push/*', '@api path /*')
+    path.write_text(current)
+    monkeypatch.setattr(store, 'activate', lambda *_: pytest.fail('changed scope requires selection'))
+    result = store.repair({'key': 'api', 'token': plan['token']})
+    assert result['status'] == 'needs_selection' and path.read_text() == current
+
+
+def test_gateway_moved_to_other_rule_is_not_treated_as_matching(setup):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    moved = path.read_text().replace('handle /cloud/*', 'handle /other/*')
+    path.write_text(moved)
+    assert store.status('api', verify=True)['config_state'] == 'changed'
+    with pytest.raises(CertificateError, match='网关引用'):
+        store.repair({'key': 'api', 'token': plan['token']})
+    assert path.read_text() == moved and store.status('api')['state'] == 'connected'
+
+
+def test_status_failure_is_cached_without_scanning_and_actions_retry_fresh(setup, monkeypatch):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    calls = []
+
+    def unavailable(_):
+        calls.append(True)
+        raise CertificateError('配置没有 bind 挂载到宿主机')
+
+    monkeypatch.setattr(connections, 'resolve', unavailable)
+    monkeypatch.setattr(connections, 'discover', lambda: pytest.fail('polling must not scan all containers'))
+    assert store.status('api', verify=True)['config_state'] == 'unavailable'
+    assert store.status('api', verify=True)['config_state'] == 'unavailable'
+    assert len(calls) == 1
+    monkeypatch.setattr(connections, 'resolve', lambda _: dict(source))
+    assert store.repair({'key': 'api', 'token': plan['token']})['status'] == 'repaired'
+    assert store.status('api', verify=True)['config_state'] == 'matched'
+
+
+def test_repair_restores_current_business_config_when_activation_fails(setup, monkeypatch):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    current = CADDY + '\n# latest business release\n'
+    path.write_text(current)
+    calls = []
+
+    def activate(_):
+        calls.append(True)
+        if len(calls) == 1:
+            raise CertificateError('restart failed')
+
+    monkeypatch.setattr(store, 'activate', activate)
+    with pytest.raises(CertificateError, match='原代理配置已恢复'):
+        store.repair({'key': 'api', 'token': plan['token']})
+    assert path.read_text() == current and len(calls) == 2
+    assert list(store.directory('api').glob('before-repair-*.conf'))
+
+
+def test_repair_unreadable_config_keeps_binding_and_explains_reason(setup, monkeypatch):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    original = path.read_bytes()
+
+    def unavailable(_):
+        raise CertificateError('配置没有 bind 挂载到宿主机')
+
+    monkeypatch.setattr(connections, 'resolve', unavailable)
+    monkeypatch.setattr(connections, 'discover', lambda: {'sources': []})
+    status = store.status('api', verify=True)
+    assert status['config_state'] == 'unavailable' and 'bind' in status['error']
+    with pytest.raises(CertificateError, match='bind'):
+        store.repair({'key': 'api', 'token': plan['token']})
+    assert path.read_bytes() == original and store.status('api')['state'] == 'connected'
+
+
+def test_repair_rejects_imports_without_retiring_binding(setup):
+    store, source, path = setup
+    plan = preview(store, source)
+    store.apply({'key': 'api', 'token': plan['token']})
+    path.write_text(CADDY + '\nimport extra.caddy\n')
+    with pytest.raises(CertificateError, match='导入'):
+        store.repair({'key': 'api', 'token': plan['token']})
+    assert store.status('api')['state'] == 'connected'
 
 
 def test_stopping_attached_gateway_is_blocked(setup):
@@ -537,6 +703,22 @@ def test_nginx_attach_and_detach_preserve_headers(setup, slash):
     assert path.read_text() == original
 
 
+def test_nginx_repair_preserves_new_locations_and_reuses_gateway(setup):
+    store, source, path = setup
+    source.update(kind='nginx', networks=['host'])
+    path.write_text(NGINX)
+    plan = preview(store, source, network='host')
+    store.apply({'key': 'api', 'token': plan['token']})
+    current = NGINX.replace('    location /api/ {', '    location /health { return 200; }\n    location /api/ {')
+    path.write_text(current)
+    assert store.repair({'key': 'api', 'token': plan['token']})['status'] == 'repaired'
+    assert 'location /health { return 200; }' in path.read_text()
+    assert 'proxy_pass http://127.0.0.1:18080;' in path.read_text()
+    token = store.status('api')['token']
+    store.disconnect({'key': 'api', 'token': token})
+    assert path.read_text() == current
+
+
 def test_failed_disconnect_restores_connected_config(setup, monkeypatch):
     store, source, path = setup
     plan = preview(store, source)
@@ -557,10 +739,55 @@ def test_failed_disconnect_restores_connected_config(setup, monkeypatch):
     assert len(calls) == 2
 
 
-def test_connection_confirmation_is_required(setup):
+@pytest.mark.parametrize('action', ['apply', 'repair', 'disconnect', 'release'])
+def test_connection_confirmation_is_required(setup, action):
     store, _, _ = setup
     with pytest.raises(CertificateError, match='确认'):
-        store.operate({'action': 'apply'})
+        store.operate({'action': action})
+
+
+def test_status_follows_changed_caddy_startup_path(tmp_path, monkeypatch):
+    config = tmp_path / 'relocated-Caddyfile'
+    config.write_text(CADDY)
+    item = {'Id': 'b' * 64, 'State': {'Status': 'running'},
+            'Config': {'Cmd': ['caddy', 'run', '--config=/etc/caddy/current.conf']},
+            'Mounts': [{'Type': 'bind', 'Source': str(config), 'Destination': '/etc/caddy/current.conf'}],
+            'NetworkSettings': {'Networks': {'app_default': {}}}}
+    monkeypatch.setattr(connections.nginx_runtime, 'require_local_docker', lambda: None)
+    monkeypatch.setattr(connections, 'command', lambda args, **kw: json.dumps([item]) if 'inspect' in args else 'v2')
+    raw = dict(kind='caddy', mode='docker', container='edge', config_path='/etc/caddy/Caddyfile', path='/old/file')
+    source = connections.Connections(tmp_path / 'data').current_source({'source': raw})
+    assert source['path'] == str(config) and source['config_path'] == '/etc/caddy/current.conf'
+
+
+def test_source_rediscovery_rejects_ambiguous_container_identity(setup, monkeypatch):
+    store, source, _ = setup
+    record = {'source': source}
+
+    def relocated(raw):
+        if raw['container'] == 'edge':
+            raise CertificateError('original container missing')
+        return {**source, 'container': raw['container']}
+
+    monkeypatch.setattr(connections, 'resolve', relocated)
+    monkeypatch.setattr(connections, 'discover', lambda: {'sources': [{**source, 'container': name} for name in ('one', 'two')]})
+    with pytest.raises(CertificateError, match='多个代理'):
+        store.current_source(record)
+    monkeypatch.setattr(connections, 'discover', lambda: {'sources': [{**source, 'container': 'one'}]})
+    assert store.current_source(record)['container'] == 'one'
+
+
+def test_repair_static_site_uses_existing_gateway_and_internal_port(setup):
+    store, source, path = setup
+    plan = preview(store, source, 'static')
+    store.apply({'key': 'api', 'token': plan['token']})
+    spec = store.gateways.read('api')['spec']
+    path.write_text(CADDY + '\n# old reverse_proxy mini-gateway-api:10000\n')
+    result = store.repair({'key': 'api', 'token': plan['token']})
+    assert result['status'] == 'repaired'
+    assert store.gateways.read('api')['spec']['upstream'] == spec['upstream']
+    assert '# old reverse_proxy' in path.read_text()
+    assert 'http://:18081' in path.read_text()
 
 
 def test_docker_source_maps_longest_bind_mount_and_rejects_changed_startup(tmp_path, monkeypatch):

@@ -30,7 +30,8 @@ window.RequestGateway = (() => {
         <code class="gateway-caddy-command">reverse_proxy ${escapeHtml(entry.caddy_upstream)}</code>
         ${entry.error ? `<p class="form-error">${escapeHtml(entry.error)}</p>` : ''}
         <div class="request-actions">
-          ${entry.connection && entry.connection.state !== 'not_connected' ? `<button type="button" class="ghost-button compact-action" data-gateway-action="disconnect" data-key="${escapeHtml(entry.key)}">${entry.connection.config_state === 'changed' ? '重新接入' : '撤销接入'}</button>` : ''}
+          ${['changed', 'unavailable'].includes(entry.connection?.config_state) ? `<button type="button" class="ghost-button compact-action" data-gateway-action="repair" data-key="${escapeHtml(entry.key)}" title="自动定位当前配置；恢复采集时可能重载或重启前置代理">自动修复</button>` : ''}
+          ${entry.connection && entry.connection.state !== 'not_connected' ? `<button type="button" class="ghost-button compact-action" data-gateway-action="disconnect" data-key="${escapeHtml(entry.key)}">撤销接入</button>` : ''}
           <button type="button" class="ghost-button compact-action" data-gateway-action="edit" data-key="${escapeHtml(entry.key)}" ${entry.connection && entry.connection.state !== 'not_connected' ? 'disabled title="请先撤销网站接入"' : ''}>编辑</button>
           <button type="button" class="ghost-button compact-action" data-gateway-action="records" data-key="${escapeHtml(entry.key)}">查看请求</button>
           <button type="button" class="ghost-button compact-action" data-gateway-action="${['running', 'paused', 'restarting'].includes(entry.state) ? 'stop' : 'start'}" data-key="${escapeHtml(entry.key)}" ${entry.connection && entry.connection.state !== 'not_connected' && ['running', 'paused', 'restarting'].includes(entry.state) ? 'disabled title="请先撤销网站接入"' : ''}>${['running', 'paused', 'restarting'].includes(entry.state) ? '停止' : '启动'}</button>
@@ -147,6 +148,7 @@ window.RequestGateway = (() => {
     if (!entry) return;
     const action = button.dataset.gatewayAction;
     if (action === 'disconnect') return void window.GatewayConnect.disconnect(entry);
+    if (action === 'repair') return void window.GatewayConnect.repair(entry);
     if (action === 'edit') return void openForm(entry);
     if (action === 'records') {
       $('requestBackend').value = 'gateway'; $('requestGatewayKey').value = entry.key;

@@ -305,7 +305,9 @@ window.NginxRequests = (() => {
             : entry ? `自定义入口 · ${entry.name} · 仅记录经过该入口的请求` : '尚未开启后端请求记录'
         : `正在查看已有${backend === 'caddy' ? ' Caddy' : ' Nginx'}日志${result.container ? ` · ${result.container}` : ''}`;
       $('requestStopMonitoring').hidden = !entry?.connection || entry.connection.state === 'not_connected';
-      $('requestStopMonitoring').textContent = entry?.connection?.config_state === 'changed' ? '重新接入' : attached ? '停止记录' : '恢复原入口';
+      const repairable = ['changed', 'unavailable'].includes(entry?.connection?.config_state);
+      $('requestStopMonitoring').textContent = repairable ? '自动修复' : attached ? '停止记录' : '恢复原入口';
+      $('requestStopMonitoring').title = repairable ? '自动定位当前配置并恢复原规则，必要时重载或重启前置代理' : '';
       notice.textContent = result.notice || '';
       if (historyResult) {
         const checked = result.checked_at ? new Date(result.checked_at * 1000).toLocaleTimeString('zh-CN') : '';
@@ -352,7 +354,10 @@ window.NginxRequests = (() => {
   $('requestRefresh').addEventListener('click', refresh);
   $('requestStopMonitoring').addEventListener('click', () => {
     const entry = window.RequestGateway.list().find(item => item.key === $('requestGatewayKey').value);
-    if (entry?.connection && entry.connection.state !== 'not_connected') window.GatewayConnect.disconnect(entry);
+    if (entry?.connection && entry.connection.state !== 'not_connected') {
+      if (['changed', 'unavailable'].includes(entry.connection.config_state)) window.GatewayConnect.repair(entry);
+      else window.GatewayConnect.disconnect(entry);
+    }
   });
   $('requestBackend').addEventListener('change', changeSource);
   $('requestContainer').addEventListener('change', changeSource);

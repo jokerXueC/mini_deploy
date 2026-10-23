@@ -40,9 +40,9 @@ def test_expired_connection_distinguishes_old_history_and_releases_only_metadata
     def release(route):
         payload = route.request.post_data_json
         state['actions'].append(payload)
-        if payload['action'] == 'release':
+        if payload['action'] == 'repair':
             state['released'] = True
-            route.fulfill(json={'connection': {'state': 'not_connected'}, 'notice': '旧接入记录已解除，当前代理配置和请求历史保留。'})
+            route.fulfill(json={'status': 'needs_selection', 'source': source, 'notice': '旧接入已自动处理，请选择当前规则。'})
         elif payload['action'] == 'inspect':
             route.fulfill(json={'source': source, 'revision': 'current-config', 'routes': routes, 'networks': ['app_default']})
         elif payload['action'] == 'preview':
@@ -62,20 +62,82 @@ def test_expired_connection_distinguishes_old_history_and_releases_only_metadata
     page.locator('#requestPeriod').select_option('7d', force=True)
     playwright.expect(page.locator('#requestSampleSummary')).to_contain_text('1840')
     page.screenshot(path=str(tmp_path / 'expired-connection-history.png'))
+    playwright.expect(page.locator('#requestStopMonitoring')).to_have_text('自动修复')
     page.locator('#requestStopMonitoring').click()
-    playwright.expect(page.locator('#confirmModal')).to_contain_text('保留当前业务配置')
-    page.locator('#confirmOkBtn').click()
+    playwright.expect(page.locator('#confirmModal')).to_be_hidden()
     playwright.expect(page.locator('#requestStopMonitoring')).to_be_hidden()
     playwright.expect(page.locator('#gatewayConnectTitle')).to_have_text('重新接入请求记录')
     playwright.expect(page.locator('#gatewayConnectFeedback')).to_contain_text('请选择当前需要记录的规则')
-    assert [item['action'] for item in state['actions']] == ['release', 'inspect']
-    assert state['actions'][0] == {'action': 'release', 'key': 'demo-api', 'token': 'test-token', 'confirmed': True}
+    assert [item['action'] for item in state['actions']] == ['repair', 'inspect']
+    assert state['actions'][0] == {'action': 'repair', 'key': 'demo-api', 'token': 'test-token', 'confirmed': True}
     page.locator('#connectService').select_option('1', force=True)
     playwright.expect(page.locator('#connectReview')).to_be_visible()
     assert state['actions'][-1]['action'] == 'preview' and state['actions'][-1]['route_id'] == 'api'
     assert state['actions'][-1]['source_revision'] == 'current-config'
     assert not any(item['action'] == 'apply' for item in state['actions'])
     assert history.query('demo-api', period='7d')['total_requests'] == 1840
+
+
+@pytest.mark.parametrize('width,config_state', [(390, 'unavailable'), (1440, 'changed')])
+def test_automatic_repair_does_not_require_manual_release_or_configuration(page, http_server, demo, tmp_path, width, config_state):
+    page.set_viewport_size({'width': width, 'height': 960})
+    state = {'repaired': False, 'actions': []}
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    entry = {'key': 'demo-api', 'name': 'API', 'upstream': 'http://api:8766', 'network': 'app_default',
+             'state': 'running', 'local_address': '127.0.0.1:18080', 'caddy_upstream': 'mini-gateway-demo-api:10000'}
+
+    def gateways(route):
+        connection = {'state': 'connected', 'config_state': 'matched' if state['repaired'] else config_state,
+                      'site': 'api.test', 'token': 'token', 'error': '' if state['repaired'] else '无法核对当前代理配置'}
+        route.fulfill(json={'entries': [{**entry, 'connection': connection}], 'history_sources': demo.sources()})
+
+    def repair(route):
+        state['actions'].append(route.request.post_data_json)
+        state['repaired'] = True
+        route.fulfill(json={'status': 'repaired', 'key': 'demo-api', 'notice': '已自动恢复原规则的请求采集，沿用原网关和请求历史'})
+
+    page.route('**/request-gateways', gateways)
+    page.route('**/gateway-connections', repair)
+    page.goto(http_server.origin + '/ui?view=requests')
+    playwright.expect(page.locator('#requestStopMonitoring')).to_have_text('自动修复')
+    playwright.expect(page.locator('[data-gateway-action="repair"]')).to_have_text('自动修复')
+    playwright.expect(page.locator('[data-gateway-action="disconnect"]')).to_have_text('撤销接入')
+    page.locator('#requestStopMonitoring').click()
+    playwright.expect(page.locator('#gatewayConnectFeedback')).to_contain_text('已自动恢复')
+    playwright.expect(page.locator('#requestStopMonitoring')).to_have_text('停止记录')
+    playwright.expect(page.locator('#gatewayConnectFields')).to_be_hidden()
+    playwright.expect(page.locator('#confirmModal')).to_be_hidden()
+    assert state['actions'] == [{'action': 'repair', 'key': 'demo-api', 'token': 'token', 'confirmed': True}]
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'automatic-repair-{width}.png'))
+    assert not errors
+
+
+def test_stale_connection_can_be_disconnected_without_repairing(page, http_server, demo):
+    state = {'disconnected': False, 'actions': []}
+
+    def gateways(route):
+        connection = {'state': 'not_connected'} if state['disconnected'] else {
+            'state': 'connected', 'config_state': 'unavailable', 'site': 'api.test', 'token': 'token'}
+        route.fulfill(json={'entries': [{'key': 'demo-api', 'name': 'API', 'state': 'running',
+                                        'connection': connection}], 'history_sources': demo.sources()})
+
+    def disconnect(route):
+        state['actions'].append(route.request.post_data_json)
+        state['disconnected'] = True
+        route.fulfill(json={'connection': {'state': 'not_connected'}, 'notice': '失效接入记录已解除'})
+
+    page.route('**/request-gateways', gateways)
+    page.route('**/gateway-connections', disconnect)
+    page.goto(http_server.origin + '/ui?view=requests')
+    page.locator('#manageRequestGateways').click()
+    page.locator('#gatewayMaintenance > summary').click()
+    page.locator('[data-gateway-action="disconnect"]').click()
+    playwright.expect(page.locator('#confirmModal')).to_be_visible()
+    page.get_by_role('button', name='停止记录', exact=True).click()
+    playwright.expect(page.locator('#requestStopMonitoring')).to_be_hidden()
+    assert state['actions'] == [{'action': 'disconnect', 'key': 'demo-api', 'token': 'token', 'confirmed': True}]
 
 
 def test_export_modal_zip_report_preview_and_offline_charts(page, http_server, demo, tmp_path):
