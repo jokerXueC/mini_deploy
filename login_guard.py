@@ -177,6 +177,23 @@ class Guard:
                     if not settings['enabled'] or self._ignored(row['ip'], settings):
                         db.execute('DELETE FROM login_guard_bans WHERE ip=? AND source=?', (row['ip'], row['source']))
                         self._event(db, row['source'], 'unban', row['ip'], '暂停防护或加入白名单', now)
+            elif action == 'ban':
+                ip, source = address(data.get('ip')), data.get('source', 'all')
+                if not isinstance(source, str) or source not in {'panel', 'ssh', 'all'}:
+                    raise ValueError('登录来源无效')
+                settings = self._settings(db)
+                if not settings['enabled']:
+                    raise ValueError('登录防护已暂停，请先开启防护')
+                if ip == address(client_ip) or self._ignored(ip, settings):
+                    raise ValueError('不能封禁当前访问 IP、白名单或保留地址')
+                if source in {'ssh', 'all'} and (not self.ssh_state['ready'] or not self.ssh_state.get('ports')):
+                    raise ValueError('SSH 防护尚未就绪，请刷新状态后重试')
+                for scope in ('panel', 'ssh') if source == 'all' else (source,):
+                    if db.execute('SELECT 1 FROM login_guard_bans WHERE ip=? AND source=? AND expires>?', (ip, scope, now)).fetchone():
+                        continue
+                    db.execute('INSERT OR REPLACE INTO login_guard_bans VALUES (?,?,?,?,?)',
+                               (ip, scope, now, now + settings['bantime'], '管理员手动封禁'))
+                    self._event(db, scope, 'ban', ip, '管理员手动封禁', now)
             elif action == 'unban':
                 ip, source = address(data.get('ip')), data.get('source')
                 if source not in {'panel', 'ssh'}:
@@ -259,6 +276,14 @@ class Guard:
             locations = [dict(row) for row in db.execute("SELECT ip,COUNT(*) AS count,SUM(kind='login_failure') AS failures,MAX(ts) AS last_at FROM security_activity WHERE kind IN ('login_success','login_failure') AND ts BETWEEN ? AND ? GROUP BY ip ORDER BY count DESC LIMIT 500", (now - 86400, now))]
             for item in locations:
                 item.update(geo.get(item['ip'], {'label': '待定位'}))
+            active_bans = {}
+            for row in db.execute('SELECT * FROM login_guard_bans WHERE expires>?', (now,)):
+                enforced = settings['enabled'] and (row['source'] == 'panel' or self.ssh_state['ready'] and
+                    (row['ip'], row['started'], row['expires']) in self._enforced_ssh)
+                active_bans.setdefault(row['ip'], []).append({'source': row['source'], 'enforced': bool(enforced)})
+            for item in locations:
+                item['bans'] = active_bans.get(item['ip'], [])
+                item['protected'] = self._ignored(item['ip'], settings)
             counts = dict(db.execute('SELECT kind,COUNT(*) FROM security_activity WHERE ts BETWEEN ? AND ? GROUP BY kind', (now - 86400, now)))
             location_total = db.execute("SELECT COUNT(DISTINCT ip) FROM security_activity WHERE kind IN ('login_success','login_failure') AND ts BETWEEN ? AND ?", (now - 86400, now)).fetchone()[0]
             bans = [dict(row) for row in db.execute('SELECT * FROM login_guard_bans WHERE expires>? ORDER BY started DESC LIMIT 10 OFFSET ?', (now, ban_page * 10))]

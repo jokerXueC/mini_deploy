@@ -32,6 +32,9 @@ def test_swap_toggle_polls_preserves_control_and_confirms_disable(preview, tmp_p
     playwright.expect(toggle).to_be_enabled()
     playwright.expect(toggle).not_to_be_checked()
     assert toggle.get_attribute('id') == 'hostSwapToggle'
+    title = page.locator('.swap-heading h3').bounding_box()
+    switch = page.locator('.swap-control').bounding_box()
+    assert 8 <= switch['x'] - title['x'] - title['width'] <= 16
     page.locator('#hostSwapToggle').evaluate('(el) => { window.originalSwapControl = el; }')
     page.locator('#performancePanel').scroll_into_view_if_needed()
     page.screenshot(path=str(tmp_path / f'swap-{width}-{theme}.png'))

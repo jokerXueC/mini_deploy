@@ -57,6 +57,67 @@ def test_panel_failure_threshold_real_block_restart_and_expiry(guard):
     assert restored.status()['ban_total'] == 0
 
 
+def test_manual_ban_applies_both_scopes_persists_does_not_extend_and_expires(guard):
+    engine, now, kernel = guard
+    engine.tick({'ready': True, 'ports': [2222]})
+    engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'all'}, '1.1.1.1')
+    assert engine.blocked('8.8.8.8')
+    state = engine.status()
+    assert state['failure_24h'] == 0 and state['ban_total'] == 2
+    assert {row['source'] for row in state['bans']} == {'panel', 'ssh'}
+    assert all(row['enforced'] and row['reason'] == '管理员手动封禁' for row in state['bans'])
+    assert kernel.calls[-1][0] == [2222] and kernel.calls[-1][1][0]['ip'] == '8.8.8.8'
+    expires = {row['source']: row['expires'] for row in state['bans']}
+    now[0] += 30
+    engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'all'}, '1.1.1.1')
+    assert {row['source']: row['expires'] for row in engine.status()['bans']} == expires
+    restored = Guard(engine.history, clock=lambda: now[0], firewall=kernel)
+    assert restored.blocked('8.8.8.8')
+    now[0] += DEFAULTS['bantime']
+    restored.tick({'ready': True, 'ports': [2222]})
+    assert not restored.blocked('8.8.8.8') and restored.status()['ban_total'] == 0
+
+
+def test_manual_ban_guards_current_ip_whitelist_and_unavailable_ssh(guard):
+    engine, _, _ = guard
+    engine.change({**DEFAULTS, 'action': 'settings', 'ignoreip': ['9.9.9.0/24']}, '1.1.1.1')
+    for ip in ('1.1.1.1', '::ffff:1.1.1.1', '127.0.0.1', '0.0.0.0', '224.0.0.1', '9.9.9.9'):
+        with pytest.raises(ValueError, match='不能封禁'):
+            engine.change({'action': 'ban', 'ip': ip, 'source': 'panel'}, '1.1.1.1')
+    for source in ('all', 'ssh'):
+        with pytest.raises(ValueError, match='SSH 防护尚未就绪'):
+            engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': source}, '1.1.1.1')
+    assert engine.status()['ban_total'] == 0
+    for source in ([], 'invalid'):
+        with pytest.raises(ValueError, match='来源无效'):
+            engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': source}, '1.1.1.1')
+    engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'panel'}, '1.1.1.1')
+    assert engine.blocked('8.8.8.8') and engine.status()['ban_total'] == 1
+    engine.change({**DEFAULTS, 'action': 'settings', 'enabled': False}, '1.1.1.1')
+    with pytest.raises(ValueError, match='暂停'):
+        engine.change({'action': 'ban', 'ip': '8.8.4.4', 'source': 'panel'}, '1.1.1.1')
+
+
+def test_manual_ban_kernel_failure_rolls_back_both_scopes_and_history(guard):
+    engine, _, kernel = guard
+    engine.tick({'ready': True, 'ports': [2222]})
+    kernel.fail = True
+    with pytest.raises(RuntimeError):
+        engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'all'}, '1.1.1.1')
+    assert not engine.blocked('8.8.8.8') and engine.status()['ban_total'] == 0
+    assert engine.status()['bans_24h'] == 0
+
+
+def test_manual_ban_status_is_available_for_map_ips_beyond_current_ban_page(guard):
+    engine, _, _ = guard
+    engine.record_panel('8.8.8.8', True)
+    engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'panel'}, '1.1.1.1')
+    state = engine.status(ban_page=1)
+    assert state['bans'] == []
+    assert state['locations'][0]['bans'] == [{'source': 'panel', 'enforced': True}]
+    assert not state['locations'][0]['protected']
+
+
 def test_successes_loopback_whitelist_and_sources_do_not_create_false_bans(guard):
     engine, now, _ = guard
     for _ in range(12):
@@ -201,6 +262,20 @@ def test_api_authentication_csrf_and_native_settings_without_fail2ban(guard, htt
     assert not engine.blocked('8.8.8.8')
     for data in ({'action': 'settings', 'enabled': 'yes'}, {'action': 'settings', **DEFAULTS, 'maxretry': 0}, {'action': 'shell'}):
         assert http_server('POST', '/security/logins', data)[0] == 400
+
+
+def test_manual_ban_api_uses_authenticated_scope_and_audits_target(guard, http_server, monkeypatch):
+    engine, _, _ = guard
+    audit = []
+    monkeypatch.setattr(agent, '_ip_security', lambda: SimpleNamespace(guard=engine, observation={'ssh': {}}))
+    monkeypatch.setattr(agent, '_audit_event', lambda action, **fields: audit.append((action, fields)))
+    data = {'action': 'ban', 'ip': '8.8.8.8', 'source': 'panel'}
+    assert http_server('POST', '/security/logins', data, authenticated=False)[0] == 401
+    assert not engine.blocked('8.8.8.8')
+    assert http_server('POST', '/security/logins', data)[0] == 200
+    assert engine.blocked('8.8.8.8')
+    assert audit[-1] == ('login_guard_ban', {'actor': '127.0.0.1', 'target': '8.8.8.8', 'detail': {'source': 'panel'}})
+    assert http_server('POST', '/security/logins', {**data, 'ip': '127.0.0.1'})[0] == 400
 
 
 def test_actual_login_endpoint_records_failures_enforces_ban_and_rejects_missing_csrf(guard, http_server, monkeypatch):

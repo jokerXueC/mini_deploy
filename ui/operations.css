@@ -6,7 +6,7 @@
 .performance-values h3 { margin: 0 0 8px; font-size: 12px; font-weight: 500; color: var(--muted); }
 .performance-values strong { font-size: 17px; font-weight: 500; }
 .performance-values p { margin: 8px 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
-.swap-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.swap-heading { display: flex; align-items: center; justify-content: flex-start; gap: 12px; margin-bottom: 8px; }
 .performance-values .swap-heading h3 { margin: 0; }
 .swap-control { position: relative; display: inline-flex; flex: 0 0 36px; width: 36px; height: 22px; cursor: pointer; }
 .swap-control input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; }

@@ -393,6 +393,48 @@ class History:
                 if key.startswith('requests:') and key not in seen:
                     monitor.observe(key, None, '', '', 'website')
 
+    def records(self, key, *, since, until, status='all', search='', limit=50, cursor=None):
+        """Read actual request rows in a fixed window, with stable keyset pagination."""
+        if (not isinstance(key, str) or not request_gateway.KEY.fullmatch(key)
+                or any(type(t) not in (int, float) or not math.isfinite(t) for t in (since, until))
+                or not 0 <= since <= until or until - since > 86400
+                or status not in {'all', '4xx', '5xx'} or type(limit) is not int or not 1 <= limit <= 100
+                or not isinstance(search, str) or len(search) > 200):
+            raise ValueError('请求明细筛选参数无效')
+        where, parameters = ['source=?', 'ts>=?', 'ts<=?'], [key, since, until]
+        if status != 'all':
+            where.append('status>=? AND status<?')
+            low = 400 if status == '4xx' else 500
+            parameters.extend([low, low + 100])
+        if search:
+            where.append("INSTR(LOWER(host || ' ' || path || ' ' || COALESCE(json_extract(data,'$.request_id'),'')),?)>0")
+            parameters.append(search.lower())
+        base = ' AND '.join(where)
+        continuation, extra = '', []
+        if cursor is not None:
+            if (not isinstance(cursor, dict) or set(cursor) != {'ts', 'id'}
+                    or type(cursor['id']) is not int or not 0 < cursor['id'] < 2**63
+                    or type(cursor['ts']) not in (int, float) or not math.isfinite(cursor['ts'])
+                    or not since <= cursor['ts'] <= until):
+                raise ValueError('请求明细续读位置无效')
+            continuation = ' AND (ts<? OR (ts=? AND id<?))'
+            extra = [cursor['ts'], cursor['ts'], cursor['id']]
+        with self.connect() as db:
+            source = db.execute('SELECT key,name,checked,error,limited,cursor FROM sources WHERE key=?', (key,)).fetchone()
+            if not source:
+                raise ValueError('请求来源不存在，请先列出已采集来源')
+            count = db.execute(f'SELECT COUNT(*) FROM requests WHERE {base}', parameters).fetchone()[0]
+            rows = db.execute(f'SELECT id,ts,status,data FROM requests WHERE {base}{continuation} '
+                              'ORDER BY ts DESC,id DESC LIMIT ?', [*parameters, *extra, limit + 1]).fetchall()
+            retained = db.execute('SELECT MIN(ts),MAX(ts) FROM requests WHERE source=?', (key,)).fetchone()
+        selected = rows[:limit]
+        return {'source': dict(source), 'since': since, 'until': until, 'status': status, 'matching_records': count,
+                'items': [{**json.loads(row['data']), 'record_id': row['id'], 'ts': row['ts'], 'status': row['status']}
+                          for row in selected],
+                'next_cursor': {'ts': selected[-1]['ts'], 'id': selected[-1]['id']} if len(rows) > limit else None,
+                'earliest_retained_at': retained[0], 'latest_retained_at': retained[1],
+                'notice': '仅查询仍保留的单条请求，不用聚合统计冒充明细。已过期或未采集的请求无法还原；代理错误原因需对照同时间日志。'}
+
     def query(self, key, *, period="24h", layout="tree", search="", status="all", slow_ms=1000, page=0, now=None):
         if not request_gateway.KEY.fullmatch(key) or period not in PERIODS or layout not in {"tree", "flat"}:
             raise ValueError("请求历史查询参数无效")

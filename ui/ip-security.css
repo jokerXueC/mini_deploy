@@ -50,6 +50,9 @@ html[data-theme=dark] .ip-security { --security-danger:#fb838b; --security-ok:#6
 .security-map-ip p { display:flex; gap:14px; font-size:11px; color:var(--security-ok); margin:6px 0; }
 .security-map-ip [data-failed=true] { color:var(--security-danger); }
 .security-map-ip time { display:block; color:var(--muted); font-size:10px; line-height:1.8; }
+.security-map-ip footer { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px 10px; }
+.security-map-ban { flex-shrink:0; padding:4px 8px; font-size:11px; color:var(--security-danger); }
+.security-map-ban:disabled { color:var(--muted); }
 #securityMapEmpty { position:absolute; bottom:12px; left:12px; font-size:11px; padding:5px 8px; background:var(--card); border-radius:3px; margin:0; }
 .security-map-legend { display:flex; gap:18px; font-size:11px; color:var(--muted); }
 .security-map-legend span::before { content:''; display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:7px; background:var(--security-ok); }

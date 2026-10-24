@@ -22,6 +22,41 @@ def ingest(store, lines, **kwargs):
     store.ingest("api", "API", "container-a", lines, NOW - 1, now=NOW, **kwargs)
 
 
+def test_diagnostic_records_page_all_5xx_including_equal_timestamps_after_restart(tmp_path):
+    store = history.History(tmp_path)
+    ingest(store, [line('/claim', status=502)] * 9 + [line('/success'), line('/other', status=500),
+           line('/claim', status=404), line('/claim', status=504, ts=NOW - 1000)])
+    store = history.History(tmp_path)
+    args = dict(since=NOW - 300, until=NOW, status='5xx', search='/claim', limit=2)
+    records, cursor = [], None
+    while True:
+        page = store.records('api', **args, cursor=cursor)
+        assert page['matching_records'] == 9
+        records.extend(page['items'])
+        cursor = page['next_cursor']
+        if cursor is None:
+            break
+    assert len(records) == len({r['record_id'] for r in records}) == 9
+    assert {r['status'] for r in records} == {502}
+    assert {r['ts'] for r in records} == {NOW - 10}
+    assert store.records('api', **{**args, 'search': "' OR 1=1 --"})['matching_records'] == 0
+    assert store.records('api', **{**args, 'status': '4xx'})['items'][0]['status'] == 404
+    with pytest.raises(ValueError, match='来源不存在'):
+        store.records('missing', **args)
+    for invalid in ({'id': True, 'ts': NOW}, {'id': 1, 'ts': float('nan')}, {'id': 1, 'ts': NOW + 1},
+                    {'id': '1 OR 1=1', 'ts': NOW}, {'id': 1, 'ts': NOW, 'path': '/'}):
+        with pytest.raises(ValueError, match='续读位置'):
+            store.records('api', **args, cursor=invalid)
+
+
+def test_diagnostic_records_do_not_invent_details_from_rollups(tmp_path):
+    store = history.History(tmp_path, max_rows=1)
+    ingest(store, [line('/old', status=502, ts=NOW - 100), line('/new')])
+    page = store.records('api', since=NOW - 300, until=NOW, status='5xx')
+    assert page['matching_records'] == 0 and not page['items'] and page['next_cursor'] is None
+    assert store.query('api', now=NOW)['total_requests'] == 2
+
+
 def test_restart_overlap_and_identical_requests_are_preserved_once(tmp_path):
     store = history.History(tmp_path)
     lines = [line(), line(), line("/api/users/12")]

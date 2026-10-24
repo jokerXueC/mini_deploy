@@ -61,6 +61,7 @@ import http_limits
 import ssh_terminal
 import terminal_ai
 import panel_diagnostics
+import panel_runtime
 import panel_code
 import ip_security
 import basic_protection
@@ -3157,11 +3158,23 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                     backend = panel_diagnostics.Backend(data.get('selection', {'kind': 'overview'}), target,
                         incident=_incident_diagnostics, history=_server_performance, monitor=lambda: _monitor().snapshot(),
                         realtime=lambda: _realtime_metrics_payload()['server'], logs=lambda source, **options: _operations().logs(source, **options),
-                        code=code_reader)
+                        code=code_reader, runtime=panel_runtime.Runtime(
+                            inventory=_operations_inventory, logs=lambda source, **options: _operations().logs(source, **options),
+                            requests=_request_history, discovery=_certificate_discovery,
+                            monitor=lambda: _monitor().snapshot(), audit=lambda: _audit_tail(lines=2000)))
                 except ValueError as exc:
                     raise terminal_ai.AIError(str(exc)) from exc
+                def panel_executor(plan, cancel):
+                    success = False
+                    try:
+                        evidence = backend.execute(plan, cancel)
+                        success = evidence.get('exit_code') == 0
+                        return evidence
+                    finally:
+                        _audit_event('ai_tool_executed', actor=self.client_address[0],
+                                     target=f"{target} / {plan['name']}", success=success)
                 result = manager.submit(owner, action='chat', data=data, session_id='panel-monitoring' + (':' + project_id if project_id else ''),
-                    target=target, executor=backend.execute, evidence_backend=backend)
+                    target=target, executor=panel_executor, evidence_backend=backend)
                 result['target'] = target
                 _audit_event('ai_panel_diagnosis', actor=self.client_address[0], target=target, success=True,
                              detail={'kind': backend.selection['kind']})
@@ -4009,7 +4022,8 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                     manager = _ip_security()
                     manager.guard.change(data, _request_client_ip(self))
                     manager.guard.tick(manager.observation.get('ssh', {}))
-                    _audit_event('login_guard_' + str(data.get('action')), actor=_request_client_ip(self))
+                    _audit_event('login_guard_' + str(data.get('action')), actor=_request_client_ip(self),
+                                 target=str(data.get('ip', '')), detail={'source': str(data.get('source', ''))})
                     self._write_json(200, {'ok': True})
                 except ValueError as exc:
                     self._write_json(400, {'detail': str(exc)})

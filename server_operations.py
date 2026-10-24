@@ -21,8 +21,9 @@ UNIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:\\-]{0,220}\.service")
 CONTAINER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
-def run(command, timeout=5):
+def run(command, timeout=5, *, max_bytes=None, binary=False):
     """Stop oversized output without buffering it or spooling to a server file."""
+    max_bytes = MAX_BYTES if max_bytes is None else max_bytes
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           stdin=subprocess.DEVNULL, env={**os.environ, "LC_ALL": "C"}) as process:
         chunks, errors = [], []
@@ -32,7 +33,7 @@ def run(command, timeout=5):
             size = 0
             try:
                 while chunk := process.stdout.read1(16384):
-                    keep = min(len(chunk), MAX_BYTES - size)
+                    keep = min(len(chunk), max_bytes - size)
                     chunks.append(chunk[:keep])
                     size += keep
                     if len(chunk) > keep:
@@ -54,7 +55,8 @@ def run(command, timeout=5):
             reader.join(timeout=2)
         if reader.is_alive() or errors:
             raise RuntimeError("无法完整读取命令输出")
-        return process.returncode, b"".join(chunks).decode("utf-8", "replace"), limited.is_set()
+        output = b"".join(chunks)
+        return process.returncode, output if binary else output.decode("utf-8", "replace"), limited.is_set()
 
 
 def safe_file(path):

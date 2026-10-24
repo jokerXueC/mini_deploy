@@ -10,6 +10,17 @@
   const feedback = value => { $('ipSecurityFeedback').textContent = value; };
   const minutes = value => value >= 3600 ? (value / 3600) + ' 小时' : (value / 60) + ' 分钟';
 
+  function banState(item) {
+    const source = status.ssh.ready ? 'all' : 'panel';
+    const scopes = source === 'all' ? ['panel', 'ssh'] : ['panel'];
+    const bans = item.bans || status.bans.filter(ban => ban.ip === item.ip);
+    const banned = scopes.every(scope => bans.some(ban => ban.source === scope && ban.enforced));
+    const protectedIP = item.protected || item.ip === status.client_ip;
+    const reason = protectedIP ? '当前访问 IP 或白名单地址不能封禁' : !status.settings.enabled ? '请先开启登录防护' :
+      banned ? '已封禁，可在临时封禁列表解封' : source === 'all' ? '封禁面板和 SSH 登录' : '封禁面板登录；SSH 防护尚未就绪';
+    return {source, banned, reason, disabled: protectedIP || !status.settings.enabled || banned};
+  }
+
   function controls() {
     $('ipSecurityRefresh').disabled = !!request || busy;
     $('securityGuardToggle').disabled = !status || busy || !!request || !!error;
@@ -19,6 +30,9 @@
     $('securityBanPrev').disabled = busy || !!request || banPage === 0;
     $('securityBanNext').disabled = busy || !!request || !status || (banPage + 1) * 10 >= status.ban_total;
     $('securityBans').querySelectorAll('button').forEach(button => { button.disabled = busy || !!error; });
+    $('securityMapDetailBody').querySelectorAll('[data-ban]').forEach(button => {
+      button.disabled = busy || !!request || !!error || button.dataset.blocked === 'true';
+    });
     $('securityBasicToggle').disabled = !protection || protectionPending || protection.busy || !!protectionError;
     $('securityBasicRetry').disabled = !protection || protectionPending || protection.busy || !!protectionError;
   }
@@ -94,12 +108,19 @@
     $('securityMapDetailTitle').textContent = group.label || '登录地区';
     const content = '<p class="security-map-detail-total">最近 24 小时 · ' + group.members.length +
       ' 个 IP · ' + group.count + ' 次登录</p><div class="security-map-ip-list">' +
-      [...group.members].sort((a,b) => b.count - a.count).map(item =>
-        '<div class="security-map-ip"><div><strong>' + text(item.ip) + '</strong><b>' + item.count +
+      [...group.members].sort((a,b) => b.count - a.count).map(item => {
+        const ban = banState(item);
+        return '<div class="security-map-ip"><div><strong>' + text(item.ip) + '</strong><b>' + item.count +
         '<small> 次</small></b></div><p><span>成功 ' + (item.count - item.failures) +
         '</span><span data-failed="true">失败 ' + item.failures + '</span></p>' +
-        (item.last_at ? '<time>最近 ' + text(date(item.last_at)) + '</time>' : '') + '</div>').join('') + '</div>';
+        '<footer>' + (item.last_at ? '<time>最近 ' + text(date(item.last_at)) + '</time>' : '') +
+        '<button type="button" class="ghost-button compact-action security-map-ban" data-ban="' + text(item.ip) +
+        '" data-source="' + ban.source + '" data-blocked="' + String(ban.disabled) + '" title="' + text(ban.reason) +
+        '" aria-label="' + text((ban.banned ? '已封禁 ' : '手动封禁 ') + item.ip) + '">' +
+        (ban.banned ? '已封禁' : '手动封禁') + '</button></footer></div>';
+      }).join('') + '</div>';
     if ($('securityMapDetailBody').innerHTML !== content) $('securityMapDetailBody').innerHTML = content;
+    controls();
   }
 
   function selectRegion(key) {
@@ -269,7 +290,7 @@
       if (response.status === 401) { location.reload(); return; }
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail || '保存失败，请刷新确认实际状态');
-      draft = false; feedback('已保存。'); busy = false; await refresh();
+      draft = false; feedback(data.action === 'ban' ? '封禁已生效，到期自动解封。' : '已保存。'); busy = false; await refresh();
     } catch (err) {
       feedback(err.message + '；请刷新确认实际状态。');
     } finally { clearTimeout(timeout); busy = false; controls(); schedule(); }
@@ -301,6 +322,16 @@
     }
   };
   $('securityMapDetailClose').onclick = closeRegion;
+  $('securityMapDetailBody').onclick = async event => {
+    const button = event.target.closest('[data-ban]');
+    if (!button || button.disabled || busy || error) return;
+    const ip = button.dataset.ban, source = button.dataset.source;
+    const scope = source === 'all' ? '面板和 SSH 登录' : '面板登录';
+    if (await showConfirmDialog({title:'手动封禁 IP',
+      message:'封禁 ' + ip + ' 的' + scope + '，时长 ' + minutes(status.settings.bantime) + '，到期自动解封。', confirmText:'封禁'})) {
+      change({action:'ban', ip, source});
+    }
+  };
   $('securityView').addEventListener('keydown', event => {
     if (event.key === 'Escape' && selectedRegion !== null) { event.preventDefault(); closeRegion(); }
   });

@@ -8,6 +8,7 @@ import pytest
 import agent
 import panel_diagnostics as diagnostics
 import panel_code
+import panel_runtime
 import terminal_ai
 import terminal_tools
 import test_terminal_ai as ai_tests
@@ -16,6 +17,7 @@ from test_ssh_terminal import request
 from test_deployment_removal import http_server as http_server, runtime as runtime
 from test_server_performance import sample
 from server_performance import History
+from test_panel_runtime import runtime_evidence as runtime_evidence, CONTAINER, WINDOW
 
 manager = ai_tests.manager
 model_server = ai_tests.model_server
@@ -174,6 +176,68 @@ def test_model_cannot_escalate_panel_diagnosis_to_modify_server(http_server, man
     done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
     assert done['events'][1]['status'] == 'blocked'
     assert done['status'] == 'done'
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_panel_reads_runtime_evidence_and_code_in_one_conversation_without_ssh(
+        http_server, manager, model_server, evidence, code_projects, runtime_evidence, monkeypatch, protocol):
+    manager.save(ai_tests.config(model_server, protocol))
+    fake = runtime_evidence
+    original = panel_runtime.Runtime
+    monkeypatch.setattr(panel_runtime, 'Runtime', lambda **kwargs: original(**kwargs, **fake.options))
+    monkeypatch.setattr(agent, '_operations_inventory', fake.dependencies['inventory'])
+    monkeypatch.setattr(agent, '_request_history', fake.dependencies['requests'])
+    monkeypatch.setattr(agent, '_certificate_discovery', fake.dependencies['discovery'])
+    monkeypatch.setattr(agent, '_operations', lambda: SimpleNamespace(logs=fake.dependencies['logs']))
+    monkeypatch.setattr(agent, '_monitor', lambda: SimpleNamespace(snapshot=fake.dependencies['monitor']))
+    monkeypatch.setattr(agent, '_audit_tail', lambda **kwargs: fake.dependencies['audit']())
+    config_id = fake.runtime.configurations()['items'][0]['id']
+    sequence = [
+        ('list_containers', {}),
+        ('get_container_status', {'container': CONTAINER}),
+        ('get_container_logs', {'container': CONTAINER, **WINDOW}),
+        ('list_log_sources', {}),
+        ('read_logs', {'source': 'container:' + CONTAINER, **WINDOW}),
+        ('get_service_logs', {'service': 'docker', **WINDOW}),
+        ('list_proxy_configs', {}),
+        ('read_proxy_config', {'id': config_id}),
+        ('list_request_sources', {}),
+        ('get_request_records', {'source': 'api', **WINDOW, 'status': '5xx', 'search': '/cloud/runtime/commands/claim'}),
+        ('get_panel_events', WINDOW),
+        ('search_code', {'query': '/cloud/runtime/commands/claim'}),
+        ('read_code_file', {'path': 'backend/api.py'}),
+    ]
+    def responses(body, count):
+        names = {t.get('name') or t.get('function', {}).get('name') for t in body['tools']}
+        assert {name for name, _ in sequence} <= names
+        assert not names & {'execute_command', 'write_file', 'restart_container', 'manage_service'}
+        text = json.dumps(body, ensure_ascii=False)
+        assert 'log-secret' not in text and 'config-secret' not in text
+        if count <= len(sequence):
+            name, args = sequence[count - 1]
+            return tool_response(protocol, name, args, call_id=f'runtime-{count}')
+        for evidence_text in ('connection refused', 'aimore-cloud:8766', 'matching_records', '502', 'rebuild-1', 'async def claim'):
+            assert evidence_text in text
+        assert 'available_tools' in text and 'next_cursor' in text
+        return answer(protocol)
+    model_server.content = responses
+    data = {**ai_tests.chat_data(manager, permission='readonly'), 'code_project': 'a' * 32,
+            'question': '继续查 aimore 的 5xx，对照故障时间日志和配置，再检查代码；只读',
+            'selection': {'kind': 'overview'}}
+    status, job = request(http_server, 'POST', '/terminal-ai/panel', data)
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), job['id'])
+    assert done['status'] == 'done' and len(done['events']) == len(sequence) + 1, done
+    assert all(event['status'] == 'done' and not event['write'] for event in done['events']), done
+    stored = json.dumps(manager.history.detail(job['history_id']))
+    assert 'log-secret' not in stored and 'config-secret' not in stored
+    # Stored conversations retain tool access on a later request, not just first launch.
+    model_server.content = lambda body, count: tool_response(protocol, 'list_containers', {}, 'followup') if count == 15 else answer(protocol)
+    status, followup = request(http_server, 'POST', '/terminal-ai/panel', {**data, 'history_id': job['history_id']})
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), followup['id'])
+    assert done['status'] == 'done' and done['events'][-1]['status'] == 'done', done
+    assert len(manager.history.detail(job['history_id'])['turns']) == 2
 
 
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])

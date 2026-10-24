@@ -102,6 +102,11 @@ def test_runner_enforces_output_limit_and_reports_timeout(monkeypatch):
         operations.run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=.1)
 
 
+def test_binary_runner_preserves_archive_bytes_and_uses_explicit_output_bound():
+    _, output, limited = operations.run([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(bytes(range(256))*32)'],
+                                       max_bytes=4096, binary=True)
+    assert limited and output == bytes(range(256)) * 16
+
 @pytest.mark.parametrize("line", ["2027-01-15T08:00:00Z message", "[15/Jan/2027:08:00:00 +0000] GET /",
                                  '{"ts":1800000000,"msg":"message"}'])
 def test_supported_log_timestamps(line):

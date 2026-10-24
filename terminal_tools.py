@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 import shlex
+import math
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import terminal_command_policy
@@ -15,6 +17,7 @@ class ToolError(ValueError):
 CONTAINER = {"type": "string", "description": "容器名称或完整 ID，来自容器列表"}
 UNIT = {"type": "string", "description": "systemd 服务名，例如 nginx.service"}
 LINES = {"type": "integer", "minimum": 1, "maximum": 200, "description": "读取行数，默认 100"}
+LOG_TIME = {'type': ['number', 'string'], 'description': 'Unix 秒或带时区的 ISO 8601 时间，例如 2026-10-23T15:37:00+08:00；since/until 必须同时提供'}
 DIRECTORY = {"type": "string", "description": "目录的 Linux 绝对路径；省略或填写 . 表示 SSH 登录默认目录，不是交互终端 cd 后的目录"}
 FILE = {"type": "string", "description": "要读取的文本文件的 Linux 绝对路径，例如 /var/log/nginx/error.log"}
 HASH = {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "inspect_file 返回的原文件 SHA-256；已有文件必须提供，版本改变会拒绝写入"}
@@ -28,7 +31,7 @@ VALIDATION = {'type': 'object', 'description': '修改后的只读配置校验�
               'required': ['runtime', 'path'], 'additionalProperties': False}
 REASON = {'type': 'string', 'maxLength': 500, 'description': '向用户解释本次修改解决什么问题，不能替代用户授权'}
 DIAGNOSTICS = {
-    'processes': ['ps', 'aux'], 'disk_space': ['df', '-hPT'],
+    'processes': ['ps', '-eo', 'pid,ppid,user,pcpu,pmem,rss,etime,comm', '--sort=-pcpu'], 'disk_space': ['df', '-hPT'],
     'network_addresses': ['ip', 'address', 'show'], 'network_routes': ['ip', 'route', 'show'],
     'connections': ['ss', '-antup'], 'docker_info': ['docker', 'info'],
     'docker_stats': ['docker', 'stats', '--no-stream', '--no-trunc'],
@@ -78,16 +81,45 @@ TOOLS = {
                          ['container', 'action'], True),
     "list_containers": ("列出所有 Docker 容器及完整 ID、状态、端口", {}, [], False),
     "get_container_status": ("检查容器运行、重启次数及健康状态，不读取环境变量", {"container": CONTAINER}, ["container"], False),
-    "get_container_logs": ("读取容器最近 30 分钟的日志", {"container": CONTAINER, "lines": LINES}, ["container"], False),
+    "get_container_logs": ("读取容器日志；可指定故障起止时间，默认最近 30 分钟；截断时缩小时间窗口继续查",
+                           {"container": CONTAINER, "lines": LINES, 'since': LOG_TIME, 'until': LOG_TIME}, ["container"], False),
     "list_services": ("列出 systemd 服务状态", {}, [], False),
     "get_service_status": ("检查指定 systemd 服务状态", {"service": UNIT}, ["service"], False),
-    "get_service_logs": ("读取指定服务最近 30 分钟的日志", {"service": UNIT, "lines": LINES}, ["service"], False),
+    "get_service_logs": ("读取 systemd 服务日志；可指定故障起止时间，默认最近 30 分钟；截断时缩小时间窗口继续查",
+                         {"service": UNIT, "lines": LINES, 'since': LOG_TIME, 'until': LOG_TIME}, ["service"], False),
     "get_listening_ports": ("检查 TCP 和 UDP 监听端口", {}, [], False),
     "restart_container": ("重启容器，可能短暂中断业务；必须使用容器列表中的完整 64 位 ID，不能使用名称",
                           {"container": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}, ["container"], True),
     "restart_service": ("重启 systemd 服务，可能短暂中断业务", {"service": UNIT}, ["service"], True),
     "reload_service": ("重载 systemd 服务配置；服务需支持 reload", {"service": UNIT}, ["service"], True),
 }
+
+# These plans consist of validated argv only and can also run on the panel host.
+# File access, HTTP probes, configuration validators and writes keep their own boundaries.
+LOCAL_READ_TOOLS = frozenset({'list_containers', 'get_container_status', 'get_container_logs',
+    'list_services', 'get_service_status', 'get_service_logs', 'get_listening_ports', 'run_diagnostic'})
+
+
+def log_window(arguments):
+    if 'since' not in arguments and 'until' not in arguments:
+        return {}
+    result = {}
+    for key in ('since', 'until'):
+        value = arguments.get(key)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if parsed.tzinfo is None:
+                    raise ValueError()
+                value = parsed.timestamp()
+            except (ValueError, OverflowError):
+                raise ToolError('日志时间须为 Unix 秒或带时区的 ISO 8601 时间') from None
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 253402214400:
+            raise ToolError('since/until 须同时提供有效时间')
+        result[key] = value
+    if not 0 <= result['until'] - result['since'] <= 86400:
+        raise ToolError('每次查询时间跨度不得超过一天；可分时间段继续查询')
+    return result
 
 
 COMMAND_TOOL = {
@@ -163,6 +195,8 @@ def plan(name, arguments, *, commands=False):
     if not isinstance(arguments, dict) or set(arguments) - set(properties) or set(required) - set(arguments):
         raise ToolError("工具参数不完整或包含未支持的参数。")
     args = dict(arguments)
+    if name in {'get_container_logs', 'get_service_logs'}:
+        args.update(log_window(args))
     reason = args.pop('reason', '')
     if not isinstance(reason, str) or len(reason) > 500 or '\0' in reason:
         raise ToolError('操作原因须为文本，最多 500 字。')
@@ -235,6 +269,8 @@ def plan(name, arguments, *, commands=False):
         "get_container_status": ["docker", "inspect", "--format",
             '{{.Id}} {{.Name}} status={{.State.Status}} running={{.State.Running}} restarts={{.RestartCount}} '
             'paused={{.State.Paused}} exit={{.State.ExitCode}} error={{.State.Error}} auto_remove={{.HostConfig.AutoRemove}} '
+            'created={{.Created}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} '
+            'image={{.Image}} networks={{json .NetworkSettings.Networks}} '
             'mounts={{json .Mounts}} {{if .State.Health}}health={{.State.Health.Status}}{{end}}',
             "--", container],
         "get_container_logs": ["docker", "logs", "--timestamps", "--since", "30m", "--tail", str(args.get("lines", 100)), container],
@@ -246,6 +282,12 @@ def plan(name, arguments, *, commands=False):
         "restart_service": ["systemctl", "--no-ask-password", "restart", "--", service],
         "reload_service": ["systemctl", "--no-ask-password", "reload", "--", service],
     }
+    if name in {'get_container_logs', 'get_service_logs'} and 'since' in args:
+        since, until = [datetime.fromtimestamp(args[key], timezone.utc).isoformat() for key in ('since', 'until')]
+        commands[name] = (['docker', 'logs', '--timestamps', '--since', since, '--until', until,
+                          '--tail', str(args['lines']), container] if name == 'get_container_logs' else
+                         ['journalctl', '--no-pager', '--output=short-iso-precise', '--since', '@' + str(args['since']),
+                          '--until', '@' + str(args['until']), '-n', str(args['lines']), '-u', service])
     if name in SFTP_TOOLS:
         operation = {'inspect_file': '检查文件', 'read_text_file': '分页读取文件', 'search_files': '搜索文件',
                      'search_text': '搜索文件内容', 'write_file': '写入文件', 'edit_file': '替换文件片段',
@@ -305,6 +347,7 @@ def plan(name, arguments, *, commands=False):
                    "{ printf '%s\\n' '容器启用了自动删除或无法确认，拒绝停止/重启以保留文件。' >&2; exit 1; }; " + command)
     return {"name": name, "arguments": args, "title": description.split('，')[0].split('；')[0],
             "command": command, "write": write, 'reason': reason, 'transport': 'sftp' if name in SFTP_TOOLS else 'exec',
+            'argv': shlex.split(command) if name in LOCAL_READ_TOOLS else None,
             'validation': validation,
             "impact": ("已有文件先保存原文备份并校验版本，可能改变业务配置；不删除文件、不自动重载服务。"
                        if name in FILE_WRITES else

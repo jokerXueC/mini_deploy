@@ -7,6 +7,7 @@ import pytest
 import agent
 import basic_protection
 from test_login_guard import guard as guard
+from login_guard import DEFAULTS
 from test_ssh_browser import page as page, playwright
 from test_deployment_removal import http_server as http_server, runtime as runtime
 
@@ -157,6 +158,67 @@ def test_map_point_details_group_ips_counts_keyboard_and_refresh(page, http_serv
     playwright.expect(point).to_be_focused()
     page.keyboard.press('Space')
     playwright.expect(page.locator('#securityMapDetail')).to_be_visible()
+
+
+@pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'dark')])
+def test_map_ip_manual_ban_confirmation_actual_enforcement_and_unban(
+        page, http_server, native, monkeypatch, tmp_path, width, theme):
+    engine, _, kernel = native
+    engine.change({**DEFAULTS, 'action': 'settings', 'maxretry': 50}, '127.0.0.1')
+    engine.tick({'ready': True, 'ports': [2222]})
+    monkeypatch.setattr(agent, '_ip_security', lambda: SimpleNamespace(
+        guard=engine, observation={'ssh': {'ready': True, 'ports': [2222]}}))
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.add_init_script('try { localStorage.setItem("mini_deploy-theme", ' + json.dumps(theme) + ') } catch (_) {}')
+    page.goto(http_server.origin + '/ui?view=security')
+    page.locator('#securityMapDots [role=button]').first.click()
+    button = page.locator('#securityMapDetailBody [data-ban]').first
+    playwright.expect(button).to_be_enabled()
+    ip = button.get_attribute('data-ban')
+    button.click()
+    playwright.expect(page.locator('#confirmMessage')).to_contain_text(ip)
+    playwright.expect(page.locator('#confirmMessage')).to_contain_text('面板和 SSH 登录')
+    playwright.expect(page.locator('#confirmMessage')).to_contain_text('1 小时')
+    page.locator('#confirmCancelBtn').click()
+    assert engine.status()['ban_total'] == 0
+    button.click()
+    page.locator('#confirmOkBtn').click()
+    playwright.expect(page.locator('#ipSecurityFeedback')).to_have_text('封禁已生效，到期自动解封。')
+    playwright.expect(button).to_have_text('已封禁')
+    playwright.expect(button).to_be_disabled()
+    assert engine.blocked(ip) and all(row['enforced'] for row in engine.status()['bans'])
+    assert kernel.calls[-1][1][0]['ip'] == ip
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#securityMapDetail').scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / f'map-manual-ban-{width}-{theme}.png'))
+    for scope in ('panel', 'ssh'):
+        page.locator(f'#securityBans [data-unban="{ip}"][data-source="{scope}"]').click()
+        page.locator('#confirmOkBtn').click()
+        playwright.expect(page.locator(f'#securityBans [data-unban="{ip}"][data-source="{scope}"]')).to_have_count(0)
+    playwright.expect(button).to_be_enabled()
+    assert not engine.blocked(ip) and engine.status()['ban_total'] == 0
+
+
+def test_manual_ban_failure_does_not_show_success_and_current_ip_is_disabled(page, http_server, native, monkeypatch):
+    monkeypatch.setattr(agent, '_request_client_ip', lambda request: '1.1.1.1')
+    page.goto(http_server.origin + '/ui?view=security')
+    for point in page.locator('#securityMapDots [role=button]').all():
+        point.click()
+        if page.locator('#securityMapDetailBody [data-ban="1.1.1.1"]').count():
+            break
+    playwright.expect(page.locator('#securityMapDetailBody [data-ban="1.1.1.1"]')).to_be_disabled()
+    for point in page.locator('#securityMapDots [role=button]').all():
+        point.click()
+        if page.locator('#securityMapDetailBody [data-ban="8.8.8.8"]').count():
+            break
+    page.route('**/security/logins', lambda route: route.fulfill(status=503, json={'detail': '内核拒绝封禁'}))
+    button = page.locator('#securityMapDetailBody [data-ban="8.8.8.8"]')
+    button.click()
+    page.locator('#confirmOkBtn').click()
+    playwright.expect(page.locator('#ipSecurityFeedback')).to_contain_text('内核拒绝封禁')
+    playwright.expect(button).to_have_text('手动封禁')
+    playwright.expect(button).to_be_enabled()
+    assert native[0].status()['ban_total'] == 0
 
 
 def test_basic_protection_click_progress_failure_and_explicit_coverage(page, http_server, native, tmp_path):

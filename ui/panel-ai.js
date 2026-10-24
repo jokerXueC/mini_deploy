@@ -32,7 +32,7 @@
     if (run !== generation || !dialog.open) return;
     settings = result; token = settings.csrf_token;
     $('panelAIHttp').hidden = !!(settings.secure || settings.http_enabled);
-    $('panelAIScope').textContent = settings.configured ? `问题、运维证据及所选源码发送至 ${settings.base_url} · ${settings.model}` : '请先配置模型，再发送诊断问题';
+    $('panelAIScope').textContent = settings.configured ? `问题、日志、代理配置及所选源码发送至 ${settings.base_url} · ${settings.model}` : '请先配置模型，再发送诊断问题';
   }
   function codeStatus() {
     const project = projects.find(p => p.id === $('panelAICodeProject').value);
