@@ -68,6 +68,17 @@ def command(argv, timeout=30, env=None):
     return text
 
 
+def download_error(channel, error):
+    name = {'gitee': 'Gitee', 'github': 'GitHub'}[channel]
+    detail = str(error)
+    if any(value in detail.lower() for value in ('could not read username', 'authentication failed',
+                                                 'terminal prompts disabled', '401', '403')):
+        return f'{name} 拒绝匿名读取（仓库权限或访问限制）；无需填写服务器密码'
+    if isinstance(error, subprocess.TimeoutExpired):
+        return f'{name} 连接超时'
+    return f'{name} 下载失败：{detail[:600]}'
+
+
 def release_files(root, entries=ENTRIES, required=True):
     files, total = [], 0
     for entry in entries:
@@ -185,7 +196,8 @@ class Maintenance:
                         if active not in {'active', 'activating', 'reloading'}:
                             job.update(state='failed', phase='维护进程已中断，请检查服务和保留的备份',
                                        error='不自动重试中断的更新；文件和恢复快照保留')
-                    jobs.append({k: job.get(k) for k in ('id', 'action', 'state', 'phase', 'started_at', 'finished_at', 'error', 'backup', 'revision')})
+                    jobs.append({k: job.get(k) for k in ('id', 'action', 'state', 'phase', 'started_at', 'finished_at',
+                                                       'error', 'backup', 'revision', 'download_channel', 'notice')})
         trusted_path(self.backup)
         if self.backup.exists():
             with os.scandir(self.backup) as entries:
@@ -216,14 +228,23 @@ class Maintenance:
         if not isinstance(channel, str) or channel not in REMOTES:
             raise ValueError('请选择 GitHub 或 Gitee')
         self.supported()
-        url, branch = REMOTES[channel]
-        output = command(['git', 'ls-remote', '--heads', url, 'refs/heads/' + branch], env=self.git_env())
-        match = re.fullmatch(r'([0-9a-f]{40})\s+refs/heads/' + branch, output)
-        if not match:
-            raise ValueError('远端版本读取失败')
-        result = {'channel': channel, 'revision': match[1], 'checked_at': time.time()}
-        write_json(self.directory / 'checked.json', result)
-        return result
+        failures = []
+        for candidate in (channel, *(name for name in REMOTES if name != channel)):
+            url, branch = REMOTES[candidate]
+            try:
+                output = command(['git', 'ls-remote', '--heads', url, 'refs/heads/' + branch], env=self.git_env())
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                failures.append(download_error(candidate, exc))
+                continue
+            match = re.fullmatch(r'([0-9a-f]{40})\s+refs/heads/' + branch, output)
+            if not match:
+                raise ValueError('远端版本读取失败')
+            result = {'channel': candidate, 'revision': match[1], 'checked_at': time.time()}
+            if failures:
+                result['notice'] = '；'.join(failures) + f'；已切换到 {candidate} 官方仓库，请确认所显示的版本。'
+            write_json(self.directory / 'checked.json', result)
+            return result
+        raise RuntimeError('；'.join(failures) + '；请检查服务器到官方仓库的网络连通性。')
 
     def start(self, data):
         with LOCK:
@@ -328,13 +349,26 @@ class Maintenance:
     def stage(self, job):
         folder = self.backup / ('update-' + job['id'])
         folder.mkdir(mode=0o700)
-        url, branch = REMOTES[job['channel']]
-        source = folder / 'source'
-        command(['git', 'clone', '--depth=1', '--single-branch', '--branch', branch, url, str(source)],
-                timeout=180, env=self.git_env())
-        revision = command(['git', '-C', str(source), 'rev-parse', 'HEAD'], env=self.git_env())
-        if revision != job['revision']:
-            raise ValueError('远端版本已变化，请重新检查更新；未修改已安装程序')
+        channel, failures = job['channel'], []
+        for candidate in (channel, *(name for name in REMOTES if name != channel)):
+            url, branch = REMOTES[candidate]
+            # Keep a failed checkout intact; each official mirror has its own staging path.
+            source = folder / ('source' if candidate == channel else 'source-' + candidate)
+            try:
+                command(['git', 'clone', '--depth=1', '--single-branch', '--branch', branch, url, str(source)],
+                        timeout=180, env=self.git_env())
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                failures.append(download_error(candidate, exc))
+                continue
+            revision = command(['git', '-C', str(source), 'rev-parse', 'HEAD'], env=self.git_env())
+            if revision != job['revision']:
+                raise ValueError('远端版本已变化，请重新检查更新；未修改已安装程序')
+            job['download_channel'] = candidate
+            if failures:
+                job['notice'] = '；'.join(failures) + f'；已从 {candidate} 下载并核对同一提交版本。'
+            break
+        else:
+            raise RuntimeError('；'.join(failures) + '；原程序未修改。')
         contract = read_json(source / 'release.json')
         if contract != read_json(self.app / 'release.json'):
             raise ValueError('更新涉及安装或数据兼容变化，请使用 install.sh 升级')

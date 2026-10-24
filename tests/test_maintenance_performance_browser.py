@@ -19,13 +19,15 @@ def preview(dashboard):
     page.route('**/system-metrics', lambda r: r.fulfill(json={'server': server}))
     page.route('**/system/swap', lambda r: r.fulfill(json={
         'supported': False, 'editable': False, 'detail': '本地预览不操作 Swap', 'job': {}}))
-    control = {'calls': [], 'running': False, 'finished': False, 'offline': False}
+    control = {'calls': [], 'running': False, 'finished': False, 'offline': False, 'fallback': False}
     def api(route):
         control['calls'].append((route.request.method, route.request.url, route.request.post_data_json))
         if route.request.method == 'POST':
             assert route.request.headers['x-csrf-token'] == 'test-token'
             if route.request.url.endswith('/check'):
-                result = {'revision': 'b' * 40, 'channel': 'gitee'}
+                result = {'revision': 'b' * 40, 'channel': 'github' if control['fallback'] else 'gitee'}
+                if control['fallback']:
+                    result['notice'] = 'Gitee 拒绝匿名读取；已切换到 GitHub 官方仓库'
             else:
                 assert route.request.post_data_json['confirm']
                 control['running'] = True
@@ -98,3 +100,19 @@ def test_maintenance_confirmation_polling_and_reconnect(preview, tmp_path, width
     playwright.expect(page.locator('#maintenanceDialog')).to_be_visible()
     page.keyboard.press('Escape')
     playwright.expect(page.locator('#maintenanceDialog')).not_to_be_visible()
+
+
+def test_maintenance_uses_actual_fallback_source_in_confirmation(preview):
+    page, _, control = preview
+    control['fallback'] = True
+    page.locator('#panelMaintenanceOpen').click()
+    playwright.expect(page.locator('#maintenanceVersion')).to_contain_text('aaaaaaaa')
+    page.locator('#maintenanceCheck').click()
+    playwright.expect(page.locator('#maintenanceFeedback')).to_contain_text('已切换到 GitHub')
+    playwright.expect(page.locator('#maintenanceChannel')).to_have_value('github')
+    playwright.expect(page.locator('#maintenanceUpdate')).to_be_enabled()
+    page.once('dialog', lambda dialog: dialog.accept())
+    page.locator('#maintenanceUpdate').click()
+    playwright.expect(page.locator('#maintenanceJob')).to_contain_text('健康检查')
+    payload = next(body for method, url, body in control['calls'] if method == 'POST' and url.endswith('/panel-maintenance'))
+    assert payload['channel'] == 'github' and payload['revision'] == 'b' * 40

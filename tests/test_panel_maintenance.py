@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -176,6 +177,90 @@ def test_stage_refuses_changed_remote_or_contract_and_missing_release(panel, mon
     mode['contract'] = None
     with pytest.raises(ValueError, match='更新包缺少'):
         panel.stage({'id': 'c' * 32, 'channel': 'gitee', 'revision': 'a' * 40})
+
+
+@pytest.mark.parametrize('channel,error', [
+    ('gitee', RuntimeError("fatal: could not read Username for 'https://gitee.com': terminal prompts disabled")),
+    ('github', subprocess.TimeoutExpired(['git'], 30)),
+])
+def test_check_falls_back_to_official_source_and_pins_actual_channel(panel, monkeypatch, channel, error):
+    calls = []
+    fallback = next(name for name in pm.REMOTES if name != channel)
+    def command(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs['env']['GIT_TERMINAL_PROMPT'] == '0'
+        assert kwargs['env']['GIT_CONFIG_GLOBAL'] == pm.os.devnull
+        if pm.REMOTES[channel][0] in argv:
+            raise error
+        return 'b' * 40 + '\trefs/heads/' + pm.REMOTES[fallback][1]
+    monkeypatch.setattr(pm, 'command', command)
+    result = panel.check(channel)
+    assert len(calls) == 2 and result['channel'] == fallback and result['revision'] == 'b' * 40
+    assert fallback in result['notice']
+    assert pm.read_json(panel.directory / 'checked.json') == result
+    monkeypatch.setattr(panel, 'status', lambda: {'jobs': []})
+    with pytest.raises(ValueError, match='过期'):
+        panel.start({'action': 'update', 'channel': channel, 'revision': result['revision'], 'confirm': True})
+    assert not (panel.directory / 'unexpected.json').exists()
+
+
+def test_check_healthy_source_does_not_contact_mirror_or_fall_back_on_invalid_revision(panel, monkeypatch):
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        return 'a' * 40 + '\trefs/heads/master'
+    monkeypatch.setattr(pm, 'command', command)
+    assert panel.check('gitee')['channel'] == 'gitee' and len(calls) == 1
+    monkeypatch.setattr(pm, 'command', lambda *args, **kwargs: 'invalid revision')
+    with pytest.raises(ValueError, match='远端版本读取失败'):
+        panel.check('gitee')
+
+
+def test_unavailable_sources_keep_program_running_and_explain_anonymous_access(panel, monkeypatch):
+    original = (panel.app / 'agent.py').read_bytes()
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        raise RuntimeError('fatal: could not read Username: terminal prompts disabled')
+    monkeypatch.setattr(pm, 'command', command)
+    with pytest.raises(RuntimeError, match='拒绝匿名读取') as error:
+        panel.check('gitee')
+    assert 'Gitee' in str(error.value) and 'GitHub' in str(error.value)
+    assert len(calls) == 2
+    job = {'id': '1' * 32, 'channel': 'gitee', 'revision': 'a' * 40, 'action': 'update', 'started_at': time.time()}
+    panel.worker(job)
+    assert job['state'] == 'failed' and '原程序未修改' in job['error']
+    assert not any(argv[0] == 'systemctl' for argv in calls)
+    assert (panel.app / 'agent.py').read_bytes() == original
+
+
+@pytest.mark.parametrize('revision', ['a' * 40, 'b' * 40])
+def test_download_fallback_preserves_partial_checkout_and_requires_identical_revision(panel, monkeypatch, revision):
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if 'clone' in argv:
+            source = Path(argv[-1])
+            source.mkdir()
+            (source / 'agent.py').write_text('pass')
+            if pm.REMOTES['gitee'][0] in argv:
+                raise RuntimeError('fatal: Authentication failed')
+            shutil.copyfile(panel.app / 'release.json', source / 'release.json')
+            return ''
+        return revision
+    monkeypatch.setattr(pm, 'command', command)
+    monkeypatch.setattr(pm, 'release_files', lambda root: (['agent.py', 'release.json'], 100))
+    job = {'id': '2' * 32, 'channel': 'gitee', 'revision': 'a' * 40}
+    if revision == job['revision']:
+        source, files = panel.stage(job)
+        assert source.name == 'source-github' and 'agent.py' in files
+        assert job['download_channel'] == 'github' and '同一提交' in job['notice']
+    else:
+        with pytest.raises(ValueError, match='远端版本已变化'):
+            panel.stage(job)
+    assert (panel.backup / ('update-' + job['id']) / 'source/agent.py').read_text() == 'pass'
+    assert (panel.app / 'agent.py').read_text() == 'print("old")\n'
+    assert len(calls) == 3 and all(argv[0] == 'git' for argv in calls)
 
 
 def test_release_manifest_matches_installer_and_protects_non_program_paths():

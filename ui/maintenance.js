@@ -29,7 +29,7 @@
       el('maintenanceNotice').textContent = data.notice;
       el('maintenanceBackupPath').textContent = `${data.backup_directory || ''} · 不自动删除备份`;
       const latest = data.jobs?.[0];
-      el('maintenanceJob').textContent = latest ? `${date(latest.started_at)} · ${latest.phase}${latest.error ? ` · ${latest.error}` : ''}` : '';
+      el('maintenanceJob').textContent = latest ? `${date(latest.started_at)} · ${latest.phase}${latest.notice ? ` · ${latest.notice}` : ''}${latest.error ? ` · ${latest.error}` : ''}` : '';
       el('maintenanceBackups').innerHTML = data.backups?.length ? data.backups.map(b => `<li><div>${h(b.kind === 'program' ? '程序快照' : '完整安装备份')} · ${date(b.at)}<small>${h(b.id)} · 使用前会重新校验</small></div><div class="maintenance-actions"><button type="button" class="ghost-button compact-action" data-maintenance-action="verify" data-maintenance-backup="${h(b.id)}">校验</button>${b.kind === 'program' ? `<button type="button" class="ghost-button compact-action" data-maintenance-action="restore" data-maintenance-backup="${h(b.id)}">恢复程序</button>` : ''}</div></li>`).join('') : '<li>尚无已完成的备份</li>';
       message(data.warning || (running() ? '维护任务正在独立运行；重启期间页面会自动重连。' : ''));
       controls(); if (running()) timer = setTimeout(refresh, 2500);
@@ -59,7 +59,12 @@
   });
   el('maintenanceCheck').addEventListener('click', async () => {
     busy = true; checked = null; controls(); message('检查官方仓库版本…');
-    try { checked = await postJsonBody('panel-maintenance/check', {channel:el('maintenanceChannel').value}); el('maintenanceLatest').textContent = checked.revision === state.version?.revision ? '已是所检查版本' : checked.revision.slice(0, 12); message('版本检查完成，更新只使用本次检查的版本。'); }
+    try {
+      checked = await postJsonBody('panel-maintenance/check', {channel:el('maintenanceChannel').value});
+      el('maintenanceChannel').value = checked.channel;
+      el('maintenanceLatest').textContent = checked.revision === state.version?.revision ? '已是所检查版本' : checked.revision.slice(0, 12);
+      message(checked.notice || '版本检查完成，更新只使用本次检查的版本。');
+    }
     catch (error) { el('maintenanceLatest').textContent = '检查失败'; message(error.message); }
     finally { busy = false; controls(); }
   });
