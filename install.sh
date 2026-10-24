@@ -571,6 +571,38 @@ validate_release_source_tree() {
   done
 }
 
+wait_for_maintenance_lock() {
+  local lock_status=0
+  if flock -n -E 75 "$MAINTENANCE_LOCK_FD"; then
+    return 0
+  else
+    lock_status=$?
+  fi
+  if [[ "$lock_status" != "75" ]]; then
+    echo "维护锁获取失败，未执行升级 / Could not acquire maintenance lock (status $lock_status); upgrade not started." >&2
+    return 1
+  fi
+  echo "正在等待后台写入或维护任务释放锁，最多 60 秒 / Waiting up to 60 seconds for background writes or maintenance to finish..." >&2
+  if flock -w 60 -E 75 "$MAINTENANCE_LOCK_FD"; then
+    echo "维护锁已取得，继续安装 / Maintenance lock acquired; continuing installation." >&2
+    return 0
+  else
+    lock_status=$?
+  fi
+  if [[ "$lock_status" == "75" ]]; then
+    echo "等待维护锁超时，尚未执行升级；可能是后台写入、备份或其他维护仍在运行 / Timed out waiting for background writes, backup or maintenance; upgrade not started." >&2
+    if command -v lslocks >/dev/null 2>&1; then
+      echo "锁占用进程（PID / COMMAND / MODE / PATH） / Lock holders:" >&2
+      lslocks --noheadings --notruncate --output PID,COMMAND,MODE,PATH 2>/dev/null \
+        | awk -v lock_path="$MAINTENANCE_LOCK_FILE" '$4 == lock_path { print }' >&2 || true
+    fi
+    echo "请等待占锁任务结束后重试，不要删除锁文件或强行终止未知进程 / Wait for the owning task to finish before retrying; do not remove the lock file or force-stop unknown processes." >&2
+  else
+    echo "等待维护锁失败，未执行升级 / Maintenance lock wait failed (status $lock_status); upgrade not started." >&2
+  fi
+  return 1
+}
+
 acquire_maintenance_lock() {
   local lock_parent=""
   local lock_root=""
@@ -630,10 +662,7 @@ acquire_maintenance_lock() {
   fi
   chown root:root "/proc/self/fd/$MAINTENANCE_LOCK_FD"
   chmod 600 "/proc/self/fd/$MAINTENANCE_LOCK_FD"
-  if ! flock -n "$MAINTENANCE_LOCK_FD"; then
-    echo "另一个安装、备份或维护操作正在运行 / Another install, backup, or maintenance operation is active." >&2
-    return 1
-  fi
+  wait_for_maintenance_lock
 }
 
 copy_without_rsync() {

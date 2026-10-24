@@ -57,6 +57,39 @@ def test_release_manifest_excludes_deployment_adapters_and_templates():
     assert "DEPLOY_LOG_FILE" not in INSTALLER
 
 
+@pytest.mark.parametrize('first,second,success,waited', [
+    (0, 0, True, False), (75, 0, True, True), (75, 75, False, True),
+    (64, 0, False, False), (75, 74, False, True),
+])
+def test_installer_waits_for_busy_lock_but_never_bypasses_it(tmp_path, first, second, success, waited):
+    calls = tmp_path / 'lock-calls'
+    script = '''
+MAINTENANCE_LOCK_FD=19
+MAINTENANCE_LOCK_FILE=/run/mini-deploy-agent/maintenance.lock
+flock() {
+  printf '%s\\n' "$*" >> "$LOCK_CALLS"
+  if [[ "$1" == "-n" ]]; then return "$FIRST"; fi
+  return "$SECOND"
+}
+lslocks() {
+  printf '%s\\n' '123 python3.13 READ /run/mini-deploy-agent/maintenance.lock'
+  printf '%s\\n' '456 other WRITE /unrelated.lock'
+}
+'''
+    script += function('wait_for_maintenance_lock') + '\nwait_for_maintenance_lock\nprintf "INSTALL_STARTED"\n'
+    result = bash_run(script, LOCK_CALLS=calls.as_posix(), FIRST=first, SECOND=second)
+    assert (result.returncode == 0) is success, result.stderr
+    assert ('INSTALL_STARTED' in result.stdout) is success
+    expected = ['-n -E 75 19'] + (['-w 60 -E 75 19'] if waited else [])
+    assert calls.read_text().splitlines() == expected
+    if first == 75 and second == 75:
+        assert '123 python3.13 READ' in result.stderr
+        assert '456 other' not in result.stderr
+        assert '尚未执行升级' in result.stderr
+    elif not success:
+        assert 'status ' in result.stderr and 'Lock holders' not in result.stderr
+
+
 @pytest.mark.parametrize('value, expected', [('', '86400'), ('28800', '86400'), ('"28800"', '86400'), ('3600', '')])
 def test_upgrade_migrates_only_previous_default_login_lifetime(tmp_path, value, expected):
     env_file = tmp_path / 'test.env'

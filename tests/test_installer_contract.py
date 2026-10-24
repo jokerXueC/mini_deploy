@@ -267,7 +267,8 @@ def test_install_and_backup_share_private_maintenance_lock() -> None:
     assert f'MAINTENANCE_LOCK_FILE="{lock_path}"' in BACKUP_SCRIPT
     assert 'BACKUP_MAINTENANCE_LOCK_HELD="true"' in INSTALLER
     assert 'BACKUP_MAINTENANCE_LOCK_FD="$MAINTENANCE_LOCK_FD"' in INSTALLER
-    assert 'flock -n "$MAINTENANCE_LOCK_FD"' in INSTALLER
+    assert 'flock -n -E 75 "$MAINTENANCE_LOCK_FD"' in INSTALLER
+    assert 'flock -w 60 -E 75 "$MAINTENANCE_LOCK_FD"' in INSTALLER
     assert 'flock -n "$MAINTENANCE_LOCK_FD"' in BACKUP_SCRIPT
     for script in (INSTALLER, BACKUP_SCRIPT):
         assert "stat -Lc '%d:%i' -- \"/proc/self/fd/$MAINTENANCE_LOCK_FD\"" in script

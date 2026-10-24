@@ -205,6 +205,8 @@ mini_deploy_update="$(mktemp -d /tmp/mini-deploy-update.XXXXXX)" && git clone --
 
 如果服务器无法访问 GitHub，将 `--branch main https://github.com/jokerXueC/mini_deploy.git` 换为 `--branch master https://gitee.com/XC1960/mini_deploy.git`。旧更新器会在运行新代码之前拒绝变化的发布清单，所以仅刷新网页或继续点击旧更新按钮无法安装本次修复。升级成功后，兼容的后续版本可继续使用网页更新。
 
+安装器与后台写入共用维护锁，遇到占用会自动等待最多 60 秒。普通后台写入的读锁也会阻止安装器立即取得独占锁，不代表另一个安装任务一定在运行。超时则在升级前退出，并在系统提供 `lslocks` 时显示占锁进程；等待任务结束后重试即可。不要删除锁文件来绕过检查，以免更新与数据写入并发。
+
 网页维护只支持 root + systemd 的标准 Linux 安装；本地演示禁用操作。完整备份的配置/数据库恢复需单独核对，不会通过「恢复程序」覆盖。断电、进程被强制终止或磁盘故障可能需要人工检查保留的备份；Linux 实机更新/恢复验收仍需完成。
 
 默认安装使用：
