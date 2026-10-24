@@ -143,6 +143,36 @@ def proxy(request, backend, tmp_path):
         output.close()
 
 
+def test_real_ip_requires_trusted_peer_and_uses_last_forwarded_address(proxy):
+    spec, records, update = proxy
+
+    def visit(path):
+        client = http.client.HTTPConnection('127.0.0.1', spec['port'], timeout=3)
+        try:
+            client.request('GET', path, headers={'X-Forwarded-For': '198.51.100.7, 203.0.113.9'})
+            response = client.getresponse()
+            assert response.status == 200
+            response.read()
+        finally:
+            client.close()
+
+    visit('/untrusted-ip')
+    for _ in range(30):
+        untrusted = [r for r in records() if r['path'] == '/untrusted-ip']
+        if untrusted:
+            break
+        time.sleep(.1)
+    assert untrusted[-1]['client_ip'] == '127.0.0.1'
+    update(gateway.normalize({**spec, 'trust_proxy': True, 'trusted_proxies': ['127.0.0.1']}))
+    for _ in range(30):
+        visit('/trusted-ip')
+        trusted = [r for r in records() if r['path'] == '/trusted-ip']
+        if trusted and trusted[-1]['client_ip'] == '203.0.113.9':
+            break
+        time.sleep(.1)
+    assert trusted[-1]['client_ip'] == '203.0.113.9' and trusted[-1]['peer_ip'] == '127.0.0.1'
+
+
 def test_real_proxy_post_stream_websocket_privacy_and_reload(proxy, backend):
     spec, records, update = proxy
     connection = http.client.HTTPConnection('127.0.0.1', spec['port'], timeout=3)

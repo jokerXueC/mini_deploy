@@ -419,7 +419,9 @@ html[data-theme="light"] .theme-toggle-icon {
 .gateway-command-help p { color: var(--muted); line-height: 1.7; }
 .gateway-connection-state { font-size: 12px; color: var(--muted); }
 .gateway-image-field, .gateway-trust { grid-column: 1 / -1; }
-.gateway-trust { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.gateway-trust { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.6; }
+.gateway-trust input[type="checkbox"] { flex: 0 0 auto; margin-top: 3px; }
+#connectReadiness { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .request-gateway-entry { padding: 18px 0; border-bottom: 1px solid var(--line); }
 .request-gateway-title { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .request-gateway-route { margin: 10px 0; overflow-wrap: anywhere; }

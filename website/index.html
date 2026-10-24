@@ -3,75 +3,84 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="mini_deploy 是开源、自托管的 Linux 运维面板：服务器性能、Docker、请求记录、证书、SSH、AI 诊断与安全中心。">
-  <meta name="theme-color" content="#f7f9fc">
-  <meta property="og:title" content="mini_deploy · 轻量服务器运维面板">
-  <meta property="og:description" content="看清状态，找到问题，再决定如何处理。开源、自托管的 Linux 运维面板。">
-  <title>mini_deploy · 轻量服务器运维面板</title>
+  <meta name="description" content="mini_deploy，开源、自托管的 Linux 运维面板。性能历史、Docker、请求地图、SSH、AI 诊断与基础安全防护。">
+  <meta name="theme-color" content="#f4f6f7">
+  <meta property="og:title" content="mini_deploy · 服务器运维，从这里开始">
+  <meta property="og:description" content="从实时资源到历史现场，从一条异常到 AI 排查。开源、自托管的 Linux 运维面板。">
+  <title>mini_deploy · 服务器运维，从这里开始</title>
   <link rel="icon" href="assets/server.svg" type="image/svg+xml">
   <link rel="stylesheet" href="site.css">
   <script src="site.js" defer></script>
+  <script src="resource-demo.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到正文</a>
   <header class="site-header"><nav class="navigation wrap" aria-label="主导航">
-    <a class="wordmark" href="#" aria-label="mini_deploy 首页"><img src="assets/server.svg" width="22" height="22" alt="">mini_deploy</a>
-    <div class="nav-links"><a href="#features">功能</a><a href="#preview">面板预览</a><a href="#start">安装</a><a class="repo-link" href="https://github.com/jokerXueC/mini_deploy" target="_blank" rel="noopener noreferrer">GitHub <img src="assets/arrow-up-right.svg" width="15" height="15" alt=""></a></div>
+    <a class="wordmark" href="#" aria-label="mini_deploy 首页"><img src="assets/server.svg" width="23" height="23" alt="">mini_deploy<span class="open-source">开源</span></a>
+    <div class="nav-links"><a href="#features">功能</a><a href="#preview">产品预览</a><a href="#start" class="nav-install">开始安装<img src="assets/arrow-up-right.svg" width="15" height="15" alt=""></a><a class="repo-link" href="https://github.com/jokerXueC/mini_deploy" target="_blank" rel="noopener noreferrer" aria-label="GitHub 源代码">GitHub<img src="assets/arrow-up-right.svg" width="15" height="15" alt=""></a></div>
   </nav></header>
   <main id="main">
     <section class="hero" aria-labelledby="title">
-      <div class="hero-copy wrap"><p class="hero-category">开源 · 自托管 · Linux 运维面板</p><h1 id="title">mini_deploy</h1>
-        <p class="hero-description">看清服务器状态，<br class="mobile-break">让排查有据可依。</p>
-        <p class="hero-detail">性能、容器、请求与 AI 诊断，放在一个面板里。</p>
-        <div class="hero-actions"><a class="button primary" href="#start">开始安装<img src="assets/arrow-right.svg" width="18" height="18" alt=""></a><a class="button secondary" href="#preview">看看面板</a></div>
+      <div class="hero-copy wrap"><p class="hero-category"><span class="status-light"></span>你的服务器，你的控制台。</p>
+        <h1 id="title">mini_deploy</h1>
+        <div class="hero-bottom"><div><p class="hero-description">把运维现场，<br>留在一个屏幕里。</p><p class="hero-detail">性能、容器、请求、SSH 与 AI 诊断。<br>开源、自托管，从一台 Linux 服务器开始。</p></div><div class="hero-actions"><a class="button primary" href="#start">开始安装<img src="assets/arrow-right.svg" width="18" height="18" alt=""></a><a class="button secondary" href="#preview">探索面板<img src="assets/arrow-up-right.svg" width="18" height="18" alt=""></a></div></div>
       </div>
-      <span class="hero-caption">实际产品界面 · 演示数据</span>
-    </section>
-    <section class="intro wrap" id="features" aria-labelledby="features-title">
-      <div class="section-heading"><p class="section-label">日常运维，少开几个窗口。</p><h2 id="features-title">先看发生了什么，<br>再处理真正的问题。</h2><p>从资源变化找到时间点，从异常进入日志与进程现场。已经在运行的业务，接着用就好。</p></div>
-      <div class="feature-grid">
-        <article><img src="assets/activity.svg" alt="" width="24" height="24"><h3>性能与历史现场</h3><p>CPU、内存、网络、磁盘持续采集。查看 24 小时趋势，展开当时的进程，并导出报告。</p><span>每秒采集 · 每 30 秒持久保存</span></article>
-        <article><img src="assets/box.svg" alt="" width="24" height="24"><h3>容器与镜像</h3><p>查看 Docker 状态与日志，识别 OOM 和反复重启。管理镜像，清理旧悬空镜像。</p><span>支持主机镜像加速配置</span></article>
-        <article><img src="assets/route.svg" alt="" width="24" height="24"><h3>请求看得更清楚</h3><p>接口路径分级归类，查看耗时、状态、上游与来源 IP。需要深入分析时，导出完整记录。</p><span>支持已接入的网关与代理日志</span></article>
-        <article><img src="assets/sparkles.svg" alt="" width="24" height="24"><h3>从异常开始 AI 排查</h3><p>把告警与历史性能交给 AI，按需读取证据、继续追问。SSH 操作支持逐项审批。</p><span>OpenAI 兼容 · Claude 原生接口</span></article>
-        <article><img src="assets/shield-check.svg" alt="" width="24" height="24"><h3>服务器安全中心</h3><p>检查主机与容器风险，回看 SSH 登录和配置变化。需要处理时，再展开登录防护与封禁规则。</p><span>只读检查，防护操作需明确确认</span></article>
-        <article><img src="assets/key-round.svg" alt="" width="24" height="24"><h3>证书与远程终端</h3><p>扫描常见位置的站点与证书，查看到期时间。用 SSH 连接服务器，管理远程文件。</p><span>密码或私钥认证 · 核对主机指纹</span></article>
+      <div class="demo-dashboard wrap" id="demo-dashboard" role="region" aria-label="服务器资源动态演示">
+        <div class="demo-toolbar"><span><span class="status-light"></span>服务器状态 <small>演示数据</small></span><button id="demo-pause" class="image-tool" type="button" title="暂停演示" aria-label="暂停演示" aria-pressed="false"><img src="assets/pause.svg" width="16" height="16" alt=""></button></div>
+        <iframe id="demo-panel" src="panel-demo.html" title="mini_deploy 真实面板样式的动态资源演示"></iframe>
       </div>
+      <div class="hero-caption"><span>真实面板样式 / 动态演示数据</span><a href="#features" aria-label="向下查看功能"><img src="assets/arrow-right.svg" width="17" height="17" alt=""></a></div>
     </section>
-    <section class="product-section" id="preview" aria-labelledby="preview-title">
-      <div class="wrap"><div class="preview-heading"><div><p class="section-label">不用凭想象。</p><h2 id="preview-title">打开之后，就是这些。</h2></div><p>来自 mini_deploy 的实际界面，使用模拟数据。</p></div>
-        <div class="preview-tabs" role="tablist" aria-label="功能预览">
-          <button id="tab-server" role="tab" aria-selected="true" aria-controls="preview-panel" tabindex="0" data-preview="server">服务器状态</button>
-          <button id="tab-requests" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="requests">请求记录</button>
-          <button id="tab-ai" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="ai">AI 诊断</button>
-          <button id="tab-security" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="security">安全中心</button>
+    <section class="intro" id="features" aria-labelledby="features-title">
+      <div class="signal-section" aria-labelledby="signal-title"><div class="wrap">
+        <div class="signal-header"><div><p class="section-label">从一个波动，找到发生问题的那一刻。</p><h2 id="signal-title">状态会变化，现场有迹可循。</h2></div><div class="signal-controls"><div class="metric-tabs" role="group" aria-label="回放资源"><button type="button" data-metric="cpu" aria-pressed="true">CPU</button><button type="button" data-metric="memory" aria-pressed="false">内存</button><button type="button" data-metric="network" aria-pressed="false">网络</button></div><button id="signal-pause" class="image-tool" type="button" title="暂停回放" aria-label="暂停回放" aria-pressed="false"><img src="assets/pause.svg" width="18" height="18" alt=""></button></div></div>
+        <div class="signal-chart"><div class="signal-reading"><span id="signal-metric">CPU 使用率</span><strong id="signal-value">38.2<span>%</span></strong><small id="signal-time">资源回放 · 演示数据</small></div><div class="signal-plot"><canvas id="signal-canvas" aria-label="资源回放曲线，演示数据" role="img"></canvas><input id="signal-position" type="range" min="0" max="119" value="119" aria-label="查看回放时间点"><div class="signal-axis"><span>60 秒前</span><span>30 秒前</span><span>现在</span></div></div></div>
+        <p class="signal-caption">交互演示，非当前设备指标。面板支持查看历史时间点的资源、进程现场与关联事件。</p>
+      </div></div>
+      <div class="wrap feature-content"><div class="section-heading"><p class="section-label">为已经在运行的服务而做。</p><h2 id="features-title">少切几个窗口，<br>多看一点全貌。</h2><p>从服务器到容器，从请求来源到登录地区。日常要看的、出问题要查的，放在一起。</p></div>
+        <div class="feature-grid">
+          <article><img src="assets/activity.svg" alt="" width="28" height="28"><div><h3>性能不止看现在</h3><p>CPU、内存、网络与磁盘持续观测。回看历史曲线和进程现场，区分实时速率与累计流量，导出性能报告。</p><span>资源观测 / 进程现场 / 历史报告</span></div></article>
+          <article><img src="assets/route.svg" alt="" width="28" height="28"><div><h3>每个请求，都有来处</h3><p>动态路径分级归类，定位慢请求与失败接口。在来源地图上查看地区、IP、访问次数与最近请求。</p><span>请求地图 / 耗时分析 / 记录导出</span></div></article>
+          <article><img src="assets/sparkles.svg" alt="" width="28" height="28"><div><h3>带着现场和 AI 对话</h3><p>从一条异常或历史时间段开始，让 AI 读取证据、查看代码与日志，再沿线索核对。诊断记录持续保存。</p><span>OpenAI 兼容接口 / Claude 原生接口</span></div></article>
+          <article><img src="assets/shield-check.svg" alt="" width="28" height="28"><div><h3>基础防护，简单开启</h3><p>登录地区地图、认证失败记录、自动与手动 IP 封禁。按入口支持情况启用连接防护和请求限流。</p><span>登录防护 / IP 封禁 / 入口限流</span></div></article>
+          <article><img src="assets/box.svg" alt="" width="28" height="28"><div><h3>容器的状态，一眼看清</h3><p>查看运行状态、实时日志和资源历史。识别 OOM、反复重启，按需管理镜像与常用容器操作。</p><span>Docker / 容器日志 / 镜像管理</span></div></article>
+          <article><img src="assets/key-round.svg" alt="" width="28" height="28"><div><h3>连接远程，也照顾细节</h3><p>SSH 终端与文件管理同屏使用，AI 对话可调整大小。扫描站点证书，查看有效期并更新证书文件。</p><span>远程终端 / 文件管理 / 证书发现</span></div></article>
         </div>
-        <div id="preview-panel" role="tabpanel" aria-labelledby="tab-server" class="preview-panel"><img id="preview-image" src="assets/server.webp" alt="mini_deploy 服务器状态面板，显示 CPU、内存和核心资源趋势" width="1440" height="960" loading="lazy">
-          <button id="preview-enlarge" class="image-tool" type="button" title="放大截图" aria-label="放大截图"><img src="assets/maximize-2.svg" width="19" height="19" alt=""></button></div>
-        <p id="preview-description" class="preview-description">资源趋势持续更新。需要回看时，再打开性能历史与进程现场。</p>
       </div>
     </section>
-    <section class="workflow wrap" aria-labelledby="workflow-title"><div class="section-heading"><p class="section-label">AI 有上下文，操作有边界。</p><h2 id="workflow-title">从“帮我看看”，<br>走到有证据的判断。</h2><p>直接从一条告警或一个性能时间范围开始。只读诊断面向面板所在服务器；SSH 操作明确连接目标与权限。</p></div>
-      <ol class="workflow-list"><li><span>01</span><div><h3>选中问题</h3><p>打开异常或历史性能，点击 AI 诊断。</p></div></li><li><span>02</span><div><h3>读取证据</h3><p>关联同一台主机的时间、资源、进程与可用日志。</p></div></li><li><span>03</span><div><h3>解释与核实</h3><p>说明判断依据与缺失信息，继续追问，保存诊断记录。</p></div></li><li><span>04</span><div><h3>按权限处理</h3><p>需要修改时，在正确的 SSH 连接中审批，并检查执行结果。</p></div></li></ol>
+    <section class="product-section" id="preview" aria-labelledby="preview-title"><div class="wrap">
+      <div class="preview-heading"><div><p class="section-label">产品实景</p><h2 id="preview-title">看得到，也用得上。</h2></div><p>实际面板截图，使用模拟数据。<br>从你最关心的地方开始。</p></div>
+      <div class="preview-tabs" role="tablist" aria-label="功能预览">
+        <button id="tab-server" role="tab" aria-selected="true" aria-controls="preview-panel" tabindex="0" data-preview="server"><img src="assets/activity.svg" width="18" height="18" alt="">服务器状态</button>
+        <button id="tab-requests" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="requests"><img src="assets/route.svg" width="18" height="18" alt="">请求记录</button>
+        <button id="tab-ai" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="ai"><img src="assets/sparkles.svg" width="18" height="18" alt="">AI 诊断</button>
+        <button id="tab-security" role="tab" aria-selected="false" aria-controls="preview-panel" tabindex="-1" data-preview="security"><img src="assets/shield-check.svg" width="18" height="18" alt="">安全中心</button>
+      </div>
+      <div id="preview-panel" role="tabpanel" aria-labelledby="tab-server" class="preview-panel"><img id="preview-image" src="assets/server.webp" alt="mini_deploy 服务器状态面板，显示资源观测与入站、出站累计流量" width="1440" height="960" loading="lazy"><button id="preview-enlarge" class="image-tool" type="button" title="放大截图" aria-label="放大截图"><img src="assets/maximize-2.svg" width="19" height="19" alt=""></button></div>
+      <div class="preview-footer"><p id="preview-description">资源观测关联 CPU、内存、网络与容器。回看历史时间点，再展开进程现场。</p><span id="preview-number">01 / 04</span></div>
+    </div></section>
+    <section class="workflow wrap" aria-labelledby="workflow-title"><div class="section-heading"><p class="section-label">从异常走到证据。</p><h2 id="workflow-title">AI 不必再从<br>一张截图开始。</h2><p>把问题、主机和时间连起来。让模型拿到可核对的现场，再决定下一步。</p><div class="model-support"><img src="assets/sparkles.svg" width="21" height="21" alt=""><span>接入你选择的模型服务<br><small>OpenAI 兼容 / Claude</small></span></div></div>
+      <ol class="workflow-list"><li><span>01</span><div><h3>从一个问题开始</h3><p>选中异常或性能时间范围，带着上下文进入对话。</p></div></li><li><span>02</span><div><h3>沿线索读取证据</h3><p>按权限核对资源、进程、日志和项目源码。</p></div></li><li><span>03</span><div><h3>把判断说清楚</h3><p>区分已证实的结论与待验证的原因，继续追问并保留历史。</p></div></li><li><span>04</span><div><h3>按授权处理</h3><p>在目标 SSH 连接中使用工具，按所选权限审批或自动操作，业务文件禁止删除。</p></div></li></ol>
     </section>
     <section class="getting-started" id="start" aria-labelledby="start-title"><div class="wrap">
-      <div class="section-heading"><p class="section-label">从你自己的服务器开始。</p><h2 id="start-title">安装 mini_deploy</h2><p>准备一台 Linux 主机，具备 root 权限、systemd、Python 3.10+ 与 Git。安装向导默认中文，可选择英文。</p></div>
-      <div class="install-layout"><div class="install-command"><div class="command-toolbar"><div role="group" aria-label="代码来源"><button type="button" data-repository="gitee" aria-pressed="true">Gitee</button><button type="button" data-repository="github" aria-pressed="false">GitHub</button></div><button id="copy-command" class="image-tool" type="button" title="复制安装命令" aria-label="复制安装命令"><img src="assets/copy.svg" alt="" width="18" height="18"></button></div><pre><code id="install-code">git clone https://gitee.com/XC1960/mini_deploy.git mini-deploy-source
+      <div class="start-heading"><div><p class="section-label">现在，连接你自己的服务器。</p><h2 id="start-title">下一站，mini_deploy。</h2></div><a class="text-link" href="https://github.com/jokerXueC/mini_deploy" target="_blank" rel="noopener noreferrer">查看源代码<img src="assets/arrow-up-right.svg" alt="" width="18" height="18"></a></div>
+      <p class="start-requirements">Linux / root / systemd / Python 3.10+ / Git</p>
+      <div class="install-layout"><div class="install-command"><div class="command-toolbar"><div role="group" aria-label="代码来源"><button type="button" data-repository="github" aria-pressed="true">GitHub</button><button type="button" data-repository="gitee" aria-pressed="false">Gitee</button></div><button id="copy-command" class="image-tool" type="button" title="复制安装命令" aria-label="复制安装命令"><img src="assets/copy.svg" alt="" width="18" height="18"></button></div><pre><code id="install-code">git clone https://github.com/jokerXueC/mini_deploy.git mini-deploy-source
 cd mini-deploy-source
 bash install.sh</code></pre><p id="copy-status" role="status">在 root 终端执行。Git 需预先安装。</p></div>
-        <ol class="install-steps"><li><h3>设置管理员密码</h3><p>跟随向导完成安装。Docker、Nginx 按需要选择，域名不是必填项。</p></li><li><h3>打开服务器面板</h3><p>访问 <code>http://服务器IP:6868</code>，放行云安全组的 6868 端口，并限制访问来源。</p></li><li><h3>按需要接入功能</h3><p>先查看本机状态，再配置请求采集、通知、模型或 IP 防护。</p></li></ol></div>
-      <p class="release-note">当前为预发布项目，Agent 默认以 root 运行。建议先在受控测试服务器验证；传输 SSH 凭据与模型密钥时优先使用 HTTPS 或本地隧道。</p>
-      <a class="text-link" href="https://github.com/jokerXueC/mini_deploy/blob/main/docs/QUICKSTART.zh-CN.md" target="_blank" rel="noopener noreferrer">阅读完整安装与升级说明 <img src="assets/arrow-up-right.svg" alt="" width="16" height="16"></a>
+        <ol class="install-steps"><li><h3>跟随向导安装</h3><p>设置管理员密码，Docker 和 Nginx 按需要选择。</p></li><li><h3>打开你的面板</h3><p>访问 <code>http://服务器IP:6868</code>，放行对应端口并限制访问来源。</p></li><li><h3>从日常观测开始</h3><p>再按需要接入请求采集、模型服务、通知与防护。</p></li></ol></div>
+      <p class="release-note">当前为预发布项目，Agent 默认以 root 运行。传输 SSH 凭据与模型密钥时优先使用 HTTPS 或本地隧道。</p>
+      <a class="text-link" href="https://github.com/jokerXueC/mini_deploy/blob/main/docs/QUICKSTART.zh-CN.md" target="_blank" rel="noopener noreferrer">完整安装与升级说明<img src="assets/arrow-up-right.svg" alt="" width="16" height="16"></a>
     </div></section>
-    <section class="faq wrap" aria-labelledby="faq-title"><h2 id="faq-title">开始前，你可能想知道。</h2><div>
-      <details><summary>需要修改现有业务的部署方式吗？</summary><p>不需要。mini_deploy 管理已运行的主机与服务，不提供应用构建或 Git 自动部署。请求记录需要接入支持的代理日志或独立请求网关。</p></details>
-      <details><summary>是不是必须安装 Docker、购买域名？</summary><p>都不是必选。主机监控可以独立使用；Docker 功能需要 Docker。面板默认通过服务器 IP 和 6868 端口访问，连接主机的网络必须可达。</p></details>
-      <details><summary>AI 会自动操作我的服务器吗？</summary><p>面板性能与告警诊断只读。SSH 工具遵循所选权限，支持修改前审批或明确授权的临时自动操作。已有文件修改前备份，禁止任意脚本执行与业务文件删除。</p></details>
-      <details><summary>安全中心和 SafeLine 有什么区别？</summary><p>安全中心检查主机与容器配置、记录登录活动，并通过 Fail2ban 管理登录防护。SafeLine 是 Web 应用防火墙（WAF），还提供请求内容检测等能力。mini_deploy 不提供 SQL 注入、XSS 或 DDoS 检测承诺，也不会自动接管业务流量。Docker 与反向代理的封禁效果取决于实际入口和防火墙规则。</p></details>
-      <details><summary>数据和模型请求会发到哪里？</summary><p>监测历史保存在面板服务器。启用 AI 后，问题、所选上下文与工具证据会发送到你配置的模型服务，常见凭据会脱敏。请根据自己的数据要求选择模型与使用范围。</p></details>
+    <section class="faq wrap" aria-labelledby="faq-title"><div><p class="section-label">还有几个问题。</p><h2 id="faq-title">开始之前。</h2></div><div>
+      <details><summary>需要重新部署现有业务吗？</summary><p>不需要。mini_deploy 管理已运行的主机与服务，不提供应用构建或 Git 自动部署。请求记录需要接入支持的代理日志或独立请求网关。</p></details>
+      <details><summary>必须安装 Docker、购买域名吗？</summary><p>不是必选。主机监控可以独立使用，Docker 功能需要 Docker。面板可通过服务器 IP 与 6868 端口访问。</p></details>
+      <details><summary>AI 有哪些操作权限？</summary><p>面板诊断使用只读工具。SSH 工具按所选模式审批或自动操作，修改前备份已有文件，业务文件禁止删除。模型由你配置，不包含模型服务费用。</p></details>
+      <details><summary>开启基础防护就能抵御 DDoS 吗？</summary><p>不能。内置登录防护采用失败次数、统计窗口与封禁时长策略，不强制安装 Fail2ban。主机连接防护和支持入口的限流可缓解部分滥用，实际能力取决于入口与防火墙；大流量 DDoS 仍需要云端清洗、CDN 或上游防护，Web 内容检测可配合专用 WAF。</p></details>
+      <details><summary>数据存在哪里？</summary><p>监测历史保存在面板服务器。启用 AI 后，问题、上下文与工具证据发送至你配置的模型服务；地图定位会把公网 IP 单独发送给归属地查询服务，不发送请求头或请求地址。</p></details>
     </div></section>
   </main>
-  <footer class="site-footer wrap"><a class="wordmark" href="#">mini_deploy</a><p>开源服务器运维面板 · MIT License</p><div><a href="https://github.com/jokerXueC/mini_deploy" target="_blank" rel="noopener noreferrer">GitHub</a><a href="https://gitee.com/XC1960/mini_deploy" target="_blank" rel="noopener noreferrer">Gitee</a><a href="https://github.com/jokerXueC/mini_deploy/issues" target="_blank" rel="noopener noreferrer">反馈问题</a></div></footer>
+  <footer class="site-footer wrap"><div class="footer-brand"><a class="wordmark" href="#"><img src="assets/server.svg" width="23" height="23" alt="">mini_deploy</a><p>你的服务器，你的控制台。</p></div><div class="footer-links"><a href="https://github.com/jokerXueC/mini_deploy" target="_blank" rel="noopener noreferrer">GitHub<img src="assets/arrow-up-right.svg" width="14" height="14" alt=""></a><a href="https://gitee.com/XC1960/mini_deploy" target="_blank" rel="noopener noreferrer">Gitee<img src="assets/arrow-up-right.svg" width="14" height="14" alt=""></a><a href="https://github.com/jokerXueC/mini_deploy/issues" target="_blank" rel="noopener noreferrer">反馈问题<img src="assets/arrow-up-right.svg" width="14" height="14" alt=""></a></div><p class="footer-license">开源，自托管。MIT License.</p></footer>
   <dialog id="screenshot-dialog" aria-label="产品截图"><button id="close-screenshot" class="image-tool" type="button" title="关闭截图" aria-label="关闭截图"><img src="assets/x.svg" width="22" height="22" alt=""></button><img id="enlarged-image" alt="" width="1440" height="960"></dialog>
 </body>
 </html>

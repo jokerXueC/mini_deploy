@@ -3,7 +3,7 @@ window.GatewayConnect = (() => {
   let candidates = [], recovery = null;
   const panel = $('gatewayConnectPanel'), feedback = $('gatewayConnectFeedback');
   const sourceIds = ['connectKind', 'connectMode', 'connectContainer', 'connectConfig'];
-  const valueIds = ['connectRoute', 'connectExisting', 'connectKey', 'connectPort', 'connectNetwork', 'connectInternal', 'connectProbe', 'connectImage'];
+  const valueIds = ['connectRoute', 'connectExisting', 'connectKey', 'connectPort', 'connectNetwork', 'connectInternal', 'connectProbe', 'connectImage', 'connectExpected', 'connectAutoRestore'];
 
   function invalidate(sourceChanged = false) {
     version++;
@@ -80,6 +80,7 @@ window.GatewayConnect = (() => {
     candidates = [];
     $('connectService').replaceChildren(new Option('正在读取后端服务…', ''));
     $('connectDiscoveryNotice').textContent = '';
+    $('connectReadiness').replaceChildren();
     await work('正在读取已有转发配置中的后端服务…', async () => {
       if (!csrfToken) csrfToken = (await fetchJson('status')).csrf_token || '';
       await window.RequestGateway.refresh();
@@ -88,20 +89,29 @@ window.GatewayConnect = (() => {
       sources = result.sources || [];
       $('connectDetected').replaceChildren(new Option('手动填写', ''), ...sources.map((item, i) => new Option(item.label, String(i))));
       baseHelp = result.help || [];
+      $('connectReadiness').replaceChildren(...(result.checks || []).map(check => {
+        const text = document.createElement('p');
+        text.textContent = `${check.label}：${check.detail}`;
+        return text;
+      }));
       help(baseHelp);
       const failures = [...(result.errors || [])];
       const results = new Array(sources.length);
-      let cursor = 0;
+      let cursor = 0, completed = 0;
+      const deadline = Date.now() + 20000;
       // Bound concurrent Docker inspections; keep source order deterministic.
       await Promise.all(Array.from({length: Math.min(3, sources.length)}, async () => {
-        while (cursor < sources.length) {
+        while (cursor < sources.length && Date.now() < deadline && current === version) {
           const index = cursor++, item = sources[index];
           try {
-            results[index] = await postJsonBody('gateway-connections', {action: 'inspect', source: item});
+            results[index] = await postJsonBody('gateway-connections', {action: 'inspect', source: item}, {timeoutMs: 20000});
           } catch (err) { failures.push(`${item.label}: ${err.message}`); }
+          completed++;
+          feedback.textContent = `正在读取转发规则 ${completed} / ${sources.length}…`;
         }
       }));
       if (current !== version) return;
+      if (cursor < sources.length) failures.push(`尚有 ${sources.length - cursor} 个来源未读取；请在“调整检测来源”中选择对应配置并读取规则`);
       results.forEach((result, index) => {
         for (const route of result?.routes || []) candidates.push({result, route, label: sources[index].label});
       });
@@ -210,6 +220,8 @@ window.GatewayConnect = (() => {
     $('connectOptionsAdvanced').open = false;
     $('connectSourceAdvanced').open = false;
     $('connectHelp').open = false;
+    $('connectExpected').value = '';
+    $('connectAutoRestore').checked = entry ? !!entry.connection?.auto_restore : true;
     $('requestGatewayForm').hidden = true;
     await discover();
   }
@@ -273,7 +285,7 @@ window.GatewayConnect = (() => {
     await work('正在读取转发规则…', async () => {
       if (!csrfToken) csrfToken = (await fetchJson('status')).csrf_token || '';
       await window.RequestGateway.refresh();
-      const result = await postJsonBody('gateway-connections', {action: 'inspect', source: selected});
+      const result = await postJsonBody('gateway-connections', {action: 'inspect', source: selected}, {timeoutMs: 20000});
       if (current !== version) return;
       useInspection(result);
       feedback.textContent = '请选择需要记录的转发规则。';
@@ -293,7 +305,9 @@ window.GatewayConnect = (() => {
     const data = {action: 'preview', source: inspected.source, source_revision: inspected.revision,
       route_id: $('connectRoute').value, key: $('connectKey').value.trim(), port: Number($('connectPort').value),
       network: $('connectNetwork').value, internal_port: Number($('connectInternal').value),
-      image: $('connectImage').value.trim(), probe_path: $('connectProbe').value.trim()};
+      image: $('connectImage').value.trim(), probe_path: $('connectProbe').value.trim(),
+      expected_status: $('connectExpected').value ? Number($('connectExpected').value) : null,
+      auto_restore: $('connectAutoRestore').checked};
     await work('正在检查接入方案…', async () => {
       const result = await postJsonBody('gateway-connections', data);
       if (current !== version) return;
@@ -319,7 +333,7 @@ window.GatewayConnect = (() => {
       try {
         await postJsonBody('gateway-connections', {action: 'apply', key: reviewed.gateway.key, token: reviewed.token, confirmed: true});
         invalidate(true);
-        feedback.textContent = '已开启，请通过原入口调用后端接口后查看请求记录。';
+        feedback.textContent = '配置已接入，正在等待真实请求。请通过原域名访问网站或调用接口，确认采集状态更新。';
       } finally { await window.RequestGateway.refresh(); }
       panel.hidden = true;
       window.NginxRequests?.view(reviewed.gateway.key);

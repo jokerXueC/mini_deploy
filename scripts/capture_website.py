@@ -1,13 +1,12 @@
 """Generate product screenshots from real UI with isolated, synthetic API responses."""
 from __future__ import annotations
 
-import math
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
+import shutil
 import tempfile
 import threading
-import time
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -15,7 +14,9 @@ from PIL import Image  # noqa: E402
 from playwright.sync_api import sync_playwright, expect  # noqa: E402
 from scripts.preview_operations import examples  # noqa: E402
 from scripts.preview_request_export import seed  # noqa: E402
-from scripts.preview_security import examples as security_examples, login_examples  # noqa: E402
+from scripts.preview_security import examples as security_examples, login_examples, protection_example  # noqa: E402
+from scripts.preview_server_overview import system  # noqa: E402
+from request_locations import Locations  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / 'website' / 'assets'
@@ -29,20 +30,52 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
 
+def export_live_demo(page):
+    """Reuse the product's rendered markup and styles, without its API clients."""
+    markup = page.locator('#serverView').evaluate('''el => {
+        const view = el.cloneNode(true);
+        for (const child of [...view.children]) {
+            if (!child.matches('.server-status-grid, #performancePanel, #cpuCorePanel, .system-trend-panel')) child.remove();
+        }
+        for (const child of view.querySelectorAll('#observationEvidence, #systemTrendChart')) child.remove();
+        for (const image of view.querySelectorAll('img[src]')) image.setAttribute('src', 'assets/panel-icons/' + image.getAttribute('src').split('/').pop());
+        return view.outerHTML;
+    }''')
+    icons = ASSETS / 'panel-icons'
+    icons.mkdir(exist_ok=True)
+    for name in ['eye.svg', 'chevron-right.svg']:
+        shutil.copyfile(ROOT / 'ui/previews/ssh-ai/icons' / name, icons / name)
+    shutil.copyfile(ROOT / 'ui/selects.js', ASSETS / 'panel-selects.js')
+    styles = ['style.css', 'operations.css', 'server-performance-panel.css', 'server-overview.css', 'workspace.css']
+    (ASSETS / 'panel.css').write_text('\n'.join(
+        '/* Source: ui/' + name + ' */\n' + (ROOT / 'ui' / name).read_text(encoding='utf-8')
+        for name in styles
+    ), encoding='utf-8')
+    (ROOT / 'website/panel-demo.html').write_text('''<!doctype html>
+<html lang="zh-CN" data-theme="light"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mini_deploy 面板演示</title>
+<link rel="stylesheet" href="assets/panel.css"><link rel="stylesheet" href="panel-demo.css">
+<script src="panel-demo.js" defer></script><script src="assets/panel-selects.js" defer></script></head><body class="panel-workspace">
+<main aria-label="服务器资源演示">''' + markup + '''</main>
+<dialog id="demo-history" aria-label="模拟性能现场"><div class="demo-history-head"><h2>性能现场 · 演示数据</h2><button id="demo-history-close" type="button" aria-label="关闭">关闭</button></div><p id="demo-history-detail"></p></dialog>
+</body></html>
+''', encoding='utf-8')
+
+
 def main():
     ASSETS.mkdir(parents=True, exist_ok=True)
     http = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     worker = threading.Thread(target=http.serve_forever, daemon=True)
     worker.start()
     inventory, evidence = examples()
-    server = evidence['server_now']
+    payload = system()
+    server = payload['server']
     server.update(cpu={'model': 'Intel Xeon · 演示服务器', 'logical_count': 8, 'physical_cores': 4}, hostname='debian-demo')
-    now = time.time()
-    realtime = [{'ts': now - 59 + n, 'cpu_percent': 30 + math.sin(n / 8) * 16,
-                 'memory_percent': 62 + math.sin(n / 14) * 3, 'network_total_kbps': 170 + math.sin(n / 6) * 40} for n in range(60)]
     try:
         with tempfile.TemporaryDirectory(prefix='mini-website-') as directory, sync_playwright() as runtime:
-            history = seed(Path(directory))
+            history = seed(Path(directory), map_locations=True)
+            locations = Locations(history)
             browser = runtime.chromium.launch()
             page = browser.new_page(viewport={'width': 1440, 'height': 960}, device_scale_factor=1)
             page.add_init_script("try { localStorage.setItem('mini_deploy-theme','light'); } catch (_) {}")
@@ -56,10 +89,9 @@ def main():
                     request.continue_()
                     return
                 if path == '/status':
-                    body = {'csrf_token': 'demo', 'system': {'server': server, 'realtime_history': realtime,
-                            'docker': {'available': True, 'containers': [{'id': 'a' * 64, 'name': 'api-demo', 'state': 'running', 'image': 'python:3.12', 'cpu_percent': 38, 'memory_percent': 21}]}}}
+                    body = {'csrf_token': 'demo', 'system': payload}
                 elif path == '/system-metrics':
-                    body = {'server': server, 'realtime_history': realtime}
+                    body = payload
                 elif path == '/monitoring':
                     body = {'targets': [], 'alerts': [evidence['incident']], 'events': evidence['timeline'], 'coverage': {}}
                 elif path == '/request-gateways':
@@ -67,6 +99,9 @@ def main():
                 elif path == '/request-history':
                     query = parse_qs(parsed.query)
                     body = history.query(query.get('key', ['demo-api'])[0], layout=query.get('layout', ['tree'])[0])
+                    body['visitors'] = locations.history_summary(query.get('key', ['demo-api'])[0])
+                elif path == '/security/protection':
+                    body = protection_example()
                 elif path == '/security/logins':
                     body = login_examples()
                     body['items'] = body['items'][:10]
@@ -91,7 +126,10 @@ def main():
                 page.goto(origin + '/ui?view=' + view)
                 if name == 'server':
                     expect(page.locator('#cpuValue')).not_to_have_text('-')
+                    page.locator('[data-trend-range="realtime"]').click()
+                    expect(page.locator('.load-cell')).to_have_count(180)
                     page.wait_for_timeout(1000)
+                    export_live_demo(page)
                 elif name == 'requests':
                     expect(page.locator('#requestSampleSummary')).to_contain_text('1840')
                 elif name == 'security':
@@ -106,16 +144,17 @@ def main():
                     image.convert('RGB').save(ASSETS / (name + '.webp'), quality=88, method=6)
                 # Keep only the generated web image, never delete source or user files.
             page.goto(origin + '/ui?view=server')
+            page.locator('[data-trend-range="realtime"]').click()
             page.wait_for_timeout(1000)
             desktop = Image.open(ASSETS / 'server.webp').convert('RGB')
-            hero = desktop.crop((0, 220, 1440, 960))
+            hero = desktop.crop((0, 180, 1440, 960))
             hero.save(ASSETS / 'hero.webp', quality=90, method=6)
             page.set_viewport_size({'width': 390, 'height': 960})
             page.wait_for_timeout(500)
             mobile_png = Path(directory) / 'server-mobile.png'
             page.screenshot(path=str(mobile_png))
             mobile = Image.open(mobile_png).convert('RGB')
-            mobile_hero = mobile.crop((12, 230, 378, 960))
+            mobile_hero = mobile.crop((12, 210, 378, 960))
             mobile_hero.save(ASSETS / 'hero-mobile.webp', quality=90, method=6)
             browser.close()
     finally:

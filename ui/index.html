@@ -27,6 +27,7 @@
   <link rel="stylesheet" href="ui/panel-ai.css">
   <link rel="stylesheet" href="ui/ip-security.css">
   <link rel="stylesheet" href="ui/workspace.css">
+  <link rel="stylesheet" href="ui/setup-checks.css">
 </head>
 <body class="panel-workspace">
   <main class="page">
@@ -69,7 +70,15 @@
       <button id="requestsViewTab" class="view-tab" type="button" data-view="requests">请求记录</button>
       <button id="terminalViewTab" class="view-tab" type="button" data-view="terminal">远程终端</button>
       <button id="securityViewTab" class="view-tab" type="button" data-view="security">安全中心</button>
+      <button id="setupViewTab" class="view-tab" type="button" data-view="setup">功能检查</button>
     </nav>
+
+    <section id="setupView" class="dashboard-view setup-checks" aria-labelledby="setupTitle">
+      <div class="setup-heading"><div><h2 id="setupTitle">安装与功能启用</h2><p id="setupSummary" role="status" aria-live="polite">等待检查</p></div><button id="setupRefresh" class="toolbar-icon" type="button" title="重新检查功能" aria-label="重新检查功能"><img src="ui/previews/ssh-ai/icons/refresh-cw.svg" alt=""></button></div>
+      <p id="setupFeedback" class="setup-feedback" role="status" aria-live="polite"></p>
+      <div id="setupItems" aria-busy="false"></div>
+      <p id="setupCheckedAt" class="setup-checked-at"></p>
+    </section>
 
     <div id="securityView" class="dashboard-view">
       <section class="ip-security security-center" aria-labelledby="ipSecurityTitle">
@@ -187,10 +196,12 @@
                   <label class="field"><span>监听端口</span><input id="connectPort" type="number" min="1024" max="65535" value="18080"></label>
                   <label class="field" id="connectInternalField" hidden><span>静态文件内部端口</span><input id="connectInternal" type="number" min="1024" max="65535" value="18081"></label>
                   <label class="field"><span>连通检测路径（不含域名）</span><input id="connectProbe" value="/" placeholder="例如 /cloud/health" maxlength="512"></label>
+                  <label class="field"><span>预期 HTTP 状态</span><input id="connectExpected" type="number" min="200" max="499" placeholder="留空仅检查后端可达"></label>
                   <label class="field gateway-image-field"><span>网关镜像</span><input id="connectImage" value="nginx:stable-alpine" maxlength="255"></label>
                 </div>
                 </details>
                 <button id="connectPreview" class="ghost-button compact-action" type="button">检查接入方案</button>
+                <label class="gateway-trust"><input id="connectAutoRestore" type="checkbox" checked>业务发布覆盖同一条转发规则时，自动恢复请求采集</label>
               </div>
               <div id="connectReview" class="gateway-connect-review" hidden>
                 <h3 id="connectReviewTitle">确认开启</h3><p id="connectReviewScope" class="muted"></p><details><summary>查看转发改动</summary><dl><dt>原入口</dt><dd id="connectBefore"></dd><dt>接入后</dt><dd id="connectAfter"></dd></dl></details>
@@ -199,7 +210,8 @@
                 <button id="connectApply" class="danger-button compact-action" type="button">开启记录</button>
               </div>
             </fieldset>
-            <details id="connectHelp"><summary>不知道怎么填？查看查询指令</summary><div id="connectHelpItems"></div></details>
+            <div id="connectReadiness" class="muted" role="status"></div>
+            <details id="connectHelp"><summary>手动配置与排查步骤</summary><p class="muted">自动检测失败时再使用以下指令，每次复制一条完整执行。填写实际运行的代理名称和配置路径，重新读取后检查接入方案；开启后通过原域名访问并确认“已收到真实请求”。</p><div id="connectHelpItems"></div></details>
           </section>
 
         <div id="requestData">
@@ -247,7 +259,8 @@
               <label class="field"><span>宿主机访问范围</span><select id="gatewayBind"><option value="127.0.0.1">仅本机（推荐）</option><option value="0.0.0.0">所有网卡（可从外部访问）</option></select></label>
               <label class="field"><span>后端所在网络</span><select id="gatewayNetwork"><option value="host">服务器本机</option></select></label>
               <label class="field gateway-image-field"><span>网关镜像</span><input id="gatewayImage" required value="nginx:stable-alpine" maxlength="255"></label>
-              <label class="gateway-trust"><input id="gatewayTrust" type="checkbox">信任前置代理传入的来源与 HTTP/HTTPS 协议头</label>
+              <label class="gateway-trust"><input id="gatewayTrust" type="checkbox">使用可信前置代理传入的 HTTP/HTTPS 协议头</label>
+              <label class="field gateway-image-field"><span>可信前置代理 IP（可选，逗号分隔）</span><input id="gatewayTrustedProxies" maxlength="1280" placeholder="例如 172.20.0.2；留空保留连接对端 IP"></label>
             </div>
             <p id="gatewayNetworkNotice" class="muted" role="status"></p>
             <div class="request-actions"><button id="gatewaySave" class="danger-button compact-action" type="submit">保存配置</button><button id="gatewayCancel" class="ghost-button compact-action" type="button">取消</button></div>
@@ -730,6 +743,7 @@
   <script src="ui/selects.js"></script>
   <script src="ui/server-overview.js"></script>
   <script src="ui/app.js"></script>
+  <script src="ui/setup-checks.js"></script>
   <script src="ui/operations.js"></script>
   <script src="ui/performance.js"></script>
   <script src="ui/server-performance.js"></script>

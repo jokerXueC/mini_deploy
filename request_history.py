@@ -219,6 +219,31 @@ class History:
         with self.connect() as db:
             return [dict(row) for row in db.execute("SELECT key,name,checked,error FROM sources ORDER BY key")]
 
+    def collection_status(self, key, connection, now=None):
+        now = time.time() if now is None else now
+        with self.connect() as db:
+            row = db.execute('SELECT checked,error,cursor FROM sources WHERE key=?', (key,)).fetchone()
+            samples = db.execute('SELECT ts,data FROM requests WHERE source=? AND ts>=? ORDER BY ts DESC LIMIT 30',
+                                 (key, connection.get('applied_at') or 0)).fetchall()
+        latest = next((item['ts'] for item in samples if not connection.get('probe_id') or
+                       json.loads(item['data']).get('request_id') != connection['probe_id']), None)
+        error = connection.get('error') or (row['error'] if row else '')
+        if error:
+            state, detail = 'error', error
+        elif row is None or not row['checked']:
+            state, detail = 'pending', '等待后台首次采集，通常需要数秒'
+        elif now - row['checked'] > 60:
+            state, detail = 'stale', '后台采集超过一分钟未成功，请检查面板服务与 Docker 状态'
+        elif now - row['cursor'] > 120:
+            state, detail = 'catching_up', '正在补采历史日志，新请求将随后显示'
+        elif latest is None:
+            state, detail = 'waiting', '尚未收到真实请求；请通过原域名访问网站或调用接口，检测请求不计入验证'
+        elif now - latest > 60:
+            state, detail = 'idle', '采集正常，最近一分钟没有新请求；不代表业务故障'
+        else:
+            state, detail = 'active', '已收到真实请求并写入历史'
+        return {'state': state, 'detail': detail, 'latest_at': latest, 'checked_at': row['checked'] if row else None}
+
     def failure(self, key, name, message):
         with self.connect() as db:
             db.execute("""INSERT INTO sources(key,name,stream,error) VALUES(?,?,'',?)
@@ -534,6 +559,7 @@ class Collector:
     def __init__(self, history: History):
         self.history = history
         self.position = 0
+        self.maintained = {}
 
     def collect(self, store, entry, now=None):
         from gateway_connections import Connections
@@ -549,7 +575,15 @@ class Collector:
         if not item:
             self.history.failure(key, name, "采集容器不存在，已保存的历史仍可查询")
             return
-        connection = Connections(self.history.home).status(key, verify=True)
+        connections = Connections(self.history.home)
+        connection = connections.status(key, verify=True)
+        if now - self.maintained.get(key, 0) >= 60:
+            self.maintained[key] = now
+            try:
+                with self.history.maintenance(), request_gateway.LOCK:
+                    connection = connections.maintain(key, connection)
+            except (OSError, ValueError) as exc:
+                connection['error'] = f'自动核对未完成：{exc}；原配置和请求历史保留'
         stream = item["Id"]
         previous = self.history.source(key)
         until = int(now) - 1

@@ -81,6 +81,21 @@ def normalize(raw: Any) -> dict[str, Any]:
     if type(trust) is not bool:
         raise CertificateError("代理请求头选项无效")
     options = {}
+    proxies = raw.get('trusted_proxies', [])
+    if not isinstance(proxies, list) or len(proxies) > 32:
+        raise CertificateError('可信代理最多填写 32 个具体 IP 地址')
+    try:
+        if any(not isinstance(value, str) or '%' in value for value in proxies):
+            raise ValueError('invalid proxy')
+        proxies = sorted({str(ipaddress.ip_address(value)) for value in proxies})
+        if any(ipaddress.ip_address(value).is_unspecified or ipaddress.ip_address(value).is_multicast for value in proxies):
+            raise ValueError('invalid proxy')
+    except (ValueError, TypeError):
+        raise CertificateError('可信代理必须是具体 IP，不能填写域名或任意网段') from None
+    if proxies:
+        if not trust:
+            raise CertificateError('填写可信代理时需要开启代理请求头')
+        options['trusted_proxies'] = proxies
     for field, default, lower, upper in (("max_body_bytes", 64 * 1024 * 1024, 0, 1024 * 1024 * 1024),
                                         ("connect_timeout_ms", 5000, 1, 75000)):
         value = raw.get(field, default)
@@ -96,7 +111,7 @@ def revision(spec: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
 
 
-def config(spec: dict[str, Any], *, details: bool = True, diagnostics: bool = True) -> str:
+def config(spec: dict[str, Any], *, details: bool = True, diagnostics: bool = True, _legacy: bool = False) -> str:
     listener = f'{spec["bind"]}:{spec["port"]}' if spec["network"] == "host" else "10000"
     # Custom bridge networks use Docker DNS on each new resolution, surviving backend recreation.
     upstream = (f'resolver 127.0.0.11 valid=10s ipv6=off;\n'
@@ -109,10 +124,13 @@ def config(spec: dict[str, Any], *, details: bool = True, diagnostics: bool = Tr
     request_id_headers = ('\n            proxy_set_header X-Request-ID $mini_deploy_request_id;'
                           '\n            proxy_hide_header X-Request-ID;'
                           '\n            add_header X-Request-ID $mini_deploy_request_id always;') if details and diagnostics else ''
+    real_ip = '' if _legacy or not spec.get('trusted_proxies') else (
+        '\n    '.join('set_real_ip_from ' + value + ';' for value in spec['trusted_proxies']) +
+        '\n    real_ip_header X-Forwarded-For;\n    real_ip_recursive off;\n    ')
     return f'''# mini-deploy-managed: request-gateway-v1
 worker_processes 1;
 pid /tmp/nginx.pid;
-error_log /dev/stderr crit;
+error_log /dev/stderr {'crit' if _legacy else 'error'};
 events {{ worker_connections 2048; }}
 http {{
     client_body_temp_path /tmp/client-body;
@@ -122,7 +140,7 @@ http {{
     scgi_temp_path /tmp/scgi;
     map $http_upgrade $gateway_connection {{ default upgrade; '' ''; }}
     map $http_x_forwarded_proto $gateway_proto {{ default $scheme; http http; https https; }}
-    {nginx_requests.config_text("docker", details=details, diagnostics=diagnostics)}
+    {real_ip}{nginx_requests.config_text("docker", details=details, diagnostics=diagnostics, peer=not _legacy)}
     server {{
         listen {listener};
         server_name _;
@@ -149,7 +167,8 @@ http {{
 
 
 def managed_configs(spec: dict[str, Any]) -> tuple[str, ...]:
-    return (config(spec), config(spec, diagnostics=False), config(spec, details=False))
+    return tuple(config(spec, **options, _legacy=legacy) for legacy in (False, True)
+                 for options in ({}, {'diagnostics': False}, {'details': False}))
 
 
 class Store:
@@ -215,11 +234,17 @@ class Store:
                 "connection": Connections(self.root.parent).status(spec['key'], verify=live),
                 "caddy_upstream": docker_address or address}
 
-    def save(self, raw: Any, expected: str = "") -> dict[str, Any]:
+    def save(self, raw: Any, expected: str = "", *, _reconcile: bool = False) -> dict[str, Any]:
         spec = normalize(raw)
         from gateway_connections import Connections
-        if Connections(self.root.parent).status(spec['key'])['state'] != 'not_connected':
-            raise CertificateError("此入口已接入网站，请先撤销接入后再修改网关配置")
+        state = Connections(self.root.parent).status(spec['key'])['state']
+        if state != 'not_connected':
+            if not _reconcile or state != 'connected':
+                raise CertificateError("此入口已接入网站，请先撤销接入后再修改网关配置")
+            previous_spec = self.read(spec['key'])['spec']
+            allowed = {'trusted_proxies', 'max_body_bytes'}
+            if any(spec.get(key) != previous_spec.get(key) for key in (spec.keys() | previous_spec.keys()) - allowed):
+                raise CertificateError("后台核对仅允许更新已确认的代理地址和网关上传兼容设置")
         self.recover(spec["key"])
         directory = self.directory(spec["key"])
         old = self.read(spec["key"]) if (directory / "entry.json").exists() else None

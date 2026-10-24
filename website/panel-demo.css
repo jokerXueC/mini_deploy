@@ -1,0 +1,11 @@
+/* Presentation boundary only; resource UI comes from the product styles. */
+body.panel-workspace { margin:0; padding:0 0 16px; min-height:0; }
+main { width:100%; }
+#serverView .server-status-grid { margin-top:0; }
+#serverView .system-trend-panel { padding-inline:0; }
+#demo-history { width:min(560px,calc(100% - 28px)); padding:20px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); }
+#demo-history::backdrop { background:#252a3066; }
+.demo-history-head { display:flex; justify-content:space-between; align-items:center; gap:20px; }
+.demo-history-head h2 { font-size:15px; font-weight:500; margin:0; }
+.demo-history-head button { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:5px; padding:6px 10px; cursor:pointer; }
+#demo-history-detail { font-size:12px; line-height:1.8; color:var(--muted); }

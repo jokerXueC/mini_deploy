@@ -2030,6 +2030,19 @@ install_ssh_dependency() {
 install_ssh_dependency
 initialize_admin_credentials
 
+verify_agent_startup() {
+  if ! "$PYTHON_BIN" "$APP_HOME/scripts/check_agent_health.py" --agent "$APP_HOME/agent.py"; then
+    echo "Agent 健康或运行版本验收失败，安装未完成 / Agent health or release acceptance failed; installation incomplete." >&2
+    echo "journalctl -u $SERVICE_NAME -n 80 --no-pager -l" >&2
+    echo "DEPLOY_AGENT_ENV_FILE=$ENV_FILE bash $APP_HOME/scripts/doctor.sh" >&2
+    return 1
+  fi
+  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    echo "Agent 服务未保持 active / Agent service is not active: $SERVICE_NAME" >&2
+    return 1
+  fi
+}
+
 check_dashboard_port
 write_systemd_service
 systemctl daemon-reload
@@ -2039,6 +2052,7 @@ if ! systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "新 Agent 服务启动后未保持 active 状态 / New Agent service did not remain active after restart." >&2
   exit 1
 fi
+verify_agent_startup
 disarm_upgrade_service_failsafe
 
 open_dashboard_firewall
@@ -2050,18 +2064,11 @@ fi
 
 install_docker_if_requested
 
-if curl -fsS --max-time 5 http://127.0.0.1:6868/health >/dev/null 2>&1; then
-  if is_en; then
-    HEALTH_RESULT="ok"
-  else
-    HEALTH_RESULT="正常"
-  fi
+verify_agent_startup
+if is_en; then
+  HEALTH_RESULT="ok; running release verified"
 else
-  if is_en; then
-    HEALTH_RESULT="failed; check logs"
-  else
-    HEALTH_RESULT="异常，请查看日志"
-  fi
+  HEALTH_RESULT="正常；已核验实际运行版本"
 fi
 
 PUBLIC_ADDRESS="$(dashboard_public_address)"
@@ -2077,6 +2084,10 @@ Administrator credentials: initialized
 
 Open the dashboard and sign in:
    $DASHBOARD_URL
+
+After signing in, open Feature checks to configure and verify optional features:
+   $DASHBOARD_URL/ui?view=setup
+Host health alone does not verify request collection, SSH, AI, protection or notifications.
 
 Local fallback URL:
    http://127.0.0.1:6868
@@ -2123,6 +2134,10 @@ Agent 状态：$HEALTH_RESULT
 
 打开下面地址并登录：
    $DASHBOARD_URL
+
+登录后打开“功能检查”，按需配置并逐项验收：
+   $DASHBOARD_URL/ui?view=setup
+主机在线不代表请求采集、SSH、AI、防护或通知已经启用。
 
 本机备用访问地址：
    http://127.0.0.1:6868

@@ -26,9 +26,10 @@ def config_path(runtime: nginx_runtime.Runtime) -> Path:
     return runtime.conf_root / CONFIG_NAME
 
 
-def config_text(mode: str, *, details: bool = True, diagnostics: bool = True) -> str:
+def config_text(mode: str, *, details: bool = True, diagnostics: bool = True, peer: bool = False) -> str:
     target = "/dev/stdout" if mode == "docker" else LOCAL_LOG.as_posix()
     metadata = [
+        *(["    '\"peer_ip\":\"$realip_remote_addr\",'"] if peer else []),
         "    '\"client_ip\":\"$remote_addr\",\"protocol\":\"$server_protocol\",'",
         "    '\"response_bytes\":\"$body_bytes_sent\",\"upstream_address\":\"$upstream_addr\",'",
         "    '\"request_headers\":{\"Host\":\"$http_host\",\"User-Agent\":\"$http_user_agent\",'",

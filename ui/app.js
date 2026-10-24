@@ -418,8 +418,8 @@ function animateNumberText(id, value, formatter) {
 }
 
 function setView(view) {
-  activeView = ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security'].includes(view) ? view : 'server';
-  ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security'].forEach(name => {
+  activeView = ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security', 'setup'].includes(view) ? view : 'server';
+  ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security', 'setup'].forEach(name => {
     $(`${name}View`)?.classList.toggle('active', activeView === name);
     $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
   });
@@ -435,6 +435,7 @@ function setView(view) {
     requests: ['请求记录', '后端 HTTP 请求、响应状态与耗时'],
     terminal: ['远程终端', 'SSH 连接与服务器操作'],
     security: ['安全中心', '主机风险、登录活动与防护状态'],
+    setup: ['功能检查', '安装验收、功能配置与实际运行状态'],
   };
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
@@ -456,6 +457,7 @@ function setView(view) {
   window.SSHTerminal?.viewChanged(activeView);
   window.TerminalAI?.viewChanged(activeView);
   window.IPSecurity?.viewChanged(activeView);
+  window.SetupChecks?.viewChanged(activeView);
 }
 
 
@@ -488,20 +490,30 @@ async function postJson(path) {
   return data;
 }
 
-async function postJsonBody(path, payload) {
-  const res = await fetch(path, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-    body: JSON.stringify(payload || {}),
-  });
-  if (res.status === 401) location.reload();
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const error = new Error(data.detail || data.error || `${path} ${res.status}`);
+async function postJsonBody(path, payload, {timeoutMs = 0} = {}) {
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify(payload || {}),
+      ...(controller ? {signal: controller.signal} : {}),
+    });
+    if (res.status === 401) location.reload();
+    const data = await res.json().catch(error => {
+      if (controller?.signal.aborted) throw error;
+      return {};
+    });
+    if (!res.ok) throw new Error(data.detail || data.error || `${path} ${res.status}`);
+    return data;
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error('读取配置超时，未修改代理配置；可手动指定来源后重试。');
     throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
-  return data;
 }
 
 function severityClass(level) {
@@ -1685,6 +1697,7 @@ $('refreshBtn').addEventListener('click', () => {
   else if (activeView === 'certificates') refreshCertificates();
   else if (activeView === 'requests') window.NginxRequests?.refresh();
   else if (activeView === 'terminal') { window.SSHTerminal?.viewChanged('terminal'); window.TerminalAI?.viewChanged('terminal'); }
+  else if (activeView === 'setup') window.SetupChecks?.refresh();
 });
 $('serverViewTab').addEventListener('click', () => setView('server'));
 $('eventsViewTab')?.addEventListener('click', () => setView('events'));
@@ -1692,6 +1705,7 @@ $('notifyViewTab')?.addEventListener('click', () => setView('notify'));
 $('certificatesViewTab')?.addEventListener('click', () => setView('certificates'));
 $('requestsViewTab')?.addEventListener('click', () => setView('requests'));
 $('securityViewTab')?.addEventListener('click', () => setView('security'));
+$('setupViewTab')?.addEventListener('click', () => setView('setup'));
 document.querySelectorAll('[data-server-refresh]').forEach(button => {
   button.addEventListener('click', () => setServerRefreshInterval(button.dataset.serverRefresh));
 });

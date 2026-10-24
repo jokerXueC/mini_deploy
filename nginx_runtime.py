@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import socket
+import stat
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,6 +18,41 @@ from certificates import CertificateError, atomic_write, run, trusted_path
 
 CONF_DEST = "/etc/nginx/conf.d"
 CERT_DEST = "/etc/mini-deploy/certificates"
+
+
+def configuration_files(dump: str) -> list[str]:
+    """List actual virtual-host files from nginx -T, including split Debian sites."""
+    sections = re.split(r'(?m)^# configuration file (/[^\r\n]+):\s*$', dump)
+    return list(dict.fromkeys(path for path, text in zip(sections[1::2], sections[2::2])
+                              if re.search(r'\bserver\s*\{', re.sub(r'(?m)#.*$', '', text))))
+
+
+def startup_options(arguments: list[str]) -> list[str]:
+    result = []
+    for index, word in enumerate(arguments):
+        if word in ('-c', '-p'):
+            value = arguments[index + 1] if index + 1 < len(arguments) else ''
+        elif word.startswith(('-c/', '-p/')):
+            value, word = word[2:], word[:2]
+        else:
+            continue
+        if not value.startswith('/') or any(c in value for c in '\r\n\0') or '..' in PurePosixPath(value).parts:
+            raise CertificateError('Nginx 自定义配置与前缀必须使用明确的绝对路径')
+        result.extend([word, value])
+    return result
+
+
+def site_path(path: Path) -> Path:
+    if path.is_symlink():
+        trusted_path(path.parent)
+        info = path.lstat()
+        if os.name == 'posix' and info.st_uid not in {0, os.geteuid()}:
+            raise CertificateError('站点链接需要由 root 或当前服务账号拥有')
+        path = path.resolve(strict=True)
+    trusted_path(path)
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise CertificateError('站点配置必须是普通文件')
+    return path
 
 
 def local_setup_plan() -> dict[str, Any]:
@@ -294,10 +331,16 @@ class Settings:
         result: dict[str, Any] = {"local": bool(shutil.which("nginx")), "containers": [], "errors": []}
         if shutil.which("docker"):
             try:
+                deadline = time.monotonic() + 8
                 names = run(["docker", "ps", "--format", "{{.Names}}"], timeout=5)
-                if len(names.splitlines()) > 8:
-                    result["errors"].append("容器较多，本次检测前 8 个；可手动填写其他 Nginx 容器名称")
-                for name in names.splitlines()[:8]:
+                candidates = [name for name in names.splitlines() if not name.startswith('mini-gateway-')]
+                candidates.sort(key=lambda name: 'nginx' not in name.lower())
+                if len(candidates) > 256:
+                    result["errors"].append("容器超过 256 个，其余 Nginx 容器可手动指定")
+                for index, name in enumerate(candidates[:256]):
+                    if time.monotonic() >= deadline:
+                        result['errors'].append(f'本轮检测达到时间预算，尚有 {len(candidates) - index} 个容器未核对，可手动指定；未扫描不代表没有 Nginx')
+                        break
                     # Probe running containers, not only images whose names contain nginx.
                     try:
                         item = inspect_container(name)

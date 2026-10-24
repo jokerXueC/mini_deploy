@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import ipaddress
 import json
 import math
 import os
@@ -177,7 +178,7 @@ def routes(text: str, kind: str, addresses: dict[str, str] | None = None) -> lis
         if not site.body or (kind == 'caddy' and (not site.words or site.words[0].startswith('('))):
             continue
         names = site.words if kind == 'caddy' else next((n.words[1:] for n in site.children if n.words[:1] == ['server_name']), [])
-        domain = names[0] if len(names) == 1 else ''
+        domain = names[0] if names else ''
         domain = (addresses or {}).get(domain, domain)
         domain = re.sub(r'^https?://', '', domain) if kind == 'caddy' else domain
         unresolved = kind == 'caddy' and '{$' in domain
@@ -192,7 +193,7 @@ def routes(text: str, kind: str, addresses: dict[str, str] | None = None) -> lis
         if not proxies:
             proxies = [None]
         for proxy in proxies:
-            reason, upstream, connect_timeout = '', '', 3000
+            reason, upstream, connect_timeout = '', '', 3000 if kind == 'caddy' else 60000
             route_kind = 'proxy' if proxy else 'static'
             if unresolved:
                 reason = '站点域名变量未能解析为单个域名，请检查代理容器中的变量值'
@@ -203,6 +204,12 @@ def routes(text: str, kind: str, addresses: dict[str, str] | None = None) -> lis
                     reason = '此规则含多上游、匹配器或高级转发选项，暂不自动改写'
                 else:
                     raw = (addresses or {}).get(proxy.words[1], proxy.words[1])
+                    if kind == 'nginx' and raw == '$mini_deploy_backend':
+                        assignments = [n for n in all_nodes if n.words[:2] == ['set', raw]]
+                        scopes = [n for n in walk(nodes) if n.body and n.start < proxy.start < n.end]
+                        if (len(assignments) == 1 and len(assignments[0].words) == 3
+                                and any(assignments[0] in scope.children for scope in scopes)):
+                            raw = assignments[0].words[2]
                     upstream = raw if '://' in raw else 'http://' + raw
                     try:
                         gateway.normalize({'key': 'check', 'upstream': upstream, 'network': 'host'})
@@ -211,13 +218,27 @@ def routes(text: str, kind: str, addresses: dict[str, str] | None = None) -> lis
                     if not reason and kind == 'caddy':
                         reason, connect_timeout = caddy_proxy_options(proxy)
                 if not reason and kind == 'nginx':
-                    scopes = [n for n in all_nodes if n.body and n.start < proxy.start < n.end]
-                    scope = scopes[-1] if scopes else site
-                    headers = {n.words[1].lower(): n.words[2] for n in scope.children
-                               if n.words[:1] == ['proxy_set_header'] and len(n.words) == 3}
+                    scopes = [n for n in walk(nodes) if n.body and n.start < proxy.start < n.end]
+                    headers = {}
+                    for scope in reversed(scopes):
+                        directives = [n for n in scope.children if n.words[:1] == ['proxy_set_header']]
+                        if directives:
+                            headers = {n.words[1].lower(): n.words[2] for n in directives if len(n.words) == 3}
+                            break
                     if (headers.get('host') not in ('$host', '$http_host') or headers.get('x-forwarded-proto') != '$scheme'
                             or headers.get('x-forwarded-for') not in ('$proxy_add_x_forwarded_for', '$remote_addr')):
                         reason = '此规则缺少明确的 Host/转发头，或依赖继承配置；请先由维护者核对请求头，避免接入后改变业务行为'
+                    for scope in reversed(scopes):
+                        timeout = next((n for n in scope.children if n.words[:1] == ['proxy_connect_timeout']), None)
+                        if timeout:
+                            try:
+                                value = timeout.words[1]
+                                connect_timeout = duration_ms(value + 's' if re.fullmatch(r'[0-9]+', value) else value)
+                                if connect_timeout > 75000:
+                                    raise ValueError('timeout')
+                            except (ValueError, IndexError):
+                                reason = '连接超时超过 75 秒或使用变量，暂不能保证接入兼容；原配置保留'
+                            break
             elif kind != 'caddy':
                 reason = 'Nginx 静态站点暂不自动迁移，请按手动指引接入'
             else:
@@ -260,7 +281,7 @@ def routes(text: str, kind: str, addresses: dict[str, str] | None = None) -> lis
                 return label
             label = ' / '.join(context_label(w) for w in context) or ('静态网站' if not proxy else '全部请求')
             result.append({'id': digest(f'{site.start}:{proxy.start if proxy else -1}:{text[site.start:site.end]}')[:24],
-                           'site': domain, 'label': label, 'kind': route_kind, 'upstream': upstream,
+                           'site': domain, 'domains': names, 'label': label, 'kind': route_kind, 'upstream': upstream,
                            'reason': reason, 'supported': not reason, '_site': site, '_proxy': proxy,
                            '_connect_timeout': connect_timeout, '_selector': selector})
     return result
@@ -315,9 +336,9 @@ def resolve(raw: Any) -> dict[str, Any]:
             if '{$' in read_config(Path(config_path)):
                 raise CertificateError('本机 Caddy 配置依赖服务环境变量，当前不能复现该环境校验；请按手动指引由维护者接入')
         else:
-            if re.search(r'(?:^|\s)-(?:c|p)(?:\s|/)', startup):
-                raise CertificateError('本机 Nginx 服务使用自定义主配置或前缀，请先核对实际启动参数')
-            dump = command(['nginx', '-T'])
+            options = re.findall(r'(?:^|\s)(-[cp])\s*(/[^\s;"\x27}]+)', startup)
+            source['nginx_args'] = nginx_runtime.startup_options([part for pair in options for part in pair])
+            dump = command(['nginx', '-T', *source['nginx_args']])
             if f'# configuration file {config_path}:' not in dump:
                 raise CertificateError('该文件不在 nginx -T 输出中，请填写实际生效的站点文件')
         source['path'] = config_path
@@ -338,9 +359,8 @@ def resolve(raw: Any) -> dict[str, Any]:
                 raise CertificateError('配置路径与 Caddy 容器启动参数不一致，请按查询指令核对')
             command(['docker', 'exec', item['Id'], 'caddy', 'version'])
         else:
-            if '-c' in args:
-                raise CertificateError('容器使用自定义 Nginx 主配置启动参数，请按手动指引核对')
-            dump = command(['docker', 'exec', item['Id'], 'nginx', '-T'])
+            source['nginx_args'] = nginx_runtime.startup_options(args)
+            dump = command(['docker', 'exec', item['Id'], 'nginx', '-T', *source['nginx_args']])
             if f'# configuration file {config_path}:' not in dump:
                 raise CertificateError('该文件不在容器 nginx -T 输出中，请填写实际生效的站点文件')
         mounts = sorted(item.get('Mounts', []), key=lambda m: len(m.get('Destination', '')), reverse=True)
@@ -356,8 +376,12 @@ def resolve(raw: Any) -> dict[str, Any]:
             raise CertificateError('配置没有 bind 挂载到宿主机；请查询 Mounts，容器内临时文件不自动修改')
         names = list(item.get('NetworkSettings', {}).get('Networks', {}))
         source.update(container=name, container_id=item['Id'], networks=[n for n in names if n not in ('bridge', 'none')])
+        source['proxy_addresses'] = {network: details.get('IPAddress', '')
+                                     for network, details in item.get('NetworkSettings', {}).get('Networks', {}).items()}
         if not source['networks']:
             raise CertificateError('前置代理需要 host 或自定义 Docker 网络，默认 bridge 不支持服务名解析')
+    if kind == 'nginx':
+        source['path'] = str(nginx_runtime.site_path(Path(source['path'])))
     text = read_config(Path(source['path']))
     if kind == 'caddy' and mode == 'docker':
         addresses = caddy_addresses(text, item.get('Config', {}).get('Env') or [])
@@ -371,8 +395,10 @@ def help_items(source: dict | None = None) -> list[dict[str, str]]:
     name = source.get('container', '')
     target = shlex.quote(name) if isinstance(name, str) and gateway.DOCKER_NAME.fullmatch(name) else '替换为容器名称'
     return [
-        {'title': '不知道代理在哪里运行', 'command': "docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'\nsystemctl is-active caddy nginx",
-         'fill': 'Docker 输出的 NAMES 填入容器名称；systemctl 对应项为 active 才表示本机服务正在运行。'},
+        {'title': '查正在运行的代理容器', 'command': "docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'",
+         'mode': 'docker', 'fill': '把 NAMES 列的实际代理名称填入容器名称；不要填写业务容器名称。'},
+        {'title': '查本机代理服务', 'command': 'systemctl is-active caddy nginx',
+         'mode': 'local', 'fill': '两行结果依次对应 Caddy 和 Nginx；active 表示服务正在运行。'},
         {'title': '查配置挂载与容器内路径', 'command': f"docker inspect {target} --format '{{{{range .Mounts}}}}{{{{println .Source \"->\" .Destination}}}}{{{{end}}}}'",
          'mode': 'docker',
          'fill': '箭头左边是宿主机路径，右边是容器内路径。上方配置路径填写右边，例如 /etc/caddy/Caddyfile；挂载目录时还需补上文件名。'},
@@ -388,7 +414,7 @@ def help_items(source: dict | None = None) -> list[dict[str, str]]:
          'fill': '找到要监控的域名，将其上方 configuration file 后的文件路径填入配置路径，去掉末尾冒号。'},
         {'title': '查本机服务配置路径', 'command': 'systemctl show caddy nginx --property=ExecStart --value',
          'mode': 'local',
-         'fill': 'Caddy 的 --config 后面是配置路径。本机 Nginx 自定义 -c/-p、Caddy --resume 或环境变量配置需要维护者确认。'},
+         'fill': 'Caddy 的 --config 后面是配置路径；Nginx 的 -c 是主配置，站点文件需从 nginx -T 查询。--resume 或本机 Caddy 环境变量配置需由维护者确认。'},
         {'title': '查看代理运行错误', 'command': (f'docker logs --tail 80 {target}' if source.get('mode') != 'local'
                                            else f"sudo journalctl -u {source.get('kind', 'caddy')} -n 80 --no-pager"),
          'local_command': 'sudo journalctl -u 替换为代理类型 -n 80 --no-pager',
@@ -398,26 +424,86 @@ def help_items(source: dict | None = None) -> list[dict[str, str]]:
 
 def discover() -> dict[str, Any]:
     sources, errors = [], []
-    if shutil.which('caddy'):
-        sources.append({'kind': 'caddy', 'mode': 'local', 'container': '', 'config_path': '/etc/caddy/Caddyfile', 'label': '本机 Caddy'})
-    if shutil.which('nginx'):
-        sources.append({'kind': 'nginx', 'mode': 'local', 'container': '', 'config_path': '/etc/nginx/conf.d/default.conf', 'label': '本机 Nginx'})
+    docker_ready = False
+    deadline = time.monotonic() + 14
+
+    def scan(args, *, timeout=4):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CertificateError('自动检测达到时间预算，可手动指定代理和配置路径')
+        return command(args, timeout=min(timeout, remaining))
+
+    def add(kind, mode, container='', args=None):
+        args = args or []
+        prefix = ['docker', 'exec', container] if mode == 'docker' else []
+        label = f'Docker {kind} · {container}' if container else f'本机 {kind}'
+        try:
+            if kind == 'nginx':
+                paths = nginx_runtime.configuration_files(scan([*prefix, 'nginx', '-T', *nginx_runtime.startup_options(args)]))
+                if not paths:
+                    raise CertificateError('运行配置中没有发现 HTTP 站点，请先配置域名和后端')
+            else:
+                paths = caddy_config_args(args) or ['/etc/caddy/Caddyfile']
+                if '--resume' in args:
+                    raise CertificateError('使用 --resume 运行配置；请先导出为持久配置文件后接入')
+            for path in paths[:128]:
+                sources.append({'kind': kind, 'mode': mode, 'container': container,
+                                'config_path': path, 'label': label + ' · ' + path})
+            if len(paths) > 128:
+                errors.append(label + '：站点文件超过 128 个，请手动选择其余文件')
+        except (OSError, ValueError) as exc:
+            errors.append(label + '：' + str(exc))
+
+    for kind in ('caddy', 'nginx'):
+        if shutil.which(kind):
+            try:
+                startup = scan(['systemctl', 'show', kind, '--property=ExecStart', '--value'], timeout=3)
+                options = re.findall(r'(?:^|\s)(-[cp]|--config)(?:=|\s*)/([^\s;"\x27}]+)', startup)
+                args = [part for flag, value in options for part in (flag, '/' + value)]
+                if '--resume' in startup:
+                    args.append('--resume')
+                add(kind, 'local', args=args)
+            except (OSError, ValueError) as exc:
+                errors.append(f'本机 {kind}：{exc}')
     try:
         nginx_runtime.require_local_docker()
-        rows = command(['docker', 'ps', '--format', '{{json .}}'])
-        for line in rows.splitlines()[:40]:
+        rows = scan(['docker', 'ps', '--format', '{{json .}}'])
+        docker_ready = True
+        lines = rows.splitlines()
+        for index, line in enumerate(lines[:256]):
+            if time.monotonic() >= deadline:
+                errors.append(f'本轮检测到达时间预算，尚有 {len(lines) - index} 个容器未核对；可重新检测或手动指定')
+                break
             item = json.loads(line)
             name = item.get('Names', '')
             if name.startswith('mini-gateway-'):
                 continue
             tag = (name + ' ' + item.get('Image', '')).lower()
             kind = 'caddy' if 'caddy' in tag else 'nginx' if 'nginx' in tag else ''
+            if not kind and gateway.DOCKER_NAME.fullmatch(name):
+                try:
+                    processes = scan(['docker', 'top', name, '-eo', 'args'], timeout=2)
+                    kind = next((kind for kind in ('nginx', 'caddy') if re.search(rf'(?:^|[/\s]){kind}(?:\s|:|$)', processes, re.M)), '')
+                except (OSError, ValueError):
+                    errors.append(name + '：无法核对容器内进程，可手动指定代理')
             if kind and gateway.DOCKER_NAME.fullmatch(name):
-                sources.append({'kind': kind, 'mode': 'docker', 'container': name, 'label': f'Docker {kind} · {name}',
-                                'config_path': '/etc/caddy/Caddyfile' if kind == 'caddy' else '/etc/nginx/conf.d/default.conf'})
+                try:
+                    config = json.loads(scan(['docker', 'inspect', '--format',
+                        '{"Entrypoint":{{json .Config.Entrypoint}},"Cmd":{{json .Config.Cmd}}}', name], timeout=3))
+                    add(kind, 'docker', name, (config.get('Entrypoint') or []) + (config.get('Cmd') or []))
+                except (ValueError, OSError) as exc:
+                    errors.append(name + '：' + str(exc))
+        if len(lines) > 256:
+            errors.append('容器超过 256 个，其余容器可手动指定；未扫描不代表没有代理')
     except (ValueError, OSError) as exc:
         errors.append(str(exc))
-    return {'sources': sources, 'errors': errors, 'help': help_items()}
+    return {'sources': sources, 'errors': errors, 'help': help_items(), 'checks': [
+        {'state': 'ready' if docker_ready else 'action', 'label': '持久采集',
+         'detail': '本机 Docker 可用' if docker_ready else '需要本机 Docker；请在安装向导选择安装，或由管理员启动 Docker 后重新检测。已有代理日志仍可预览。'},
+        {'state': 'ready' if sources else 'action', 'label': '网站入口',
+         'detail': f'发现 {len(sources)} 个代理配置来源，下一步核对具体规则' if sources else
+                   '未发现可读取的代理配置；展开高级选项填写实际代理及配置路径，再读取转发规则。'},
+    ]}
 
 
 class Connections:
@@ -631,7 +717,8 @@ class Connections:
         trusted_path(path)
         data = read_record(path)
         result = {**{k: data[k] for k in ('state', 'site', 'kind', 'source', 'token')},
-                  'scope': data.get('scope', '静态网站' if data['kind'] == 'static' else '已接入的转发规则')}
+                  'scope': data.get('scope', '静态网站' if data['kind'] == 'static' else '已接入的转发规则'),
+                  **{k: data.get(k) for k in ('applied_at', 'probe_id', 'verification', 'auto_restore')}}
         if verify and data['state'] == 'connected':
             try:
                 source, text = self.current_config(data, cached=True)
@@ -694,14 +781,21 @@ class Connections:
             extra = f'\n\n# mini-deploy static backend: {key}\nhttp://:{internal} {{\n    bind {bind}\n' + text[site.body:site.close] + '\n}\n'
         spec = gateway.normalize({'key': key, 'name': data.get('name') or route['site'], 'port': data.get('port', 18080),
                                   'network': network, 'upstream': upstream, 'image': data.get('image', gateway.IMAGE),
-                                  'bind': '127.0.0.1', 'trust_proxy': True})
-        if source['kind'] == 'caddy':
-            # The outer Caddy enforces business upload limits; the inserted hop must not lower them.
-            spec = gateway.normalize({**spec, 'max_body_bytes': 0, 'connect_timeout_ms': route['_connect_timeout']})
+                                  'bind': '127.0.0.1', 'trust_proxy': True, 'max_body_bytes': 0,
+                                  'connect_timeout_ms': route['_connect_timeout']})
+        peer = '127.0.0.1' if network == 'host' else source.get('proxy_addresses', {}).get(network)
+        if peer:
+            spec = gateway.normalize({**spec, 'trusted_proxies': [str(ipaddress.ip_address(peer))]})
         probe_path = data.get('probe_path', '/')
         if (not isinstance(probe_path, str) or not re.fullmatch(r'/[!-~]{0,511}', probe_path)
                 or any(c in probe_path for c in ('?', '#')) or probe_path.startswith('//')):
             raise CertificateError('检测路径应以 / 开头，不含查询参数；例如 /cloud/health')
+        expected = data.get('expected_status')
+        if expected is not None and (type(expected) is not int or not 200 <= expected <= 499):
+            raise CertificateError('预期响应状态需为 200–499；留空时只核对是否能够转发')
+        auto_restore = data.get('auto_restore', False)
+        if type(auto_restore) is not bool:
+            raise CertificateError('自动恢复选项无效')
         target = f'127.0.0.1:{spec["port"]}' if network == 'host' else f'mini-gateway-{key}:10000'
         if proxy:
             before = text[proxy.start:proxy.end]
@@ -719,7 +813,7 @@ class Connections:
             candidate = text[:site.start] + after + text[site.end:] + extra
         entry_path = self.gateways.directory(key) / 'entry.json'
         old = self.gateways.read(key) if entry_path.exists() else None
-        compared = ('upstream', 'network', 'port', 'bind', 'image') if repair else ('upstream', 'network', 'port', 'bind', 'image', 'max_body_bytes', 'connect_timeout_ms')
+        compared = ('upstream', 'network', 'port', 'bind', 'image') if repair else ('upstream', 'network', 'port', 'bind', 'image', 'max_body_bytes', 'connect_timeout_ms', 'trusted_proxies')
         if old and any(old['spec'].get(k) != spec.get(k) for k in compared):
             raise CertificateError('该标识已有不同的网关配置，请使用新的入口标识，或先在网关管理中核对配置')
         plan = {'token': secrets.token_hex(16), 'created': time.time(), 'source': source, 'site': route['site'],
@@ -727,43 +821,52 @@ class Connections:
                 'before': before, 'after': after, 'extra': extra,
                 'source_revision': digest(text), 'candidate': candidate, 'spec': spec,
                 'probe_path': probe_path,
+                'expected_status': expected, 'auto_restore': auto_restore,
+                'probe_id': 'mini-deploy-check-' + secrets.token_hex(12),
                 'gateway_revision': gateway.revision(old['spec']) if old else ''}
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         atomic_write(directory / 'plan.json', json.dumps(plan, ensure_ascii=False))
         return {'token': plan['token'], 'gateway': spec, 'site': route['site'], 'kind': route['kind'],
                 'before_rule': upstream if proxy else f'{route["site"]} → Caddy 静态文件',
                 'after_rule': f'{route["site"]} → {target} → {upstream}',
-                'notice': '确认后自动启动网关、备份配置、校验并应用。Caddy 将重启，已有连接可能短暂中断；Nginx 使用重载。'}
+                'notice': '确认后自动启动网关、备份配置、校验并应用。Caddy 将重启，已有连接可能短暂中断；Nginx 使用重载。'
+                          + ('同一规则被业务发布覆盖时，将自动恢复采集；后端或匹配规则改变时需重新确认。' if auto_restore else '')}
 
-    def probe(self, plan: dict) -> None:
+    def probe(self, plan: dict) -> dict:
+        last_status = None
         for attempt in range(4):
             connection = http.client.HTTPConnection('127.0.0.1', plan['spec']['port'], timeout=3)
             try:
-                connection.request('GET', plan['probe_path'], headers={'Host': plan['site'], 'X-Forwarded-Proto': 'https'})
+                connection.request('GET', plan['probe_path'], headers={'Host': plan['site'], 'X-Forwarded-Proto': 'https',
+                                                                      'X-Request-ID': plan.get('probe_id', '')})
                 response = connection.getresponse()
-                if response.status not in (502, 504):
-                    return
+                last_status = response.status
+                expected = plan.get('expected_status')
+                if response.status < 500 and (expected is None or response.status == expected):
+                    return {'status': response.status, 'application_verified': expected is not None,
+                            'notice': '响应符合预期' if expected is not None else '后端可达；未设置预期状态，尚未验证应用健康'}
             except (OSError, http.client.HTTPException):
                 pass
             finally:
                 connection.close()
             if attempt < 3:
                 time.sleep(0.5)
-        raise CertificateError('网关尚不能转发到后端，请核对 Docker 网络、服务名和端口；原入口将恢复')
+        detail = f'，检测返回 HTTP {last_status}' if last_status else ''
+        raise CertificateError('网关尚不能转发到后端或响应不符合预期' + detail + '；请核对检测路径、预期状态、Docker 网络与端口，原入口将恢复')
 
     def validate(self, source: dict, text: str) -> None:
         prefix = ['docker', 'exec', '-i', source['container_id']] if source['mode'] == 'docker' else []
         if source['kind'] == 'caddy':
             command([*prefix, 'caddy', 'validate', '--config', '/dev/stdin', '--adapter', 'caddyfile'], content=text)
         else:
-            command([*prefix, 'nginx', '-t'])
+            command([*prefix, 'nginx', '-t', *source.get('nginx_args', [])])
 
     def activate(self, source: dict) -> None:
         if source['mode'] == 'docker':
             if source['kind'] == 'caddy':
                 command(['docker', 'restart', source['container_id']], timeout=45)
             else:
-                command(['docker', 'exec', source['container_id'], 'nginx', '-s', 'reload'])
+                command(['docker', 'exec', source['container_id'], 'nginx', '-s', 'reload', *source.get('nginx_args', [])])
         else:
             command(['systemctl', 'restart' if source['kind'] == 'caddy' else 'reload', source['kind']], timeout=45)
 
@@ -808,8 +911,8 @@ class Connections:
             self.write_live(path, original, plan['candidate'])
             self.validate(source, plan['candidate'])
             self.activate(source)
-            self.probe(plan)
-            record['state'] = 'connected'
+            record['verification'] = self.probe(plan)
+            record.update(state='connected', applied_at=time.time())
             atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
         except (ValueError, OSError) as exc:
             try:
@@ -825,6 +928,36 @@ class Connections:
                 raise CertificateError(f'应用失败，自动恢复未完成。请尝试撤销接入；如配置或容器已被外部修改，请由维护者核对 {directory / "before.conf"} 后恢复。网关不会被停止') from rollback
             raise CertificateError(f'接入失败，原代理配置已恢复。{exc}') from exc
         return {'connection': self.status(plan['spec']['key'])}
+
+    def maintain(self, key: str, status: dict) -> dict:
+        """Reconcile only a previously approved rule; never select a new backend."""
+        if status.get('state') != 'connected' or status.get('config_state') not in ('matched', 'changed'):
+            return status
+        directory = self.directory(key)
+        record = read_record(directory / 'connection.json')
+        source, current = self.current_config(record, cached=True)
+        if status['config_state'] == 'changed':
+            if not record.get('auto_restore') or record['kind'] != 'proxy' or self.references(record, source, current):
+                return status
+            spec = self.gateways.read(key)['spec']
+            candidates = [route for route in routes(current, source['kind'], source.get('addresses'))
+                          if route['supported'] and route['site'] == record['site']
+                          and route['_selector'] == record.get('selector') and route['label'] == record.get('scope')
+                          and route['upstream'] == spec['upstream']]
+            if len(candidates) != 1 or source['path'] != record['source']['path'] or spec['network'] not in source['networks']:
+                return status
+            self.repair({'key': key, 'token': record['token']}, _automatic=True)
+            return self.status(key, verify=True)
+        entry = self.gateways.read(key)
+        spec = entry['spec']
+        peer = '127.0.0.1' if spec['network'] == 'host' else source.get('proxy_addresses', {}).get(spec['network'])
+        updated = gateway.normalize({**spec, 'max_body_bytes': 0, 'trusted_proxies': [peer] if peer else []})
+        if updated != spec:
+            self.gateways.save(updated, gateway.revision(spec), _reconcile=True)
+        if updated != record['spec'] or source != record['source']:
+            record.update(spec=updated, source=source)
+            atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
+        return status
 
     def release(self, data: dict) -> dict:
         directory = self.directory(data.get('key', ''))
@@ -844,14 +977,17 @@ class Connections:
         return {'connection': {'state': 'not_connected'},
                 'notice': '失效接入记录已解除，当前代理配置、容器和请求历史均保留；可重新检测接入'}
 
-    def repair(self, data: dict) -> dict:
+    def repair(self, data: dict, *, _automatic: bool = False) -> dict:
         self.permission_repairs = []
         key = data.get('key', '')
         directory = self.directory(key)
         record = read_record(directory / 'connection.json')
         if data.get('token') != record['token'] or record['state'] != 'connected':
             raise CertificateError('接入状态已变化，请刷新后重试')
-        source, current = self.current_config(record, repair_permissions=True)
+        source, current = self.current_config(record, repair_permissions=not _automatic)
+        if _automatic and (not record.get('auto_restore') or record['kind'] != 'proxy'
+                           or source['path'] != record['source']['path']):
+            raise CertificateError('自动恢复范围发生变化，请重新确认接入；当前配置和历史保留')
         permission_notice = f'已自动收紧 {len(self.permission_repairs)} 个目录的组写权限。' if self.permission_repairs else ''
         if self.matches(record, source, current):
             # Rebind metadata after a normal container recreation, without bouncing the service.
@@ -876,6 +1012,8 @@ class Connections:
         candidates = [route for route in candidates if route['kind'] == record['kind'] and
                       (not record.get('scope') or route['label'] == record['scope']) and
                       (route['kind'] == 'static' or route['upstream'] == spec['upstream'])]
+        if _automatic and (len(candidates) != 1 or spec['network'] not in source['networks']):
+            raise CertificateError('原规则或网络发生变化，请重新确认接入；当前配置和历史保留')
 
         # Keep the old recovery material even if the new apply creates a fresh before.conf.
         backup_id = secrets.token_hex(8)
@@ -891,12 +1029,20 @@ class Connections:
             plan = self.preview({'source': source, 'source_revision': digest(current), 'route_id': route['id'],
                 'key': key, 'name': spec['name'], 'port': spec['port'], 'network': spec['network'], 'image': spec['image'],
                 'internal_port': urlsplit(spec['upstream']).port if record['kind'] == 'static' else 18081,
-                'probe_path': record.get('probe_path', '/')}, repair=True)
+                'probe_path': record.get('probe_path', '/'), 'expected_status': record.get('expected_status'),
+                'auto_restore': record.get('auto_restore', False)}, repair=True)
         except (OSError, ValueError) as exc:
+            atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
             detail = str(exc) if isinstance(exc, CertificateError) else '当前配置暂不可读取'
-            return {'status': 'needs_selection', 'key': key, 'source': source,
-                    'notice': permission_notice + f'旧绑定已自动处理，原配置和历史保留。自动接入尚未完成：{detail}'}
-        result = self.apply({'key': key, 'token': plan['token']})
+            raise CertificateError(permission_notice + f'自动接入尚未完成，原绑定和历史保留，可重试：{detail}') from exc
+        try:
+            result = self.apply({'key': key, 'token': plan['token']})
+        except (OSError, ValueError):
+            # Retain retry authorization after a clean rollback, but never hide an incomplete rollback.
+            active = read_record(directory / 'connection.json') if (directory / 'connection.json').exists() else {}
+            if active.get('state') != 'recovery_required':
+                atomic_write(directory / 'connection.json', json.dumps(record, ensure_ascii=False))
+            raise
         return {**result, 'status': 'repaired', 'key': key,
                 'notice': permission_notice + '已自动恢复原规则的请求采集，沿用原网关和请求历史；其他业务规则保留'}
 

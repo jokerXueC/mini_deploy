@@ -75,6 +75,7 @@ import resource_alerts
 import prometheus_metrics
 import panel_maintenance
 import ssh_files
+import setup_checks
 
 RUNNING_RELEASE = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 AGENT_STARTED_AT = time.time()
@@ -1429,7 +1430,7 @@ def _nginx_site_plan(data: dict[str, Any]) -> tuple[Site, dict[str, Any]]:
     steps.extend([f"保存 {domain} → {host}:{port}", "检查 Nginx 配置并重新加载"])
     plan = {"project": project.key, "domain": domain, "port": port, "host": host, "mode": profile["mode"],
             "local_setup": local, "steps": steps, "url": _nginx_http_url(domain, profile),
-            "config": _nginx_http_config_text(domain, host, port),
+            "config": _nginx_http_config_text(domain, host, port, docker_dns=runtime.mode == 'docker' and profile.get('network') != 'host'),
             "notice": f"域名需解析到本服务器，并在云安全组放行 {profile.get('http_port', 80)} 端口。当前入口使用 HTTP，证书可稍后配置。"}
     fingerprint = [plan, saved, _project_to_config(existing), previous]
     plan["token"] = hashlib.sha256(json.dumps(fingerprint, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -1585,11 +1586,13 @@ def _project_nginx_config_text(project: Site) -> str:
     domain = _normalize_domain(project.app_domain)
     port = project.service_port or 8000
     settings = _nginx_settings()
-    upstream = settings.runtime(live=False).upstream(settings.read()["upstreams"].get(project.key))
-    return _nginx_http_config_text(domain, upstream, port)
+    runtime = settings.runtime(live=False)
+    upstream = runtime.upstream(settings.read()["upstreams"].get(project.key))
+    return _nginx_http_config_text(domain, upstream, port, docker_dns=runtime.mode == 'docker' and runtime.profile.get('network') != 'host')
 
 
-def _nginx_http_config_text(domain: str, upstream: str, port: int) -> str:
+def _nginx_http_config_text(domain: str, upstream: str, port: int, *, docker_dns: bool = False) -> str:
+    dynamic = docker_dns and not re.fullmatch(r'[0-9.]+', upstream)
     return "\n".join([
         "server {",
         "    listen 80;",
@@ -1598,8 +1601,14 @@ def _nginx_http_config_text(domain: str, upstream: str, port: int) -> str:
         "    client_max_body_size 50m;",
         "",
         "    location / {",
-        f"        proxy_pass http://{upstream}:{port};",
+        *(["        resolver 127.0.0.11 valid=10s ipv6=off;",
+           f"        set $mini_deploy_backend http://{upstream}:{port};",
+           "        proxy_pass $mini_deploy_backend;"] if dynamic else [f"        proxy_pass http://{upstream}:{port};"]),
         "        proxy_http_version 1.1;",
+        "        proxy_buffering off;",
+        "        proxy_request_buffering off;",
+        "        proxy_read_timeout 3600s;",
+        "        proxy_send_timeout 3600s;",
         "        proxy_set_header Host $host;",
         "        proxy_set_header X-Real-IP $remote_addr;",
         "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
@@ -2754,6 +2763,32 @@ def _status_payload() -> dict[str, Any]:
     }
 
 
+def _setup_payload():
+    try:
+        settings = _ai_manager().settings()
+        ai = {'configured': settings.get('configured', False)}
+    except (OSError, ValueError, terminal_ai.AIError):
+        ai = {'error': True}
+    protection = _basic_protection_instance
+    history = _server_performance_instance
+    discovered_sites, website_targets = 0, 0
+    discovery, monitor = _discovery_instance, _monitor_instance
+    if discovery is not None and discovery.home == STATE_FILE.parent:
+        with discovery.lock:
+            discovered_sites = len(discovery.rows)
+    if monitor is not None and monitor.path.parent == STATE_FILE.parent:
+        with monitor.lock:
+            website_targets = len(monitor.targets)
+    return setup_checks.snapshot(STATE_FILE.parent, system=_system_status_payload(),
+        authenticated=bool(UI_PASSWORD_HASH and UI_SESSION_SECRET),
+        ssh_available=ssh_terminal.paramiko is not None, ai=ai,
+        notifications=_any_notification_enabled(_notification_config_payload(include_secret=False)),
+        protection=protection.status() if protection is not None and protection.home == STATE_FILE.parent else {},
+        history_error=history.error if history is not None and history.path.parent.parent == STATE_FILE.parent else '',
+        started_at=AGENT_STARTED_AT, linux=sys.platform.startswith('linux'),
+        discovered_sites=discovered_sites, website_targets=website_targets)
+
+
 def _hash_password(password: str, salt: bytes | None = None) -> str:
     salt = salt or secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac(
@@ -2953,6 +2988,8 @@ def _normal_path(path: str) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "setup-checks.js": "application/javascript; charset=utf-8",
+    "setup-checks.css": "text/css; charset=utf-8",
     "performance.js": "application/javascript; charset=utf-8",
     "maintenance.js": "application/javascript; charset=utf-8",
     "ssh-file-manager.js": "application/javascript; charset=utf-8",
@@ -3794,6 +3831,10 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._write_json(200, _realtime_metrics_payload())
             return
+        if path == '/setup/checks':
+            if self._require_auth_json():
+                self._write_json(200, _setup_payload())
+            return
         if path in {'/security/center', '/security/fail2ban'}:
             if self._require_auth_json():
                 try:
@@ -4013,6 +4054,11 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                     else:
                         with request_gateway.LOCK:
                             result = {"entries": [store.describe(entry) for entry in store.entries()]}
+                        for entry in result['entries']:
+                            try:
+                                entry['collection'] = _request_history().collection_status(entry['key'], entry['connection'])
+                            except (OSError, sqlite3.Error, ValueError):
+                                entry['collection'] = {'state': 'error', 'detail': '采集状态暂不可读，请检查数据目录与磁盘空间'}
                         try:
                             result["history_sources"] = _request_history().sources()
                         except (OSError, sqlite3.Error):

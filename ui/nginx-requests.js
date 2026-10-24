@@ -305,7 +305,7 @@ window.NginxRequests = (() => {
       const attached = entry?.connection?.state === 'connected' && !collectionError;
       const needsRecovery = entry?.connection && !['connected', 'not_connected'].includes(entry.connection.state);
       source.textContent = backend === 'gateway'
-        ? attached ? `${entry.connection.site} · ${entry.state === 'running' ? '已开启' : '采集服务未运行'} · ${entry.connection.scope || '已接入的转发规则'}`
+        ? attached ? `${entry.connection.site} · ${entry.state !== 'running' ? '采集服务未运行' : ({active: '采集中', idle: '暂无新请求', waiting: '等待真实请求', pending: '等待采集', catching_up: '补采中', stale: '采集延迟', error: '采集异常'}[entry.collection?.state] || '配置已接入')} · ${entry.connection.scope || '已接入的转发规则'}`
           : entry?.connection && collectionError ? `${entry.connection.site} · 采集需检查`
             : needsRecovery ? `${entry.connection.site} · 接入操作待恢复`
             : entry ? `自定义入口 · ${entry.name} · 仅记录经过该入口的请求` : '尚未开启后端请求记录'
@@ -318,6 +318,7 @@ window.NginxRequests = (() => {
       if (historyResult) {
         const checked = result.checked_at ? new Date(result.checked_at * 1000).toLocaleTimeString('zh-CN') : '';
         notice.textContent = `${checked ? `最近检查 ${checked}` : '等待首次后台采集'} · 最多保留 7 天（受容量限制）。`;
+        if (entry?.collection?.detail) notice.textContent += ` ${entry.collection.detail}。`;
         notice.textContent += result.latest_at ? ` 最后一条请求：${new Date(result.latest_at * 1000).toLocaleString('zh-CN')}。` : ' 尚未保存请求。';
         if (collectionError) notice.textContent += ` ${collectionError}。`;
         if (result.checked_at && Date.now() / 1000 - result.checked_at > 60) notice.textContent += ' 采集延迟，当前统计可能不完整。';

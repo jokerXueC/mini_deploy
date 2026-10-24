@@ -91,10 +91,10 @@ else
   note "systemd service is not active: $SERVICE_NAME"
 fi
 
-if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-  pass "agent health responds on 127.0.0.1:$PORT"
+if [[ -n "$PYTHON_BIN" ]] && "$PYTHON_BIN" "$APP_HOME/scripts/check_agent_health.py" --agent "$APP_HOME/agent.py"; then
+  pass "agent health and running release verified on 127.0.0.1:$PORT"
 else
-  bad "agent health check failed on 127.0.0.1:$PORT"
+  bad "agent health or running release check failed on 127.0.0.1:$PORT"
 fi
 
 if command -v docker >/dev/null 2>&1; then

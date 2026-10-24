@@ -53,6 +53,23 @@ def test_detects_local_and_docker_and_reports_only_selected_fields(docker_setup)
     assert detected["certificate_mount"].endswith(nginx.CERT_DEST + ":ro")
 
 
+def test_discovery_is_not_limited_to_first_eight_containers(docker_setup, monkeypatch):
+    settings, item, commands = docker_setup
+    original = nginx.run
+    def run(args, **kwargs):
+        if args[:2] == ['docker', 'ps']:
+            return '\n'.join([f'app-{i}' for i in range(12)] + ['custom-edge', 'mini-gateway-monitor'])
+        return original(args, **kwargs)
+    def inspect(name):
+        if name != 'custom-edge':
+            raise certificates.CertificateError('not nginx')
+        return item
+    monkeypatch.setattr(nginx, 'run', run)
+    monkeypatch.setattr(nginx, 'inspect_container', inspect)
+    result = settings.discover()
+    assert [container['name'] for container in result['containers']] == ['custom-edge']
+
+
 def test_candidate_persists_then_uses_verified_container_id_and_paths(docker_setup):
     settings, item, commands = docker_setup
     profile = settings.candidate("docker", "edge")
@@ -151,7 +168,10 @@ def test_docker_domain_config_uses_saved_upstream_and_no_host_certbot(docker_set
     result = agent._configure_project_nginx(project, issue_https=True)
     assert result["http_ready"]
     assert not result["https_ok"]
-    assert "proxy_pass http://backend:8000;" in agent._project_nginx_conf_path(project).read_text()
+    text = agent._project_nginx_conf_path(project).read_text()
+    assert 'resolver 127.0.0.11 valid=10s ipv6=off;' in text
+    assert 'set $mini_deploy_backend http://backend:8000;' in text
+    assert 'proxy_pass $mini_deploy_backend;' in text
     assert not any(command[0] in {"systemctl", "certbot"} for command in commands)
     monkeypatch.setattr(agent, "PROJECTS", {"api": project})
     assert agent._remove_nginx_site({"project": "api"})["ok"]

@@ -27,6 +27,8 @@ window.RequestGateway = (() => {
         <div class="request-gateway-route"><code>${escapeHtml(entry.caddy_upstream)}</code><span aria-hidden="true"> → </span><code>${escapeHtml(entry.upstream)}</code></div>
         <div class="muted">本机地址：${escapeHtml(entry.local_address)} · 网络：${escapeHtml(entry.network)}</div>
         <p class="gateway-connection-state">${entry.connection?.error ? escapeHtml(entry.connection.error) : entry.connection?.state === 'connected' ? `配置已指向采集网关 · ${escapeHtml(entry.connection.site)}` : entry.connection && entry.connection.state !== 'not_connected' ? '接入操作待恢复，请撤销接入后重试' : '尚未通过向导接入网站流量'}</p>
+        ${entry.collection ? `<p class="gateway-collection-state" role="status">${escapeHtml(entry.collection.detail)}${entry.collection.latest_at ? ` · 最近请求 ${escapeHtml(new Date(entry.collection.latest_at * 1000).toLocaleString('zh-CN'))}` : ''}</p>` : ''}
+        ${entry.connection?.verification ? `<p class="muted">后端检测 HTTP ${escapeHtml(entry.connection.verification.status)} · ${escapeHtml(entry.connection.verification.notice)}</p>` : ''}
         <code class="gateway-caddy-command">reverse_proxy ${escapeHtml(entry.caddy_upstream)}</code>
         ${entry.error ? `<p class="form-error">${escapeHtml(entry.error)}</p>` : ''}
         <div class="request-actions">
@@ -59,6 +61,10 @@ window.RequestGateway = (() => {
       : '网关与业务服务、前置 Caddy/Nginx 需处于同一网络。后端使用服务名；前置代理使用保存后显示的容器地址。';
   }
 
+  function trustNotice() {
+    $('gatewayTrustedProxies').disabled = !$('gatewayTrust').checked;
+  }
+
   async function openForm(entry = null) {
     const version = ++formVersion;
     editing = entry;
@@ -68,6 +74,8 @@ window.RequestGateway = (() => {
       gatewayUpstream: entry?.upstream || '', gatewayPort: entry?.port || 18080,
       gatewayBind: entry?.bind || '127.0.0.1', gatewayImage: entry?.image || 'nginx:stable-alpine'})) $(id).value = value;
     $('gatewayTrust').checked = entry?.trust_proxy || false;
+    $('gatewayTrustedProxies').value = (entry?.trusted_proxies || []).join(', ');
+    trustNotice();
     $('gatewayKey').disabled = !!entry;
     ['gatewayPort', 'gatewayBind', 'gatewayImage', 'gatewayNetwork'].forEach(id => $(id).disabled = !!entry && entry.state !== 'not_created');
     $('gatewayNetwork').innerHTML = '<option value="host">服务器本机</option>';
@@ -128,13 +136,15 @@ window.RequestGateway = (() => {
   });
   $('gatewayCancel').addEventListener('click', () => { formVersion++; $('requestGatewayForm').hidden = true; editing = null; });
   $('gatewayNetwork').addEventListener('change', networkNotice);
+  $('gatewayTrust').addEventListener('change', trustNotice);
   $('gatewayRefresh').addEventListener('click', async () => { try { await refresh(); } catch (err) { feedback.textContent = err.message; } });
   $('requestGatewayForm').addEventListener('submit', event => {
     event.preventDefault();
     if (busy) return;
     const spec = {key: $('gatewayKey').value.trim(), name: $('gatewayName').value.trim(),
       upstream: $('gatewayUpstream').value.trim(), port: Number($('gatewayPort').value), bind: $('gatewayBind').value,
-      network: $('gatewayNetwork').value, image: $('gatewayImage').value.trim(), trust_proxy: $('gatewayTrust').checked};
+      network: $('gatewayNetwork').value, image: $('gatewayImage').value.trim(), trust_proxy: $('gatewayTrust').checked,
+      trusted_proxies: $('gatewayTrust').checked ? $('gatewayTrustedProxies').value.split(',').map(value => value.trim()).filter(Boolean) : []};
     for (const field of ['max_body_bytes', 'connect_timeout_ms']) {
       if (editing?.[field] !== undefined) spec[field] = editing[field];
     }
