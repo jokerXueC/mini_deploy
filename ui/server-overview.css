@@ -45,6 +45,10 @@ html[data-theme="light"] #serverView {
 #serverView .trend-range-controls { background: none; border: 0; gap: 2px; padding: 0; }
 #serverView .trend-range { border-radius: 3px; min-height: 30px; font-size: 12px; }
 #serverView .trend-range.active { color: var(--fg); background: var(--surface-muted); box-shadow: none; }
+.network-totals { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; padding-top:14px; margin-top:12px; border-top:1px solid var(--line); }
+.network-totals > span { display:grid; gap:6px; font-size:11px; color:var(--muted); }
+.network-totals strong { color:var(--fg); font-size:14px; font-weight:500; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.network-totals small { grid-column:1 / -1; color:var(--muted); font-size:10px; }
 .resource-observation { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .load-map { min-width: 0; padding: 20px 26px 20px 0; align-self: center; }
 .load-map-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }

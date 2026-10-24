@@ -26,8 +26,8 @@
     const badge = el('eventsTabCount'), tab = el('eventsViewTab');
     badge.textContent = count > 99 ? '99+' : String(count);
     badge.hidden = count === 0;
-    tab.setAttribute('aria-label', count ? `异常中心，${count} 项未恢复异常` : '异常中心，暂无当前异常');
-    tab.title = count ? `${count} 项未恢复异常（含已知晓）` : '暂无当前异常';
+    tab.setAttribute('aria-label', count ? `异常中心，${count} 项待知晓异常` : '异常中心，暂无待知晓异常');
+    tab.title = count ? `${count} 项待知晓异常` : '暂无待知晓异常';
   }
   const incidentKinds = new Set(['alert', 'recovery', 'recovered', 'resolved', 'disappeared', 'container_missing', 'container_disappeared']);
   const isIncident = item => incidentKinds.has(item.kind) || (!item.kind && ['warning', 'critical'].includes(item.level));
@@ -197,7 +197,7 @@
     loaded = true;
     loadError = '';
     csrfToken = data.csrf_token || csrfToken;
-    renderCount(activeAlerts().length);
+    renderCount(activeAlerts().filter(item => !item.acknowledged_at).length);
     const rows = data.targets || [];
     el('monitorTargetCount').textContent = rows.length ? `· ${rows.length} 个` : '';
     el('monitorTargets').innerHTML = rows.length ? rows.map(target => {
@@ -265,7 +265,7 @@
         if (full) {
           render(data);
           el('incidentFeedback').textContent = '';
-        } else renderCount(data.active_count);
+        } else renderCount(data.unacknowledged_count);
       }
     } catch (error) {
       if (requestedGeneration !== generation || requestedView !== activeView) return;

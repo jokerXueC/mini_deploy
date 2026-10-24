@@ -20,6 +20,22 @@ def preview(page, http_server, payload, *, realtime=True):
     playwright.expect(page.locator('.load-cell')).to_have_count(180)
 
 
+def test_network_cumulative_totals_refresh_and_distinguish_missing_from_zero(page, http_server, tmp_path):
+    payload = system()
+    payload['server']['network'].update(rx_bytes=5 * 1024**3, tx_bytes=768 * 1024**2)
+    preview(page, http_server, payload)
+    playwright.expect(page.locator('#networkRxTotal')).to_have_text('5.00 GiB')
+    playwright.expect(page.locator('#networkTxTotal')).to_have_text('768.00 MiB')
+    for width in (1440, 390):
+        page.set_viewport_size({'width': width, 'height': 1000})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        assert page.locator('.network-totals').evaluate('el => el.scrollWidth <= el.clientWidth + 1')
+        page.screenshot(path=str(tmp_path / f'network-totals-{width}.png'), full_page=True)
+    payload['server']['network'].update(rx_bytes=0, tx_bytes=None)
+    playwright.expect(page.locator('#networkRxTotal')).to_have_text('0 B', timeout=5000)
+    playwright.expect(page.locator('#networkTxTotal')).to_have_text('-')
+
+
 def test_heatmap_keeps_missing_samples_blank_and_preserves_focus_on_refresh(page, http_server):
     now = int(time.time())
     payload = system()

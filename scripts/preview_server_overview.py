@@ -67,7 +67,9 @@ def system():
     server['memory'].update({'percent': current['memory_percent'], 'used_mb': 8192 * current['memory_percent'] / 100,
                              'available_mb': 8192 * (1 - current['memory_percent'] / 100)})
     server['network'].update({'rx_kbps': current['network_rx_kbps'], 'tx_kbps': current['network_tx_kbps'],
-                              'total_kbps': current['network_total_kbps']})
+                              'total_kbps': current['network_total_kbps'],
+                              'rx_bytes': int(18.4 * 1024**3 + (now % 86400) * 220 * 1024),
+                              'tx_bytes': int(7.2 * 1024**3 + (now % 86400) * 90 * 1024)})
     containers = [
         {'id': 'a' * 64, 'name': 'api-server', 'image': 'ghcr.io/example/api:1.8.2', 'state': 'running',
          'health': 'healthy', 'cpu_percent': 27.8, 'memory_percent': 42.4, 'memory_usage': '868 MiB / 2 GiB',
@@ -117,7 +119,7 @@ class Handler(PerformanceHandler):
             self._write_json(200, container_history(query.get('id', ['a' * 64])[0], query.get('period', ['1h'])[0]))
         elif path == '/monitoring':
             if parse_qs(urlparse(self.path).query).get('summary') == ['1']:
-                self._write_json(200, {'active_count': 1, 'generated_at': time.time()})
+                self._write_json(200, {'active_count': 1, 'unacknowledged_count': 1, 'generated_at': time.time()})
                 return
             _, evidence = examples()
             events = [*evidence['timeline'],
@@ -148,7 +150,7 @@ def main():
     configure(args.data_dir.resolve(), args.port)
     Handler.demo_epoch = int(time.time())
     agent._server_performance_instance = seed(args.data_dir.resolve(), Handler.demo_epoch, recent_episode=True)
-    agent._history_instance = seed_requests(args.data_dir.resolve() / 'request-demo')
+    agent._history_instance = seed_requests(agent.STATE_FILE.parent, map_locations=True)
     print(f'http://127.0.0.1:{args.port}/ui?view=server', flush=True)
     with ThreadingHTTPServer(('127.0.0.1', args.port), Handler) as server:
         server.serve_forever()

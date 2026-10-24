@@ -52,6 +52,7 @@ import monitoring
 import container_monitoring
 import docker_events
 import request_history
+import request_locations
 import request_export
 import cpu_metrics
 import sqlite3
@@ -1726,7 +1727,7 @@ def _disk_status(path: Path = Path("/")) -> dict[str, Any]:
         return {"path": str(path), "used_gb": None, "total_gb": None, "percent": None}
 
 
-def _network_totals() -> tuple[int, int]:
+def _network_totals() -> tuple[int, int] | None:
     rx_total = 0
     tx_total = 0
     try:
@@ -1739,15 +1740,20 @@ def _network_totals() -> tuple[int, int]:
             if len(parts) >= 16:
                 rx_total += int(parts[0])
                 tx_total += int(parts[8])
-    except Exception:
-        pass
+    except (OSError, ValueError, IndexError):
+        return None
     return rx_total, tx_total
 
 
 def _network_status() -> dict[str, Any]:
     global _last_network_sample
     now = time.time()
-    rx_total, tx_total = _network_totals()
+    totals = _network_totals()
+    if totals is None:
+        _last_network_sample = None
+        return {'rx_kbps': None, 'tx_kbps': None, 'total_kbps': None, 'percent': None,
+                'rx_bytes': None, 'tx_bytes': None, 'max_mbps': NETWORK_MAX_MBPS}
+    rx_total, tx_total = totals
     if _last_network_sample is None:
         _last_network_sample = (now, rx_total, tx_total)
         return {
@@ -1756,6 +1762,8 @@ def _network_status() -> dict[str, Any]:
             "total_kbps": None,
             "percent": None,
             "max_mbps": NETWORK_MAX_MBPS,
+            "rx_bytes": rx_total,
+            "tx_bytes": tx_total,
         }
     prev_at, prev_rx, prev_tx = _last_network_sample
     _last_network_sample = (now, rx_total, tx_total)
@@ -1769,6 +1777,8 @@ def _network_status() -> dict[str, Any]:
         "total_kbps": round(total_kbps, 1),
         "percent": _percent(total_kbps / max(NETWORK_MAX_MBPS * 1024, 1) * 100),
         "max_mbps": NETWORK_MAX_MBPS,
+        "rx_bytes": rx_total,
+        "tx_bytes": tx_total,
     }
 
 
@@ -2470,6 +2480,8 @@ def _health_check_sampler() -> None:
 _monitor_instance: monitoring.Monitor | None = None
 _history_instance: request_history.History | None = None
 _history_lock = threading.Lock()
+_request_locations_instance: request_locations.Locations | None = None
+_request_locations_lock = threading.Lock()
 
 
 def _request_history() -> request_history.History:
@@ -2478,6 +2490,21 @@ def _request_history() -> request_history.History:
         if _history_instance is None or _history_instance.home != STATE_FILE.parent:
             _history_instance = request_history.History(STATE_FILE.parent, maintenance=_maintenance_shared_lock)
         return _history_instance
+
+
+def _request_location_summary(records=None, **options):
+    global _request_locations_instance
+    try:
+        history = _request_history()
+        with _request_locations_lock:
+            if _request_locations_instance is None or _request_locations_instance.history is not history:
+                _request_locations_instance = request_locations.Locations(history)
+            locations = _request_locations_instance
+        return locations.sample_summary(records) if records is not None else locations.history_summary(**options)
+    except (ValueError, OSError, sqlite3.Error):
+        return {'items': [], 'error': '请求地区统计暂不可用，原始请求记录仍保留。'}
+
+
 _monitor_lock = threading.Lock()
 _discovery_instance: certificate_discovery.Discovery | None = None
 _discovery_lock = threading.Lock()
@@ -2958,6 +2985,8 @@ UI_ASSET_TYPES = {
     "docker-images.js": "application/javascript; charset=utf-8",
     "docker-mirrors.js": "application/javascript; charset=utf-8",
     "nginx-requests.js": "application/javascript; charset=utf-8",
+    "request-map.js": "application/javascript; charset=utf-8",
+    "request-map.css": "text/css; charset=utf-8",
     "certificates.js": "application/javascript; charset=utf-8",
     "certificate-discovery.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
@@ -3930,7 +3959,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             if self._require_auth_json():
                 try:
                     count = int(parse_qs(parsed.query).get("limit", ["100"])[0])
-                    self._write_json(200, _nginx_requests_payload(count))
+                    result = _nginx_requests_payload(count)
+                    result['visitors'] = _request_location_summary(result.get('records', []))
+                    self._write_json(200, result)
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "nginx_requests_failed", "detail": str(exc)})
             return
@@ -3940,7 +3971,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                     query = parse_qs(parsed.query)
                     count = int(query.get("limit", ["100"])[0])
                     container = query.get("container", [""])[0]
-                    self._write_json(200, caddy_requests.recent(count, container))
+                    result = caddy_requests.recent(count, container)
+                    result['visitors'] = _request_location_summary(result.get('records', []))
+                    self._write_json(200, result)
                 except (ValueError, OSError) as exc:
                     self._write_json(400, {"error": "caddy_requests_failed", "detail": str(exc)})
             return
@@ -3957,6 +3990,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                         search=query.get("search", [""])[0], status=query.get("status", ["all"])[0],
                         slow_ms=int(query.get("slow_ms", ["1000"])[0]),
                         page=int(query.get("page", ["0"])[0]))
+                    result['visitors'] = _request_location_summary(key=query.get('key', [''])[0],
+                        period=query.get('period', ['24h'])[0], search=query.get('search', [''])[0],
+                        status=query.get('status', ['all'])[0], slow_ms=int(query.get('slow_ms', ['1000'])[0]))
                     self._write_json(200, result)
                 except ValueError as exc:
                     self._write_json(400, {"error": "history_query_invalid", "detail": str(exc)})

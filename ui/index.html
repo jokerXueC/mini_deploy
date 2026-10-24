@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="ui/operations.css">
   <link rel="stylesheet" href="ui/ssh-file-manager.css">
   <link rel="stylesheet" href="ui/request-export.css">
+  <link rel="stylesheet" href="ui/request-map.css">
   <link rel="stylesheet" href="ui/server-performance-panel.css">
   <link rel="stylesheet" href="ui/server-overview.css">
   <link rel="stylesheet" href="ui/vendor/xterm.css">
@@ -212,6 +213,11 @@
           <button id="requestStopMonitoring" class="ghost-button compact-action" type="button" hidden>停止记录</button>
         </div>
         <p id="requestNotice" class="muted" role="status"></p>
+        <section class="request-map-section" aria-labelledby="requestMapTitle">
+          <div class="security-section-head"><div><h3 id="requestMapTitle">请求来源</h3><p id="requestMapNote" class="muted">正在读取来源 IP</p></div><div class="security-map-legend"><span>请求</span><span>含错误</span></div></div>
+          <div class="security-map-layout"><div class="security-map-surface"><svg id="requestMap" viewBox="0 0 1000 500" role="group" aria-labelledby="requestMapTitle requestMapNote"><g id="requestMapLand" aria-hidden="true"></g><g id="requestMapDots"></g></svg><p id="requestMapEmpty" class="muted">等待请求来源</p></div><div class="security-map-sidebar"><div id="requestMapRegions" class="security-regions"></div><section id="requestMapDetail" class="security-map-detail" aria-labelledby="requestMapDetailTitle" hidden><div class="security-map-detail-head"><h4 id="requestMapDetailTitle"></h4><button id="requestMapDetailClose" class="toolbar-icon" type="button" title="关闭地区详情" aria-label="关闭请求地区详情"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></div><div id="requestMapDetailBody"></div></section></div></div>
+          <p class="request-map-privacy">IP 为采集点记录的地址，位置为近似归属地；公网 IP 单独查询 ipwho.is，不发送请求地址或请求头。</p>
+        </section>
         <p id="requestSampleSummary" class="muted"></p>
         <div id="requestRows" class="request-rows" aria-live="polite"></div>
         <div id="requestHistoryPages" class="request-actions" hidden><button id="requestHistoryPrevious" class="ghost-button compact-action" type="button">上一页</button><span id="requestHistoryPage" class="muted"></span><button id="requestHistoryNext" class="ghost-button compact-action" type="button">下一页</button></div>
@@ -467,6 +473,7 @@
             <div class="resource-capacity">实时吞吐</div>
             <div class="resource-value" id="networkValue">-</div>
             <div class="resource-sub" id="networkSub">RX - / TX -</div>
+            <div class="network-totals" title="所有非回环接口的当前计数，含 Docker 虚拟网卡；接口重建或服务器重启后可能重置，不等同云厂商账单流量。"><span>入站累计<strong id="networkRxTotal">-</strong></span><span>出站累计<strong id="networkTxTotal">-</strong></span><small>接口累计 · 含虚拟网卡</small></div>
           </div>
           <div class="status-mini-history">
             <div id="networkBar" class="resource-track"></div>
@@ -736,6 +743,7 @@
   <script src="ui/docker-mirrors.js"></script>
   <script src="ui/request-gateway.js"></script>
   <script src="ui/gateway-connect.js"></script>
+  <script src="ui/request-map.js"></script>
   <script src="ui/nginx-requests.js"></script>
   <script src="ui/request-export.js"></script>
   <script src="ui/vendor/xterm.js"></script>

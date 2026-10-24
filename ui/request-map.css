@@ -1,0 +1,13 @@
+.request-map-section { padding:20px 0; margin:18px 0; border-block:1px solid var(--line); --security-ok:#168060; --security-danger:#c73540; }
+html[data-theme=dark] .request-map-section { --security-ok:#64c9a6; --security-danger:#fb838b; }
+.request-map-section [hidden] { display:none !important; }
+#requestMap { display:block; width:100%; height:auto; max-height:300px; }
+#requestMapLand { fill:color-mix(in srgb,var(--muted) 17%,var(--bg)); stroke:var(--bg); stroke-width:.5; }
+#requestMapEmpty { position:absolute; bottom:12px; left:12px; right:12px; width:fit-content; font-size:11px; padding:5px 8px; background:var(--card); border-radius:3px; margin:0; }
+.request-map-section .security-regions > button { display:flex; justify-content:space-between; align-items:center; gap:12px; width:100%; padding:12px 0; border:0; border-bottom:1px solid var(--line); background:none; color:var(--fg); font:inherit; text-align:left; cursor:pointer; }
+.request-map-section .security-regions > button > span { font-size:12px; overflow-wrap:anywhere; }
+.request-map-section .security-regions > button small { display:block; color:var(--muted); font-size:10px; margin-top:5px; }
+.request-map-section button:focus-visible { outline:2px solid var(--control-accent); outline-offset:2px; }
+.request-map-section .security-map-ip code { display:block; color:var(--muted); overflow-wrap:anywhere; font-size:10px; line-height:1.6; margin:6px 0; }
+.request-map-privacy { color:var(--muted); font-size:10px; line-height:1.7; margin:14px 0 0; }
+#requestMapNote { font-size:11px; line-height:1.8; max-width:85ch; }

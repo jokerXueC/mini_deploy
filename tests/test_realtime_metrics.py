@@ -4,6 +4,20 @@ import json
 import agent
 
 
+def test_network_status_exposes_raw_totals_and_keeps_missing_readings_unknown(monkeypatch):
+    monkeypatch.setattr(agent, '_last_network_sample', None)
+    monkeypatch.setattr(agent, '_network_totals', lambda: (3 * 1024**3, 7 * 1024**3))
+    initial = agent._network_status()
+    assert initial['rx_bytes'] == 3 * 1024**3 and initial['tx_bytes'] == 7 * 1024**3
+    assert initial['rx_kbps'] is None
+    monkeypatch.setattr(agent, '_network_totals', lambda: None)
+    missing = agent._network_status()
+    assert missing['rx_bytes'] is None and missing['tx_bytes'] is None and missing['total_kbps'] is None
+    monkeypatch.setattr(agent, '_network_totals', lambda: (0, 0))
+    reset = agent._network_status()
+    assert reset['rx_bytes'] == reset['tx_bytes'] == 0 and reset['total_kbps'] is None
+
+
 def test_docker_status_uses_background_log_counts(monkeypatch):
     container_id = "a" * 64
     ps_line = json.dumps({

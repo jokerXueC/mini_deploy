@@ -299,11 +299,16 @@ def test_monitor_api_auth_csrf_and_read_only_status(http_server, runtime, monkey
     assert result["targets"][0]["url"] == "https://example.com/"
     monitor = agent._monitor()
     monitor.observe('test:active', True, 'test', 'test', 'docker', immediate=True)
-    monitor.operation({'action': 'acknowledge_all'})
     with monkeypatch.context() as patch:
         patch.setattr(monitor, 'snapshot', lambda: pytest.fail('Summary must not serialize incident details or history'))
         code, summary = http_server('GET', '/monitoring?summary=1')
-        assert code == 200 and summary['active_count'] == 1 and set(summary) == {'active_count', 'generated_at'}
+        assert code == 200 and summary['active_count'] == 1 and summary['unacknowledged_count'] == 1
+        assert set(summary) == {'active_count', 'unacknowledged_count', 'generated_at'}
+    monitor.operation({'action': 'acknowledge_all'})
+    with monkeypatch.context() as patch:
+        patch.setattr(monitor, 'snapshot', lambda: pytest.fail('Summary must not serialize incident details or history'))
+        summary = http_server('GET', '/monitoring?summary=1')[1]
+        assert summary['active_count'] == 1 and summary['unacknowledged_count'] == 0
         monitor.observe('test:active', False, 'test', 'test', 'docker')
         assert http_server('GET', '/monitoring?summary=1')[1]['active_count'] == 0
     assert http_server("POST", "/monitoring", {"action": "remove", "key": result["targets"][0]["key"]})[0] == 200

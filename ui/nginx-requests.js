@@ -4,6 +4,7 @@ window.NginxRequests = (() => {
   const rendered = new WeakMap();
   const sampleData = new WeakMap();
   let historyResult = null, historyPage = 0, searchTimer = null;
+  let visitors = null;
 
   function updateHtml(element, html) {
     if (rendered.get(element) === html) return;
@@ -96,6 +97,10 @@ window.NginxRequests = (() => {
     $('requestSlowField').hidden = status !== 'slow';
     const slowMs = slowThreshold();
     const tree = $('requestLayout').value === 'tree';
+    window.RequestMap?.render(visitors, {scope:`${$('requestBackend').value}:${$('requestGatewayKey').value}:${$('requestContainer').value}:${$('requestPeriod').value}`,
+      ...(historyResult ? {} : {records:records.filter(item => matchesSearch(item, term) &&
+        (status === 'all' || status === 'success' && item.status >= 200 && item.status < 400 ||
+        status === 'error' && item.status >= 400 || status === 'slow' && item.duration_ms >= slowMs))})});
     const groups = historyResult?.groups || groupRequests(records, tree, slowMs).filter(group => {
       if (status === 'success' && group.successes !== group.count) return false;
       if (status === 'error' && !group.errors) return false;
@@ -282,6 +287,7 @@ window.NginxRequests = (() => {
       }
       if (version !== generation || !$('requestsView').classList.contains('active')) return;
       records = result.records || [];
+      visitors = result.visitors || null;
       historyResult = result.history ? result : null;
       window.AppSelects?.syncAll();
       $('requestContainerField').hidden = backend !== 'caddy';
@@ -328,7 +334,7 @@ window.NginxRequests = (() => {
       $('requestDisable').hidden = backend !== 'nginx' || !result.enabled;
       render();
     } catch (err) {
-      if (version === generation) notice.textContent = `请求读取失败：${err.message}`;
+      if (version === generation) { notice.textContent = `请求读取失败：${err.message}`; window.RequestMap?.error(err.message); }
     } finally {
       pending = false;
       $('requestRefresh').disabled = false;

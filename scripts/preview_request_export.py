@@ -11,11 +11,12 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent  # noqa: E402
 import request_history  # noqa: E402
+import request_locations  # noqa: E402
 from scripts.local_ssh import configure  # noqa: E402
 from scripts.preview_operations import Handler as OperationsHandler  # noqa: E402
 
 
-def seed(directory, now=None):
+def seed(directory, now=None, *, map_locations=False):
     now = time.time() if now is None else now
     history = request_history.History(directory)
     for key, name, total in [('demo-api', 'API 服务（演示）', 1840), ('demo-web', '网站（演示）', 640)]:
@@ -30,12 +31,21 @@ def seed(directory, now=None):
             status = 503 if index % 31 == 0 else 404 if index % 23 == 0 else 200
             item = {'at': at, 'host': 'api.demo.local' if key == 'demo-api' else 'demo.local',
                 'method': method, 'path': route, 'status': str(status), 'duration': str(duration),
-                'upstream': str(duration * .83), 'client_ip': f'203.0.113.{1 + index % 24}',
+                'upstream': str(duration * .83), 'client_ip': f'{"8.8.8" if map_locations else "203.0.113"}.{1 + index % 24}',
                 'protocol': 'HTTP/2.0', 'response_bytes': str(128 + index % 4096),
                 'request_id': f'demo-{key}-{index}', 'upstream_address': '127.0.0.1:8766',
                 'request_headers': {'User-Agent': 'mini_deploy export demo'}}
             lines.append(at + ' mini_deploy_req ' + json.dumps(item))
         history.ingest(key, name, 'demo-' + str(int(now)), lines, now, now=now)
+    if map_locations:
+        request_locations.Locations(history)
+        places = [('模拟 · 上海', 31.23, 121.47), ('模拟 · 东京', 35.68, 139.69),
+                  ('模拟 · 法兰克福', 50.11, 8.68), ('模拟 · 旧金山', 37.77, -122.42)]
+        with history.connect() as db:
+            for index in range(24):
+                label, lat, lon = places[index % 4]
+                db.execute('INSERT OR REPLACE INTO request_locations VALUES (?,?,?)',
+                           (f'8.8.8.{index + 1}', now, json.dumps({'label': label, 'latitude': lat, 'longitude': lon})))
     return history
 
 
@@ -61,7 +71,7 @@ def main():
     args = parser.parse_args()
     password_path = configure(args.data_dir.resolve(), args.port)
     agent.STATE_FILE = args.data_dir.resolve() / 'requests-demo' / 'state.json'
-    agent._history_instance = seed(agent.STATE_FILE.parent)
+    agent._history_instance = seed(agent.STATE_FILE.parent, map_locations=True)
     print(f'http://127.0.0.1:{args.port}/ui?view=requests', flush=True)
     print(f'登录密码文件：{password_path}', flush=True)
     with ThreadingHTTPServer(('127.0.0.1', args.port), Handler) as server:

@@ -282,6 +282,8 @@ class Monitor:
     def summary(self):
         with self.lock:
             return {"active_count": sum(1 for item in self.incidents.values() if item.get("active")),
+                    "unacknowledged_count": sum(1 for item in self.incidents.values()
+                                                if item.get("active") and not item.get("acknowledged_at")),
                     "generated_at": self.clock()}
 
     def snapshot(self):

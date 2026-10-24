@@ -1242,6 +1242,14 @@ function renderSystemStatus(system = {}) {
   DashboardMotion.reading($('networkSub'), networkTotal,
     () => `RX ${formatNumber(network.rx_kbps, 'KiB/s')} / TX ${formatNumber(network.tx_kbps, 'KiB/s')}`);
   setResourceBar('networkBar', network.percent);
+  const trafficSize = value => {
+    if (!Number.isFinite(value) || value < 0) return '-';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    const index = Math.min(units.length - 1, Math.floor(Math.log2(Math.max(1, value)) / 10));
+    return `${(value / 1024 ** index).toFixed(index ? 2 : 0)} ${units[index]}`;
+  };
+  $('networkRxTotal').textContent = trafficSize(network.rx_bytes);
+  $('networkTxTotal').textContent = trafficSize(network.tx_bytes);
   renderCpuCores(cpu);
   renderSystemTrend(system);
 

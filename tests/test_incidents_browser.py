@@ -72,7 +72,9 @@ def incidents(dashboard):
                 route.fulfill(status=503, json={"detail": "采样服务暂不可用"})
                 return
             if summary:
-                route.fulfill(json={"active_count": sum(item.get('active') is not False for item in control['snapshot']['alerts'])})
+                alerts = [item for item in control['snapshot']['alerts'] if item.get('active') is not False]
+                route.fulfill(json={"active_count": len(alerts),
+                                    "unacknowledged_count": sum(not item.get('acknowledged_at') for item in alerts)})
                 return
         route.fulfill(json=control["snapshot"])
 
@@ -108,13 +110,15 @@ def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(inc
     page.locator('#acknowledgeAllBtn').click()
     playwright.expect(page.locator('#incidentFeedback')).to_have_text('当前异常已标为已知晓；恢复前仍保留显示')
     playwright.expect(page.locator('#acknowledgeAllBtn')).to_be_disabled()
-    playwright.expect(badge).to_have_text('5')
+    playwright.expect(badge).to_be_hidden()
     page.clock.install()
     page.locator('#serverViewTab').click()
-    playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('aria-label', '异常中心，5 项未恢复异常')
-    playwright.expect(badge).to_have_text('5')
-    page.wait_for_function('document.querySelector("#eventsViewTab").title.includes("5 项未恢复")')
+    playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('aria-label', '异常中心，暂无待知晓异常')
+    page.clock.run_for(31000)
+    playwright.expect(badge).to_be_hidden()
     control['snapshot']['alerts'] = control['snapshot']['alerts'][:2]
+    for item in control['snapshot']['alerts']:
+        item['acknowledged_at'] = None
     page.clock.run_for(31000)
     playwright.expect(badge).to_have_text('2')
     assert control['summary_gets'] > 0
@@ -131,7 +135,7 @@ def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(inc
     control['snapshot']['alerts'] = []
     page.clock.run_for(31000)
     playwright.expect(badge).to_be_hidden()
-    playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('aria-label', '异常中心，暂无当前异常')
+    playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('aria-label', '异常中心，暂无待知晓异常')
 
 
 def test_acknowledgment_keeps_faults_and_history_and_survives_reload(incidents):
@@ -141,15 +145,18 @@ def test_acknowledgment_keeps_faults_and_history_and_survives_reload(incidents):
     playwright.expect(page.locator("#alertList")).to_contain_text("已知晓 · 仍异常")
     assert control["posts"][-1] == {"action": "acknowledge", "key": "docker:api:oom", "incident_id": "incident-0"}
     playwright.expect(page.locator("#alertBadge")).to_have_text("5 项异常")
+    playwright.expect(page.locator('#eventsTabCount')).to_have_text('4')
     playwright.expect(page.locator("#eventTimeline")).to_contain_text("网站已恢复")
     page.reload()
     playwright.expect(page.locator("#alertList")).to_contain_text("已知晓 · 仍异常")
+    playwright.expect(page.locator('#eventsTabCount')).to_have_text('4')
     choose(page, "incidentStatus", "unacknowledged")
     assert page.locator("#alertList .incident-row").count() == 4
     page.locator("#acknowledgeAllBtn").click()
     playwright.expect(page.locator("#acknowledgeAllBtn")).to_be_disabled()
     playwright.expect(page.locator("#alertList")).to_contain_text("没有符合筛选")
     playwright.expect(page.locator("#alertBadge")).to_have_text("5 项异常")
+    playwright.expect(page.locator('#eventsTabCount')).to_be_hidden()
     assert control["posts"][-1] == {"action": "acknowledge_all"}
     page.locator("#resetIncidentFilters").click()
     assert page.locator("#alertList .incident-row").count() == 5
@@ -159,6 +166,9 @@ def test_acknowledgment_keeps_faults_and_history_and_survives_reload(incidents):
     playwright.expect(page.locator("#eventTimeline")).to_contain_text("持续 2 分钟")
     choose(page, "historyStatus", "disappeared")
     playwright.expect(page.locator("#eventTimeline")).to_contain_text("配置容器消失")
+    page.reload()
+    playwright.expect(page.locator('#alertBadge')).to_have_text('5 项异常')
+    playwright.expect(page.locator('#eventsTabCount')).to_be_hidden()
 
 
 def test_filters_expansion_and_polling_stay_stable_on_recovery(incidents):
