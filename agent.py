@@ -3729,6 +3729,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
         if path == "/monitoring":
             if self._require_auth_json():
                 try:
+                    if parse_qs(parsed.query).get('summary') == ['1']:
+                        self._write_json(200, _monitor().summary())
+                        return
                     payload = _monitor().snapshot()
                 except (OSError, ValueError, TypeError, AttributeError):
                     self._write_json(503, {"error": "monitoring_unavailable", "detail": "无法读取监测数据，请检查服务日志；原文件已保留"})

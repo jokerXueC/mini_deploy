@@ -1,4 +1,17 @@
 .panel-ai-dialog { max-width: 900px; }
+.panel-ai-window-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.panel-ai-dock { position: fixed; z-index: 90; left: 0; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 10px; width: 160px; max-width: calc(100vw - 24px); min-height: 60px; padding: 12px; border: 1px solid var(--line); border-left: 3px solid var(--control-accent); border-radius: 0 6px 6px 0; background: var(--card); color: var(--fg); box-shadow: 0 3px 14px #0002; text-align: left; cursor: pointer; font: inherit; }
+.panel-ai-dock[hidden] { display: none; }
+.panel-ai-dock-copy { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.panel-ai-dock-copy strong { font-size: 12px; font-weight: 600; }
+.panel-ai-dock-copy > span { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.panel-ai-dock > img { width: 14px; height: 14px; filter: invert(1); }
+html[data-theme=light] .panel-ai-dock > img { filter: none; }
+.panel-ai-dock-indicator { width: 12px; height: 12px; flex: 0 0 12px; border: 2px solid currentColor; border-radius: 50%; color: var(--muted); }
+.panel-ai-dock[data-state=preparing] .panel-ai-dock-indicator, .panel-ai-dock[data-state=tools] .panel-ai-dock-indicator, .panel-ai-dock[data-state=running] .panel-ai-dock-indicator { color: var(--control-accent); border-right-color: transparent; animation: tai-spin 1.2s linear infinite; }
+.panel-ai-dock[data-state=done] .panel-ai-dock-indicator { color: #278759; background: currentColor; }
+.panel-ai-dock[data-state=failed] .panel-ai-dock-indicator { color: #c83d4a; background: currentColor; }
+.panel-ai-dock:focus-visible { outline: 2px solid var(--control-accent); outline-offset: 3px; }
 .panel-ai-toolbar, .panel-ai-compose { padding: 12px 22px; }
 .panel-ai-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; border-bottom: 1px solid var(--line); }
 .panel-ai-toolbar p { flex: 1 1 240px; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -23,4 +36,4 @@ html[data-theme=light] .panel-ai-loading img { filter: none; }
 .panel-ai-http { padding: 12px 22px; font-size: 12px; }
 .panel-ai-http label { display: block; margin-bottom: 8px; }
 @media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-http, .panel-ai-code { padding-left: 14px; padding-right: 14px; } }
-@media (prefers-reduced-motion:reduce) { .panel-ai-loading img { animation: none; } }
+@media (prefers-reduced-motion:reduce) { .panel-ai-loading img, .panel-ai-dock .panel-ai-dock-indicator { animation: none; } }

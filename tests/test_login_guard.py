@@ -63,7 +63,7 @@ def test_manual_ban_applies_both_scopes_persists_does_not_extend_and_expires(gua
     engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'all'}, '1.1.1.1')
     assert engine.blocked('8.8.8.8')
     state = engine.status()
-    assert state['failure_24h'] == 0 and state['ban_total'] == 2
+    assert state['failure_24h'] == 0 and state['ban_total'] == 1
     assert {row['source'] for row in state['bans']} == {'panel', 'ssh'}
     assert all(row['enforced'] and row['reason'] == '管理员手动封禁' for row in state['bans'])
     assert kernel.calls[-1][0] == [2222] and kernel.calls[-1][1][0]['ip'] == '8.8.8.8'
@@ -116,6 +116,41 @@ def test_manual_ban_status_is_available_for_map_ips_beyond_current_ban_page(guar
     assert state['bans'] == []
     assert state['locations'][0]['bans'] == [{'source': 'panel', 'enforced': True}]
     assert not state['locations'][0]['protected']
+
+
+def test_ban_pagination_keeps_both_scopes_together_and_counts_ips(guard):
+    engine, now, _ = guard
+    engine.tick({'ready': True, 'ports': [2222]})
+    for index in range(11):
+        now[0] += 1
+        engine.change({'action': 'ban', 'ip': f'8.8.8.{index + 1}', 'source': 'all'}, '1.1.1.1')
+    first, second = engine.status(), engine.status(ban_page=1)
+    assert first['ban_total'] == second['ban_total'] == 11
+    assert len(first['bans']) == 20 and len(second['bans']) == 2
+    assert not {row['ip'] for row in first['bans']} & {row['ip'] for row in second['bans']}
+    assert {row['source'] for row in second['bans']} == {'panel', 'ssh'}
+
+
+def test_combined_unban_is_atomic_and_keeps_other_ips(guard):
+    engine, now, kernel = guard
+    engine.tick({'ready': True, 'ports': [2222]})
+    engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'panel'}, '1.1.1.1')
+    now[0] += 60
+    engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'ssh'}, '1.1.1.1')
+    engine.change({'action': 'ban', 'ip': '9.9.9.9', 'source': 'all'}, '1.1.1.1')
+    before = engine.status()['bans']
+    assert len({row['expires'] for row in before if row['ip'] == '8.8.8.8'}) == 2
+    kernel.fail = True
+    with pytest.raises(RuntimeError):
+        engine.change({'action': 'unban', 'ip': '8.8.8.8', 'source': 'all'}, '1.1.1.1')
+    assert engine.status()['bans'] == before and engine.blocked('8.8.8.8')
+    with engine.history.connection(readonly=True) as db:
+        assert db.execute("SELECT COUNT(*) FROM security_activity WHERE kind='unban'").fetchone()[0] == 0
+    kernel.fail = False
+    engine.change({'action': 'unban', 'ip': '8.8.8.8', 'source': 'all'}, '1.1.1.1')
+    assert not engine.blocked('8.8.8.8') and engine.blocked('9.9.9.9')
+    assert {row['ip'] for row in engine.status()['bans']} == {'9.9.9.9'}
+    assert {row['ip'] for row in kernel.calls[-1][1]} == {'9.9.9.9'}
 
 
 def test_successes_loopback_whitelist_and_sources_do_not_create_false_bans(guard):

@@ -196,10 +196,12 @@ class Guard:
                     self._event(db, scope, 'ban', ip, '管理员手动封禁', now)
             elif action == 'unban':
                 ip, source = address(data.get('ip')), data.get('source')
-                if source not in {'panel', 'ssh'}:
+                if not isinstance(source, str) or source not in {'panel', 'ssh', 'all'}:
                     raise ValueError('登录来源无效')
-                db.execute('DELETE FROM login_guard_bans WHERE ip=? AND source=?', (ip, source))
-                self._event(db, source, 'unban', ip, '管理员手动解封', now)
+                for scope in ('panel', 'ssh') if source == 'all' else (source,):
+                    removed = db.execute('DELETE FROM login_guard_bans WHERE ip=? AND source=?', (ip, scope))
+                    if removed.rowcount:
+                        self._event(db, scope, 'unban', ip, '管理员手动解封', now)
             else:
                 raise ValueError('不支持的防护操作')
             # Apply SSH removals before committing: a failed kernel operation must
@@ -286,13 +288,18 @@ class Guard:
                 item['protected'] = self._ignored(item['ip'], settings)
             counts = dict(db.execute('SELECT kind,COUNT(*) FROM security_activity WHERE ts BETWEEN ? AND ? GROUP BY kind', (now - 86400, now)))
             location_total = db.execute("SELECT COUNT(DISTINCT ip) FROM security_activity WHERE kind IN ('login_success','login_failure') AND ts BETWEEN ? AND ?", (now - 86400, now)).fetchone()[0]
-            bans = [dict(row) for row in db.execute('SELECT * FROM login_guard_bans WHERE expires>? ORDER BY started DESC LIMIT 10 OFFSET ?', (now, ban_page * 10))]
+            # Page by IP so its panel and SSH rules never land on different pages.
+            bans = [dict(row) for row in db.execute(
+                'WITH selected AS (SELECT ip,MAX(started) AS latest FROM login_guard_bans WHERE expires>? '
+                'GROUP BY ip ORDER BY latest DESC,ip LIMIT 10 OFFSET ?) '
+                'SELECT b.* FROM login_guard_bans b JOIN selected s ON b.ip=s.ip WHERE b.expires>? '
+                'ORDER BY s.latest DESC,b.ip,b.source', (now, ban_page * 10, now))]
             for item in bans:
                 item['enforced'] = settings['enabled'] and (item['source'] == 'panel' or
                     self.ssh_state['ready'] and (item['ip'], item['started'], item['expires']) in self._enforced_ssh)
             auth = db.execute("SELECT value FROM cursors WHERE key='auth:status'").fetchone()
             return {'settings': settings, 'ssh': dict(self.ssh_state), 'auth': json.loads(auth[0]) if auth else {'readable': False, 'detail': '等待 SSH 登录日志'},
                     'items': items, 'total': total, 'page': page, 'page_size': 10, 'bans': bans, 'ban_page': ban_page,
-                    'ban_total': db.execute('SELECT COUNT(*) FROM login_guard_bans WHERE expires>?', (now,)).fetchone()[0],
+                    'ban_total': db.execute('SELECT COUNT(DISTINCT ip) FROM login_guard_bans WHERE expires>?', (now,)).fetchone()[0],
                     'locations': locations, 'location_total': location_total, 'success_24h': counts.get('login_success', 0), 'failure_24h': counts.get('login_failure', 0),
                     'bans_24h': counts.get('ban', 0), 'checked_at': now}

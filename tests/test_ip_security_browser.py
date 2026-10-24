@@ -191,10 +191,18 @@ def test_map_ip_manual_ban_confirmation_actual_enforcement_and_unban(
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.locator('#securityMapDetail').scroll_into_view_if_needed()
     page.screenshot(path=str(tmp_path / f'map-manual-ban-{width}-{theme}.png'))
-    for scope in ('panel', 'ssh'):
-        page.locator(f'#securityBans [data-unban="{ip}"][data-source="{scope}"]').click()
-        page.locator('#confirmOkBtn').click()
-        playwright.expect(page.locator(f'#securityBans [data-unban="{ip}"][data-source="{scope}"]')).to_have_count(0)
+    unban = page.locator(f'#securityBans [data-unban="{ip}"]')
+    playwright.expect(unban).to_have_count(1)
+    playwright.expect(unban).to_have_attribute('data-source', 'all')
+    row = unban.locator('..')
+    playwright.expect(row).to_contain_text('面板登录 · 已执行')
+    playwright.expect(row).to_contain_text('SSH 登录 · 已执行')
+    playwright.expect(page.locator('#securityBanPage')).to_contain_text('共 1 项')
+    unban.click()
+    playwright.expect(page.locator('#confirmMessage')).to_contain_text('面板和 SSH 登录')
+    page.locator('#confirmOkBtn').click()
+    playwright.expect(unban).to_have_count(0)
+    assert kernel.calls[-1][1] == []
     playwright.expect(button).to_be_enabled()
     assert not engine.blocked(ip) and engine.status()['ban_total'] == 0
 

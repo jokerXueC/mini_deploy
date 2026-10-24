@@ -116,6 +116,9 @@ class Handler(PerformanceHandler):
             query = parse_qs(urlparse(self.path).query)
             self._write_json(200, container_history(query.get('id', ['a' * 64])[0], query.get('period', ['1h'])[0]))
         elif path == '/monitoring':
+            if parse_qs(urlparse(self.path).query).get('summary') == ['1']:
+                self._write_json(200, {'active_count': 1, 'generated_at': time.time()})
+                return
             _, evidence = examples()
             events = [*evidence['timeline'],
                       {'id': 'demo-cpu', 'at_ts': self.demo_epoch - 1140, 'kind': 'alert',

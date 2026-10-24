@@ -91,6 +91,92 @@ def test_unconfigured_model_entry_offers_settings_without_sending_or_ssh(
     assert not manager.jobs
 
 
+@pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'dark')])
+def test_minimized_diagnosis_continues_across_views_and_restores_draft_and_result(
+        page, http_server, manager, model_server, evidence, tmp_path, width, theme):
+    manager.save(ai_tests.config(model_server))
+    model_server.gate = threading.Event()
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.goto(http_server.origin + '/ui?view=server')
+    page.evaluate('(theme) => applyTheme(theme)', theme)
+    page.evaluate("window.PanelAI.open({kind:'overview'})")
+    playwright.expect(page.locator('.panel-ai-loading')).to_be_visible()
+    page.wait_for_function('document.querySelector("#panelAITarget").textContent.includes("面板主机：")')
+    page.locator('#panelAIQuestion').fill('保留这个追问草稿')
+    page.locator('#panelAIMinimize').click()
+    dock = page.locator('#panelAIDock')
+    playwright.expect(page.locator('#panelAIDialog')).not_to_be_visible()
+    playwright.expect(dock).to_be_visible()
+    playwright.expect(dock).to_be_focused()
+    playwright.expect(page.locator('#panelAIDockStatus')).to_have_text('正在分析')
+    assert dock.bounding_box()['x'] == 0
+    page.locator('#eventsViewTab').click()
+    playwright.expect(page.locator('#eventsView')).to_have_class('dashboard-view active')
+    # Another AI entry restores the active task instead of cancelling/replacing it.
+    page.evaluate("window.PanelAI.open({kind:'incident', id:'another-incident'})")
+    playwright.expect(page.locator('#panelAIDialog')).to_be_visible()
+    playwright.expect(page.locator('#panelAIQuestion')).to_have_value('保留这个追问草稿')
+    assert len(manager.jobs) == 1
+    page.locator('#panelAIMinimize').click()
+    model_server.gate.set()
+    playwright.expect(page.locator('#panelAIDockStatus')).to_have_text('已完成', timeout=15000)
+    playwright.expect(dock).to_have_attribute('data-state', 'done')
+    assert len(model_server.calls) == 1
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'panel-ai-docked-{width}-{theme}.png'))
+    dock.click()
+    playwright.expect(page.locator('#panelAIDialog')).to_be_visible()
+    playwright.expect(dock).not_to_be_visible()
+    playwright.expect(page.locator('#panelAIQuestion')).to_have_value('保留这个追问草稿')
+    playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
+    assert page.locator('#panelAIMessages .panel-ai-entry').count() == 1
+    assert len(manager.history.list()['conversations']) == 1
+    page.locator('#panelAIClose').click()
+    playwright.expect(dock).not_to_be_visible()
+
+
+def test_minimized_preparation_failure_restore_and_stop(
+        page, http_server, manager, model_server, evidence):
+    manager.save(ai_tests.config(model_server))
+    model_server.gate = threading.Event()
+    page.goto(http_server.origin + '/ui?view=server')
+    # Hold setup so minimizing before submission also keeps the session alive.
+    page.evaluate('''() => {
+      const original = window.fetch;
+      window.panelAISetupGate = new Promise(resolve => window.releasePanelAISetup = resolve);
+      window.fetch = async (...args) => {
+        if (String(args[0]) === '/terminal-ai/settings') await window.panelAISetupGate;
+        return original(...args);
+      };
+      window.PanelAI.open({kind:'overview'});
+    }''')
+    page.locator('#panelAIMinimize').click()
+    playwright.expect(page.locator('#panelAIDockStatus')).to_have_text('准备中')
+    page.evaluate('window.releasePanelAISetup()')
+    playwright.expect(page.locator('#panelAIDockStatus')).to_have_text('正在分析')
+    page.route('**/terminal-ai/jobs?*', lambda route: route.fulfill(status=503, json={'detail': '测试诊断连接中断'}))
+    playwright.expect(page.locator('#panelAIDockStatus')).to_have_text('分析失败')
+    page.locator('#panelAIDock').click()
+    playwright.expect(page.locator('#panelAIFeedback')).to_have_text('测试诊断连接中断')
+    page.unroute('**/terminal-ai/jobs?*')
+    model_server.gate.set()
+    page.locator('#panelAIClose').click()
+    page.evaluate("window.PanelAI.open({kind:'overview'})")
+    playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
+    model_server.gate = threading.Event()
+    page.locator('#panelAIQuestion').fill('再检查一次')
+    page.locator('#panelAISend').click()
+    playwright.expect(page.locator('#panelAIStop')).to_be_visible()
+    page.locator('#panelAIStop').click()
+    page.locator('#panelAIMinimize').click()
+    playwright.expect(page.locator('#panelAIDockStatus')).to_have_text('已停止')
+    page.locator('#panelAIDock').click()
+    playwright.expect(page.locator('#panelAISend')).to_be_enabled()
+    page.locator('#panelAIClose').click()
+    playwright.expect(page.locator('#panelAIDock')).not_to_be_visible()
+    model_server.gate.set()
+
+
 @pytest.mark.parametrize('width', [1440, 390])
 def test_code_scope_selection_starts_separate_conversations_and_restores_scope(
         page, http_server, manager, model_server, evidence, code_projects, tmp_path, width):

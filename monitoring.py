@@ -279,6 +279,11 @@ class Monitor:
                     os.unlink(name)
             self.last_flush = self.clock()
 
+    def summary(self):
+        with self.lock:
+            return {"active_count": sum(1 for item in self.incidents.values() if item.get("active")),
+                    "generated_at": self.clock()}
+
     def snapshot(self):
         with self.lock:
             now = self.clock()

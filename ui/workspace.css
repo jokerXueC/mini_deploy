@@ -35,6 +35,9 @@ html[data-theme="light"] body.panel-workspace {
 .panel-workspace .view-tabs { display: flex; gap: 26px; padding: 0; margin-bottom: 0; background: none; border-radius: 0; border: 0; border-bottom: 1px solid var(--line); box-shadow: none; backdrop-filter: none; }
 .panel-workspace .view-tab { border: 0; border-radius: 0; padding: 14px 0; background: none; font-size: 13px; font-weight: 500; color: var(--muted); }
 .panel-workspace .view-tab.active { color: var(--fg); background: none; box-shadow: inset 0 -2px var(--fg); }
+.panel-workspace .view-tab.incident-tab { position: relative; padding-right: 22px; }
+.incident-tab-count { position: absolute; top: 3px; right: 0; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: #b42332; color: #fff; font-size: 10px; font-weight: 600; line-height: 17px; text-align: center; font-variant-numeric: tabular-nums; }
+.incident-tab-count[hidden] { display: none; }
 .panel-workspace :is(.ghost-button, .danger-button, .theme-toggle, .toolbar-icon, .form-select-button) { border-radius: 5px; box-shadow: none; backdrop-filter: none; font-weight: 500; }
 .panel-workspace .ghost-button { background: var(--card); }
 .panel-workspace .ghost-button:hover:not(:disabled) { background: var(--surface-muted); }

@@ -64,7 +64,8 @@ def dashboard():
                         return
                     state["sites"] = [item for item in state["sites"] if item["key"] != payload["key"]]
                 elif path == "/monitoring":
-                    result = {"targets": [], "alerts": [], "events": [], "notifications_enabled": False}
+                    result = ({"active_count": 0} if 'summary=1' in route.request.url else
+                              {"targets": [], "alerts": [], "events": [], "notifications_enabled": False})
                 elif path == "/notifications":
                     result = {"notifications": payload.get("notifications", {})}
                 elif path == "/nginx-settings":

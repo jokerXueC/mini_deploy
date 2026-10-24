@@ -282,6 +282,7 @@ def test_resource_rules_ignore_absent_docker_and_dont_alert_on_manual_stop(monit
 
 def test_monitor_api_auth_csrf_and_read_only_status(http_server, runtime, monkeypatch):
     assert http_server("GET", "/monitoring", authenticated=False)[0] == 401
+    assert http_server("GET", "/monitoring?summary=1", authenticated=False)[0] == 401
     assert http_server("POST", "/monitoring", {"action": "save", "url": "example.com"}, authenticated=False)[0] == 401
     connection = http.client.HTTPConnection(http_server.origin.removeprefix("http://"))
     connection.request("POST", "/monitoring", json.dumps({"action": "save", "url": "example.com"}),
@@ -296,6 +297,15 @@ def test_monitor_api_auth_csrf_and_read_only_status(http_server, runtime, monkey
     code, result = http_server("GET", "/monitoring")
     assert code == 200 and not result["notifications_enabled"]
     assert result["targets"][0]["url"] == "https://example.com/"
+    monitor = agent._monitor()
+    monitor.observe('test:active', True, 'test', 'test', 'docker', immediate=True)
+    monitor.operation({'action': 'acknowledge_all'})
+    with monkeypatch.context() as patch:
+        patch.setattr(monitor, 'snapshot', lambda: pytest.fail('Summary must not serialize incident details or history'))
+        code, summary = http_server('GET', '/monitoring?summary=1')
+        assert code == 200 and summary['active_count'] == 1 and set(summary) == {'active_count', 'generated_at'}
+        monitor.observe('test:active', False, 'test', 'test', 'docker')
+        assert http_server('GET', '/monitoring?summary=1')[1]['active_count'] == 0
     assert http_server("POST", "/monitoring", {"action": "remove", "key": result["targets"][0]["key"]})[0] == 200
 
 

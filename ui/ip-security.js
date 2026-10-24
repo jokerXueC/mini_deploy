@@ -227,11 +227,23 @@
     $('securityActivityPage').textContent = '第 ' + (page + 1) + ' / ' + pages + ' 页 · 共 ' + status.total + ' 条';
     $('securityActivityRetention').textContent = (status.auth.readable ? '' : (status.auth.detail || 'SSH 日志尚不可读') + '。') +
       '登录记录保留 30 天，最多 20000 条；停机或日志轮转可能存在空档。';
-    $('securityBans').innerHTML = status.bans.map(item => '<div class="security-ban-row"><div><strong>' +
-      text(item.ip) + '</strong><small>' + (item.source === 'panel' ? '面板登录' : 'SSH 登录') +
-      (item.enforced ? ' · 已执行' : ' · 未生效') + '</small></div><span>' + text(item.reason) +
-      '<small>到期 ' + text(date(item.expires)) + '</small></span><button class="ghost-button compact-action" type="button" data-unban="' +
-      text(item.ip) + '" data-source="' + text(item.source) + '">解封</button></div>').join('') ||
+    const banGroups = new Map();
+    status.bans.forEach(item => {
+      if (!banGroups.has(item.ip)) banGroups.set(item.ip, []);
+      banGroups.get(item.ip).push(item);
+    });
+    $('securityBans').innerHTML = [...banGroups].map(([ip, rules]) => {
+      const source = rules.length > 1 ? 'all' : rules[0].source;
+      const sameExpiry = rules.every(item => item.expires === rules[0].expires);
+      return '<div class="security-ban-row"><div><strong>' + text(ip) + '</strong>' +
+        rules.map(item => '<small>' + (item.source === 'panel' ? '面板登录' : 'SSH 登录') +
+          (item.enforced ? ' · 已执行' : ' · 未生效') + '</small>').join('') + '</div><span>' +
+        text([...new Set(rules.map(item => item.reason))].join('；')) +
+        (sameExpiry ? '<small>到期 ' + text(date(rules[0].expires)) + '</small>' :
+          rules.map(item => '<small>' + (item.source === 'panel' ? '面板' : 'SSH') + '到期 ' + text(date(item.expires)) + '</small>').join('')) +
+        '</span><button class="ghost-button compact-action" type="button" data-unban="' +
+        text(ip) + '" data-source="' + text(source) + '">解封</button></div>';
+    }).join('') ||
       '<p class="security-empty">当前没有临时封禁。</p>';
     $('securityBanPage').textContent = '第 ' + (banPage + 1) + ' / ' + Math.max(1, Math.ceil(status.ban_total / 10)) + ' 页 · 共 ' + status.ban_total + ' 项';
     window.AppSelects?.syncAll();
@@ -351,7 +363,7 @@
   };
   $('securityBans').onclick = async event => {
     const button = event.target.closest('[data-unban]');
-    if (button && !busy && await showConfirmDialog({title:'解除临时封禁',message:'解除 ' + button.dataset.unban + ' 的' + (button.dataset.source === 'ssh' ? ' SSH ' : '面板') + '临时封禁？',confirmText:'解封'})) {
+    if (button && !busy && await showConfirmDialog({title:'解除临时封禁',message:'解除 ' + button.dataset.unban + ' 的' + (button.dataset.source === 'all' ? '面板和 SSH 登录' : button.dataset.source === 'ssh' ? ' SSH ' : '面板') + '临时封禁？',confirmText:'解封'})) {
       change({action:'unban',ip:button.dataset.unban,source:button.dataset.source});
     }
   };

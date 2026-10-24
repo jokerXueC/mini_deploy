@@ -21,6 +21,14 @@
   const sourceName = source => sources[source] || (source ? `其他来源（${source}）` : '来源未提供');
   const severityName = level => ({critical: '严重', warning: '警告', info: '提示', success: '恢复'}[level] || '提示');
   const activeAlerts = () => (snapshot.alerts || []).filter(item => item.active !== false);
+  function renderCount(count) {
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('异常数量暂不可用');
+    const badge = el('eventsTabCount'), tab = el('eventsViewTab');
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.hidden = count === 0;
+    tab.setAttribute('aria-label', count ? `异常中心，${count} 项未恢复异常` : '异常中心，暂无当前异常');
+    tab.title = count ? `${count} 项未恢复异常（含已知晓）` : '暂无当前异常';
+  }
   const incidentKinds = new Set(['alert', 'recovery', 'recovered', 'resolved', 'disappeared', 'container_missing', 'container_disappeared']);
   const isIncident = item => incidentKinds.has(item.kind) || (!item.kind && ['warning', 'critical'].includes(item.level));
   const reasonNames = {oom: '内存溢出', oom_killed: '内存溢出退出', restarts: '反复重启', restart_storm: '反复重启',
@@ -189,6 +197,7 @@
     loaded = true;
     loadError = '';
     csrfToken = data.csrf_token || csrfToken;
+    renderCount(activeAlerts().length);
     const rows = data.targets || [];
     el('monitorTargetCount').textContent = rows.length ? `· ${rows.length} 个` : '';
     el('monitorTargets').innerHTML = rows.length ? rows.map(target => {
@@ -237,25 +246,31 @@
 
   async function refresh() {
     window.clearTimeout(timer);
-    if (!visible() || document.hidden || loading || busy) return;
-    if (el('monitorTargets').querySelector('details[open]')) {
+    if (document.hidden || loading || busy) return;
+    if (visible() && el('monitorTargets').querySelector('details[open]')) {
       timer = window.setTimeout(refresh, 15000);
       return;
     }
     loading = true;
     const requestedGeneration = generation;
+    const requestedView = activeView;
+    const full = visible();
     try {
-      if (!csrfToken) {
+      if (full && !csrfToken) {
         const status = await fetchJson('status');
         csrfToken = status.csrf_token || csrfToken;
       }
-      const data = await fetchJson('monitoring');
-      if (!busy && visible() && requestedGeneration === generation) {
-        render(data);
-        el('incidentFeedback').textContent = '';
+      const data = await fetchJson(full ? 'monitoring' : 'monitoring?summary=1');
+      if (!busy && requestedView === activeView && requestedGeneration === generation) {
+        if (full) {
+          render(data);
+          el('incidentFeedback').textContent = '';
+        } else renderCount(data.active_count);
       }
     } catch (error) {
-      if (requestedGeneration !== generation || !visible()) return;
+      if (requestedGeneration !== generation || requestedView !== activeView) return;
+      el('eventsViewTab').title = '异常数量暂未更新，等待重试；已保留上次结果';
+      if (!full) return;
       loadError = error.message;
       feedback(`监测加载失败：${error.message}`);
       el('incidentFeedback').textContent = `监测加载失败：${error.message}。最近结果尚未更新，正在重试。`;
@@ -263,7 +278,7 @@
       el('monitorCertificates').textContent = `线上证书加载失败：${error.message}`;
     } finally {
       loading = false;
-      if (visible()) timer = window.setTimeout(refresh, 15000);
+      if (!document.hidden) timer = window.setTimeout(refresh, requestedView !== activeView ? 0 : visible() ? 15000 : 30000);
     }
   }
 

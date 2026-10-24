@@ -1,5 +1,6 @@
 """Anomaly center contracts with local incident examples and mocked mutations."""
 from copy import deepcopy
+import re
 import time
 
 import pytest
@@ -40,7 +41,7 @@ def incidents(dashboard):
             "coverage": {"server": {"status": "healthy", "checked_at": now},
                          "docker": {"status": "healthy", "checked_at": now}},
             "history_retention_days": 30, "history_limit": 1000, "notifications_enabled": False}
-    control = {"snapshot": data, "posts": [], "fail_get": False, "fail_post": False, "gets": 0}
+    control = {"snapshot": data, "posts": [], "fail_get": False, "fail_post": False, "gets": 0, "summary_gets": 0}
 
     def monitoring(route):
         if route.request.method == "POST":
@@ -65,13 +66,17 @@ def incidents(dashboard):
                 control["snapshot"]["targets"] = [{"key": "local-probe", "name": "Local",
                     "url": payload["url"], "enabled": True, "result": {}}]
         else:
-            control["gets"] += 1
+            summary = 'summary=1' in route.request.url
+            control["summary_gets" if summary else "gets"] += 1
             if control["fail_get"]:
                 route.fulfill(status=503, json={"detail": "采样服务暂不可用"})
                 return
+            if summary:
+                route.fulfill(json={"active_count": sum(item.get('active') is not False for item in control['snapshot']['alerts'])})
+                return
         route.fulfill(json=control["snapshot"])
 
-    page.route("**/monitoring", monitoring)
+    page.route(re.compile(r'/monitoring(?:\?.*)?$'), monitoring)
     # Old dismissals deliberately match the alert's legacy signature.
     page.add_init_script("try { localStorage.setItem('mini_deploy-dismissed-notices', JSON.stringify(['alert||critical|api 内存溢出退出|docker|', 'event|recovery|success|网站已恢复|website||HTTP 200|'])); } catch (_) {}")
     page.goto(f"{origin}/ui?view=events")
@@ -89,6 +94,44 @@ def choose(page, control_id, value):
         "(node, value) => [...node.options].find(option => option.value === value).textContent", value)
     page.locator(f"#{control_id}").select_option(value, force=True)
     playwright.expect(page.locator(f"#{control_id}-button .form-select-value")).to_have_text(label)
+
+
+@pytest.mark.parametrize('width,theme', [(390, 'dark'), (1440, 'light')])
+def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(incidents, width, theme, tmp_path):
+    page, _, control = incidents
+    page.set_viewport_size({'width': width, 'height': 960})
+    page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
+    badge = page.locator('#eventsTabCount')
+    playwright.expect(badge).to_have_text('5')
+    choose(page, 'incidentSource', 'docker')
+    playwright.expect(badge).to_have_text('5')
+    page.locator('#acknowledgeAllBtn').click()
+    playwright.expect(page.locator('#incidentFeedback')).to_have_text('当前异常已标为已知晓；恢复前仍保留显示')
+    playwright.expect(page.locator('#acknowledgeAllBtn')).to_be_disabled()
+    playwright.expect(badge).to_have_text('5')
+    page.clock.install()
+    page.locator('#serverViewTab').click()
+    playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('aria-label', '异常中心，5 项未恢复异常')
+    playwright.expect(badge).to_have_text('5')
+    page.wait_for_function('document.querySelector("#eventsViewTab").title.includes("5 项未恢复")')
+    control['snapshot']['alerts'] = control['snapshot']['alerts'][:2]
+    page.clock.run_for(31000)
+    playwright.expect(badge).to_have_text('2')
+    assert control['summary_gets'] > 0
+    tab_box, badge_box = page.locator('#eventsViewTab').bounding_box(), badge.bounding_box()
+    assert badge_box['x'] > tab_box['x'] + tab_box['width'] / 2
+    assert badge_box['y'] < tab_box['y'] + tab_box['height'] / 2
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'incident-badge-{width}-{theme}.png'))
+    control['fail_get'] = True
+    page.clock.run_for(31000)
+    playwright.expect(badge).to_have_text('2')
+    playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('title', '异常数量暂未更新，等待重试；已保留上次结果')
+    control['fail_get'] = False
+    control['snapshot']['alerts'] = []
+    page.clock.run_for(31000)
+    playwright.expect(badge).to_be_hidden()
+    playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('aria-label', '异常中心，暂无当前异常')
 
 
 def test_acknowledgment_keeps_faults_and_history_and_survives_reload(incidents):
