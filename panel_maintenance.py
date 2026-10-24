@@ -27,6 +27,51 @@ KEY = re.compile(r'[a-f0-9]{32}')
 BACKUP_KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,120}')
 MAX_FILES, MAX_SIZE = 6000, 192 * 1024**2
 LOCK = threading.RLock()
+INSTALLATION_FILES = ('requirements-ssh.txt', 'systemd/mini-deploy-agent.service')
+
+
+class InstallerRequired(ValueError):
+    """A real runtime, data, or service change cannot be applied by file copy."""
+
+
+def compatible(current, target):
+    if not isinstance(current, dict) or not isinstance(target, dict):
+        raise ValueError('程序发布清单格式无效，未切换程序')
+    changed = sorted(key for key in current.keys() | target.keys()
+                     if key != 'program_entries' and current.get(key) != target.get(key))
+    if changed:
+        raise InstallerRequired('更新涉及安装或数据兼容变化（' + ', '.join(changed)[:300] + '），请使用 install.sh 升级')
+    minimum = target.get('python_min')
+    if (target.get('name') != 'mini_deploy'
+            or type(target.get('program_update_contract')) is not int
+            or type(target.get('state_schema')) is not int
+            or not isinstance(minimum, list) or len(minimum) != 2
+            or any(type(value) is not int or value < 0 for value in minimum)):
+        raise ValueError('程序兼容约定无效，未切换程序')
+    if tuple(sys.version_info[:2]) < tuple(minimum):
+        raise InstallerRequired('当前 Python 低于新版本要求，请使用 install.sh 升级运行环境')
+
+
+def program_entries(contract):
+    entries = contract.get('program_entries') if isinstance(contract, dict) else None
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 256:
+        raise ValueError('程序文件清单无效，未切换程序')
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, str) or entry in seen:
+            raise ValueError('程序文件清单包含无效或重复路径')
+        path = PurePosixPath(entry)
+        # New code modules are allowed, but never adopt arbitrary directories or data paths.
+        known = entry in ENTRIES
+        module = re.fullmatch(r'[a-z][a-z0-9_]*\.py', entry)
+        script = re.fullmatch(r'scripts/[a-z][a-z0-9_-]*\.(?:py|sh)', entry)
+        if (path.is_absolute() or '..' in path.parts or '\\' in entry or path.as_posix() != entry
+                or not (known or module or script)):
+            raise ValueError('程序文件清单包含非面板程序路径')
+        seen.add(entry)
+    if not {'agent.py', 'panel_maintenance.py', 'release.json', 'ui'} <= seen:
+        raise ValueError('程序文件清单缺少必需入口')
+    return tuple(entries)
 
 
 def digest(path):
@@ -79,7 +124,9 @@ def download_error(channel, error):
     return f'{name} 下载失败：{detail[:600]}'
 
 
-def release_files(root, entries=ENTRIES, required=True):
+def release_files(root, entries=None, required=True):
+    if entries is None:
+        entries = program_entries(read_json(root / 'release.json'))
     files, total = [], 0
     for entry in entries:
         path = root / entry
@@ -88,6 +135,8 @@ def release_files(root, entries=ENTRIES, required=True):
             if required:
                 raise ValueError(f'更新包缺少 {entry}，请使用安装脚本升级')
             continue
+        if entry != 'ui' and not path.is_file():
+            raise ValueError(f'程序文件路径不是普通文件：{entry}')
         for item in ([path] if path.is_file() else path.rglob('*')):
             trusted_path(item)
             if item.is_dir():
@@ -101,16 +150,19 @@ def release_files(root, entries=ENTRIES, required=True):
     return sorted(set(files)), total
 
 
-def allowed(relative):
+def allowed(relative, entries=None):
+    entries = ENTRIES if entries is None else entries
     parts = PurePosixPath(relative)
     if parts.is_absolute() or '..' in parts.parts or '\\' in relative or not parts.parts:
         return False
-    return relative in (*ENTRIES, '.mini-deploy-install', '.mini-deploy-release.json') or relative.startswith('ui/')
+    if parts.as_posix() != relative:
+        return False
+    return relative in (*entries, '.mini-deploy-install', '.mini-deploy-release.json') or ('ui' in entries and relative.startswith('ui/'))
 
 
-def copy_files(source, target, files):
+def copy_files(source, target, files, *, entries=None):
     for relative in files:
-        if not allowed(relative):
+        if not allowed(relative, entries):
             raise ValueError('恢复清单包含非面板程序路径')
         src, dst = source / relative, target / relative
         trusted_path(src)
@@ -282,7 +334,8 @@ class Maintenance:
             return {'job': job['id']}
 
     def snapshot(self):
-        files, size = release_files(self.app, required=False)
+        entries = program_entries(read_json(self.app / 'release.json'))
+        files, size = release_files(self.app, entries=entries, required=False)
         for extra in ('.mini-deploy-install', '.mini-deploy-release.json'):
             if (self.app / extra).exists():
                 files.append(extra)
@@ -291,7 +344,7 @@ class Maintenance:
         key = 'program-' + time.strftime('%Y%m%d-%H%M%S', time.gmtime()) + '-' + uuid.uuid4().hex[:8]
         folder = self.backup / key
         folder.mkdir(mode=0o700)
-        copy_files(self.app, folder / 'files', files)
+        copy_files(self.app, folder / 'files', files, entries=entries)
         manifest = {'format': 1, 'app': str(self.app), 'created_at': time.time(),
                     'version': self.version(), 'files': {p: digest(folder / 'files' / p) for p in files}}
         write_json(folder / 'program.json', manifest)
@@ -303,11 +356,17 @@ class Maintenance:
             raise ValueError('备份 ID 无效')
         folder = self.backup / key
         data = read_json(folder / 'program.json')
-        if data.get('format') != 1 or data.get('app') != str(self.app) or not 1 <= len(data.get('files', {})) <= MAX_FILES:
+        if (data.get('format') != 1 or data.get('app') != str(self.app)
+                or not isinstance(data.get('files'), dict) or not 1 <= len(data['files']) <= MAX_FILES):
             raise ValueError('程序快照无效或属于另一安装路径')
+        manifest_path = folder / 'files/release.json'
+        trusted_path(manifest_path)
+        if data['files'].get('release.json') != digest(manifest_path):
+            raise ValueError('程序快照清单校验失败，未恢复')
+        entries = program_entries(read_json(manifest_path))
         total = 0
         for relative, sha in data['files'].items():
-            if not allowed(relative) or not re.fullmatch('[a-f0-9]{64}', str(sha)):
+            if not allowed(relative, entries) or not re.fullmatch('[a-f0-9]{64}', str(sha)):
                 raise ValueError('快照包含非程序路径或无效校验值')
             path = folder / 'files' / relative
             trusted_path(path)
@@ -334,17 +393,56 @@ class Maintenance:
             time.sleep(1)
         raise RuntimeError('服务未通过本地健康与运行版本检查')
 
-    def restore(self, key):
+    def restore(self, key, *, expected_contract=None):
         data = self.verify_program(key)
-        self.restore_compatible(key)
-        copy_files(self.backup / key / 'files', self.app, data['files'])
+        self.restore_compatible(key, expected_contract=expected_contract)
+        source = self.backup / key / 'files'
+        entries = program_entries(read_json(source / 'release.json'))
+        self.remember_files(source, data['files'])
+        copy_files(source, self.app, data['files'], entries=entries)
+        if '.mini-deploy-release.json' not in data['files']:
+            write_json(self.app / '.mini-deploy-release.json', data['version'])
         command(['systemctl', 'start', self.service])
         self.health(data['version']['fingerprint'])
 
-    def restore_compatible(self, key):
+    def restore_compatible(self, key, *, expected_contract=None):
         contract = self.backup / key / 'files/release.json'
-        if read_json(contract) != read_json(self.app / 'release.json'):
-            raise ValueError('所选程序版本的数据或运行环境约定不同，拒绝自动恢复')
+        current = read_json(self.app / 'release.json') if expected_contract is None else expected_contract
+        target = read_json(contract)
+        compatible(current, target)
+        if expected_contract is None:
+            self.installation_compatible(contract.parent, current, target)
+
+    def installation_compatible(self, source, current, target):
+        for relative in INSTALLATION_FILES:
+            before = relative in current['program_entries']
+            after = relative in target['program_entries']
+            if not before and not after:
+                continue
+            installed, candidate = self.app / relative, source / relative
+            trusted_path(installed)
+            trusted_path(candidate)
+            if (before != after or not installed.is_file() or not candidate.is_file()
+                    or digest(installed) != digest(candidate)):
+                raise InstallerRequired(f'更新涉及服务或依赖安装变化（{relative}），请使用 install.sh 升级')
+
+    def managed_files(self):
+        path = self.directory / 'managed-files.json'
+        trusted_path(path)
+        data = read_json(path) if path.exists() else {}
+        if (not isinstance(data, dict) or len(data) > MAX_FILES
+                or any(not isinstance(key, str) or not re.fullmatch('[a-f0-9]{64}', str(value))
+                       for key, value in data.items())):
+            raise ValueError('维护程序文件归属记录无效，未切换程序')
+        return data
+
+    def remember_files(self, source, files):
+        # Retained modules from a rollback remain owned only while their bytes match.
+        data = self.managed_files()
+        data.update({relative: digest(source / relative) for relative in files if not relative.startswith('ui/')})
+        if len(data) > MAX_FILES:
+            raise ValueError('维护程序文件归属记录过大，未切换程序')
+        write_json(self.directory / 'managed-files.json', data)
 
     def stage(self, job):
         folder = self.backup / ('update-' + job['id'])
@@ -370,9 +468,20 @@ class Maintenance:
         else:
             raise RuntimeError('；'.join(failures) + '；原程序未修改。')
         contract = read_json(source / 'release.json')
-        if contract != read_json(self.app / 'release.json'):
-            raise ValueError('更新涉及安装或数据兼容变化，请使用 install.sh 升级')
-        files, size = release_files(source)
+        current = read_json(self.app / 'release.json')
+        compatible(current, contract)
+        current_entries, entries = program_entries(current), program_entries(contract)
+        files, size = release_files(source, entries=entries)
+        self.installation_compatible(source, current, contract)
+        managed = self.managed_files()
+        for relative in files:
+            target = self.app / relative
+            trusted_path(target)
+            if not allowed(relative, entries):
+                raise ValueError(f'更新包包含非面板程序路径：{relative}')
+            if not allowed(relative, current_entries) and target.exists():
+                if not target.is_file() or managed.get(relative) != digest(target):
+                    raise ValueError(f'新程序路径已存在且不属于原程序清单：{relative}；未覆盖，请核对该文件')
         if shutil.disk_usage(self.app).free < size * 2 + 64 * 1024**2:
             raise ValueError('安装磁盘空间不足')
         for relative in files:
@@ -401,6 +510,7 @@ class Maintenance:
             job.update(state='running', phase=value)
             write_json(path, job)
         rollback = None
+        service_touched = False
         try:
             self.supported()
             trusted_path(self.backup)
@@ -434,15 +544,20 @@ class Maintenance:
                     self.restore_compatible(job['backup'])
                 phase('保存当前程序版本')
                 with self.exclusive():
+                    original_contract = read_json(self.app / 'release.json')
+                    entries = program_entries(read_json(source / 'release.json')) if source else None
                     rollback = self.snapshot()
+                    if source:
+                        self.remember_files(source, files)
                     job['recovery_backup'] = rollback
                     if job['action'] == 'update':
                         job['backup'] = rollback
                     phase('停止面板服务并切换程序')
                     try:
+                        service_touched = True
                         command(['systemctl', 'stop', self.service])
                         if source:
-                            copy_files(source, self.app, files)
+                            copy_files(source, self.app, files, entries=entries)
                             fingerprint = digest(self.app / 'agent.py')
                             marker = self.app / '.mini-deploy-install'
                             content = f'format=2\ninstalled_at={time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}\napp_home={self.app}\nrelease_fingerprint=sha256:{fingerprint}\nrevision={job["revision"]}\n'
@@ -463,12 +578,16 @@ class Maintenance:
                     except Exception:
                         phase('更新失败，恢复操作前的程序版本')
                         command(['systemctl', 'stop', self.service])
-                        self.restore(rollback)
+                        self.restore(rollback, expected_contract=original_contract)
                         job['recovered'] = True
                         raise
                 job.update(state='succeeded', phase='程序更新并通过健康检查' if source else '程序版本已恢复，当前数据与配置保留')
         except Exception as exc:
-            job.update(state='failed', error=str(exc)[:2000], phase='操作失败，原文件和备份保留' + ('；旧程序已恢复并通过检查' if job.get('recovered') else '；请检查服务状态'))
+            if not service_touched and job['action'] == 'update':
+                failed_phase = '更新未执行，当前服务和程序未改动'
+            else:
+                failed_phase = '操作失败，原文件和备份保留' + ('；旧程序已恢复并通过检查' if job.get('recovered') else '；请检查服务状态')
+            job.update(state='failed', error=str(exc)[:2000], phase=failed_phase)
         finally:
             job['finished_at'] = time.time()
             write_json(path, job)

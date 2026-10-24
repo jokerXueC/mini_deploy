@@ -19,6 +19,9 @@ def panel(tmp_path, monkeypatch):
         directory.mkdir()
     (app / 'agent.py').write_text('print("old")\n')
     shutil.copyfile(ROOT / 'release.json', app / 'release.json')
+    for entry in pm.INSTALLATION_FILES:
+        (app / entry).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / entry, app / entry)
     (app / '.mini-deploy-install').write_text(f'format=2\napp_home={app}\nrelease_fingerprint=sha256:{pm.digest(app / "agent.py")}\n')
     (home / 'request-history.sqlite3').write_bytes(b'BUSINESS DATA')
     (app / 'workspace').mkdir()
@@ -114,12 +117,13 @@ def test_partial_copy_failure_restores_original_program(panel, tmp_path, monkeyp
     source = tmp_path / 'new-source'
     source.mkdir()
     (source / 'agent.py').write_text('print("new")')
+    shutil.copyfile(panel.app / 'release.json', source / 'release.json')
     monkeypatch.setattr(panel, 'stage', lambda job: (source, ['agent.py']))
     monkeypatch.setattr(pm, 'command', lambda *args, **kwargs: '')
     monkeypatch.setattr(panel, 'health', lambda expected: None)
     copier = pm.copy_files
-    def partial(src, dst, files):
-        copier(src, dst, files)
+    def partial(src, dst, files, **kwargs):
+        copier(src, dst, files, **kwargs)
         if src == source:
             raise OSError('disk write failed after partial update')
     monkeypatch.setattr(pm, 'copy_files', partial)
@@ -246,10 +250,13 @@ def test_download_fallback_preserves_partial_checkout_and_requires_identical_rev
             if pm.REMOTES['gitee'][0] in argv:
                 raise RuntimeError('fatal: Authentication failed')
             shutil.copyfile(panel.app / 'release.json', source / 'release.json')
+            for entry in pm.INSTALLATION_FILES:
+                (source / entry).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(panel.app / entry, source / entry)
             return ''
         return revision
     monkeypatch.setattr(pm, 'command', command)
-    monkeypatch.setattr(pm, 'release_files', lambda root: (['agent.py', 'release.json'], 100))
+    monkeypatch.setattr(pm, 'release_files', lambda root, **kwargs: (['agent.py', 'release.json'], 100))
     job = {'id': '2' * 32, 'channel': 'gitee', 'revision': 'a' * 40}
     if revision == job['revision']:
         source, files = panel.stage(job)
@@ -271,6 +278,221 @@ def test_release_manifest_matches_installer_and_protects_non_program_paths():
     for entry in pm.ENTRIES:
         assert (ROOT / entry).exists()
     assert not pm.allowed('projects.json') and not pm.allowed('sites.json')
+
+
+@pytest.fixture
+def additive_update(panel, tmp_path, monkeypatch):
+    legacy = pm.read_json(panel.app / 'release.json')
+    legacy['program_entries'] = ['agent.py', 'panel_maintenance.py', 'release.json', 'ui', *pm.INSTALLATION_FILES]
+    pm.write_json(panel.app / 'release.json', legacy)
+    (panel.app / 'panel_maintenance.py').write_text('VERSION = "old"\n')
+    (panel.app / 'ui').mkdir()
+    (panel.app / 'ui/index.html').write_text('old UI')
+    monkeypatch.setattr(pm, 'ENTRIES', tuple(legacy['program_entries']))
+    repository = tmp_path / 'repository'
+    shutil.copytree(panel.app, repository)
+    target = {**legacy, 'program_entries': [*legacy['program_entries'], 'setup_checks.py', 'scripts/check_agent_health.py']}
+    pm.write_json(repository / 'release.json', target)
+    (repository / 'agent.py').write_text('from setup_checks import VALUE\nprint(VALUE)\n')
+    (repository / 'setup_checks.py').write_text('VALUE = "new module installed"\n')
+    (repository / 'scripts').mkdir()
+    (repository / 'scripts/check_agent_health.py').write_text('print("health helper installed")\n')
+    (repository / 'ui/index.html').write_text('new UI')
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if 'clone' in argv:
+            shutil.copytree(repository, Path(argv[-1]))
+        elif 'rev-parse' in argv:
+            return 'b' * 40
+        return ''
+    monkeypatch.setattr(pm, 'command', command)
+    monkeypatch.setattr(panel, 'health', lambda expected: None)
+    job = {'id': '3' * 32, 'action': 'update', 'state': 'queued', 'revision': 'b' * 40,
+           'channel': 'github', 'started_at': time.time()}
+    return repository, legacy, target, job, calls
+
+
+def test_additive_manifest_update_installs_new_modules_and_restores_old_snapshot(panel, additive_update, monkeypatch):
+    repository, legacy, target, job, calls = additive_update
+    original = {name: (panel.app / name).read_bytes() for name in ('agent.py', 'release.json', '.mini-deploy-install')}
+    panel.worker(job)
+    assert job['state'] == 'succeeded', job
+    assert pm.read_json(panel.app / 'release.json') == target
+    for entry in ('setup_checks.py', 'scripts/check_agent_health.py', 'ui/index.html'):
+        assert (panel.app / entry).read_bytes() == (repository / entry).read_bytes()
+    result = subprocess.run([pm.sys.executable, str(panel.app / 'agent.py')], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == 'new module installed'
+    # A fresh maintenance process imports the new manifest; the old snapshot must still work.
+    monkeypatch.setattr(pm, 'ENTRIES', tuple(target['program_entries']))
+    panel.restore(job['backup'])
+    for entry, content in original.items():
+        assert (panel.app / entry).read_bytes() == content
+    assert pm.read_json(panel.app / 'release.json') == legacy
+    assert (panel.app / 'setup_checks.py').is_file()  # Rollback never deletes files.
+    assert (panel.app / 'workspace/user-file').read_text() == 'BUSINESS FILE'
+    assert panel.env.read_text() == 'SECRET=preserve'
+    assert (panel.home / 'request-history.sqlite3').read_bytes() == b'BUSINESS DATA'
+    assert ['systemctl', 'stop', panel.service] in calls
+
+
+@pytest.mark.parametrize('failure', ['health', 'partial', 'corrupt-manifest'])
+def test_additive_update_failure_restores_and_allows_retry(panel, additive_update, monkeypatch, failure):
+    repository, legacy, target, job, calls = additive_update
+    original = {name: (panel.app / name).read_bytes() for name in ('agent.py', 'release.json', '.mini-deploy-install', 'ui/index.html')}
+    old = pm.digest(panel.app / 'agent.py')
+    copier = pm.copy_files
+    def partial(src, dst, files, **kwargs):
+        copier(src, dst, files, **kwargs)
+        if src.name == 'source':
+            if failure == 'corrupt-manifest':
+                (dst / 'release.json').write_text('{broken')
+            raise OSError('partial update failed')
+    def health(expected):
+        if expected != old:
+            raise RuntimeError('unhealthy new service')
+    if failure == 'health':
+        monkeypatch.setattr(panel, 'health', health)
+    else:
+        monkeypatch.setattr(pm, 'copy_files', partial)
+    panel.worker(job)
+    assert job['state'] == 'failed' and job.get('recovered'), job
+    for entry, content in original.items():
+        assert (panel.app / entry).read_bytes() == content
+    assert (panel.app / 'setup_checks.py').is_file()
+    # Retry a newer version of the retained module without adopting arbitrary user files.
+    (repository / 'setup_checks.py').write_text('VALUE = "retry installed"\n')
+    monkeypatch.setattr(pm, 'copy_files', copier)
+    monkeypatch.setattr(panel, 'health', lambda expected: None)
+    retry = {**job, 'id': '4' * 32, 'state': 'queued'}
+    panel.worker(retry)
+    assert retry['state'] == 'succeeded', retry
+    assert (panel.app / 'setup_checks.py').read_bytes() == (repository / 'setup_checks.py').read_bytes()
+    assert (panel.home / 'request-history.sqlite3').read_bytes() == b'BUSINESS DATA'
+    assert panel.env.read_text() == 'SECRET=preserve'
+
+
+@pytest.mark.parametrize('modified', [False, True])
+def test_new_module_collision_never_overwrites_unmanaged_or_edited_files(panel, additive_update, modified):
+    repository, legacy, target, job, calls = additive_update
+    if modified:
+        panel.worker(job)
+        assert job['state'] == 'succeeded', job
+        panel.restore(job['backup'])
+        calls.clear()
+        job = {**job, 'id': '5' * 32, 'state': 'queued'}
+    path = panel.app / 'setup_checks.py'
+    path.write_text('USER CODE - preserve')
+    panel.worker(job)
+    assert job['state'] == 'failed' and '不属于原程序清单' in job['error']
+    assert job['phase'] == '更新未执行，当前服务和程序未改动'
+    assert not any(argv[0] == 'systemctl' for argv in calls)
+    assert path.read_text() == 'USER CODE - preserve'
+
+
+@pytest.mark.parametrize('change', ['state_schema', 'python_min', 'requirements', 'service', 'remove-requirements'])
+def test_real_installation_changes_refused_before_stopping_service(panel, additive_update, change):
+    repository, legacy, target, job, calls = additive_update
+    if change == 'state_schema':
+        target['state_schema'] += 1
+    elif change == 'python_min':
+        target['python_min'] = [99, 0]
+    elif change == 'remove-requirements':
+        target['program_entries'].remove('requirements-ssh.txt')
+    else:
+        path = repository / ('requirements-ssh.txt' if change == 'requirements' else 'systemd/mini-deploy-agent.service')
+        path.write_text(path.read_text() + '\n# changed installation\n')
+    pm.write_json(repository / 'release.json', target)
+    panel.worker(job)
+    assert job['state'] == 'failed' and 'install.sh' in job['error'], job
+    assert not any(argv[0] == 'systemctl' for argv in calls)
+    assert pm.read_json(panel.app / 'release.json') == legacy
+
+
+@pytest.mark.parametrize('entry', ['../agent.py', '/etc/passwd', 'scripts/../agent.py', 'projects.json',
+                                  'workspace', 'workspace/code.py', 'ui//x', 'ui\\x', 'agent.py'])
+def test_invalid_target_manifest_paths_refused_without_service_stop(panel, additive_update, entry):
+    repository, legacy, target, job, calls = additive_update
+    target['program_entries'].append(entry)
+    pm.write_json(repository / 'release.json', target)
+    panel.worker(job)
+    assert job['state'] == 'failed' and '程序文件清单' in job['error'], job
+    assert not any(argv[0] == 'systemctl' for argv in calls)
+
+
+def test_manifest_file_cannot_be_a_directory(panel, additive_update):
+    repository, legacy, target, job, calls = additive_update
+    target['program_entries'].append('directory.py')
+    (repository / 'directory.py').mkdir()
+    (repository / 'directory.py/data').write_text('not program code')
+    pm.write_json(repository / 'release.json', target)
+    panel.worker(job)
+    assert job['state'] == 'failed' and '不是普通文件' in job['error']
+    assert not any(argv[0] == 'systemctl' for argv in calls)
+
+
+def test_restore_refuses_changed_dependencies_with_same_metadata(panel, additive_update):
+    chosen = panel.snapshot()
+    (panel.app / 'requirements-ssh.txt').write_text('new dependency environment')
+    calls = additive_update[-1]
+    job = {'id': '6' * 32, 'action': 'restore', 'backup': chosen, 'state': 'queued', 'started_at': time.time()}
+    panel.worker(job)
+    assert job['state'] == 'failed' and 'install.sh' in job['error'], job
+    assert not calls
+
+
+def test_module_only_failure_restores_original_version_receipt(panel, additive_update, monkeypatch):
+    repository, legacy, target, job, calls = additive_update
+    shutil.copyfile(panel.app / 'agent.py', repository / 'agent.py')
+    original = panel.version()
+    observed = []
+    def health(expected):
+        observed.append(expected)
+        if len(observed) == 1:
+            raise RuntimeError('module startup failed')
+    monkeypatch.setattr(panel, 'health', health)
+    panel.worker(job)
+    assert job['state'] == 'failed' and job.get('recovered'), job
+    assert panel.version() == original
+
+
+def test_shipped_release_installs_both_added_files_from_legacy_manifest(panel, monkeypatch):
+    target = pm.read_json(ROOT / 'release.json')
+    added = {'setup_checks.py', 'scripts/check_agent_health.py'}
+    legacy = {**target, 'program_entries': [p for p in target['program_entries'] if p not in added]}
+    for entry in legacy['program_entries']:
+        source, destination = ROOT / entry, panel.app / entry
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        else:
+            shutil.copyfile(source, destination)
+    pm.write_json(panel.app / 'release.json', legacy)
+    monkeypatch.setattr(pm, 'ENTRIES', tuple(legacy['program_entries']))
+    def command(argv, **kwargs):
+        if 'clone' in argv:
+            checkout = Path(argv[-1])
+            for entry in target['program_entries']:
+                source, destination = ROOT / entry, checkout / entry
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_dir():
+                    shutil.copytree(source, destination)
+                else:
+                    shutil.copyfile(source, destination)
+        elif 'rev-parse' in argv:
+            return 'b' * 40
+        return ''
+    monkeypatch.setattr(pm, 'command', command)
+    monkeypatch.setattr(panel, 'health', lambda expected: None)
+    job = {'id': '7' * 32, 'action': 'update', 'revision': 'b' * 40, 'channel': 'github', 'started_at': time.time()}
+    panel.worker(job)
+    assert job['state'] == 'succeeded', job
+    for entry in added:
+        assert pm.digest(panel.app / entry) == pm.digest(ROOT / entry)
+    result = subprocess.run([pm.sys.executable, '-c', 'import setup_checks; import scripts.check_agent_health'],
+                            cwd=panel.app, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert pm.read_json(panel.app / 'release.json') == target
 
 
 def test_every_local_python_import_is_shipped():
