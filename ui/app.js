@@ -1006,15 +1006,19 @@ function renderTrendCard(points, config, availability = trendAvailability(points
     `;
   }
   const height = 180;
-  const pad = { top: 14, right: 14, bottom: 16, left: 38 };
+  const pad = { top: 14, right: 14, bottom: 16, left: config.realtime ? 38 : 0 };
   const width = config.realtime ? 480 : trendChartWidth(points, pad);
   const yTop = pad.top;
   const yBottom = height - pad.bottom;
-  const grid = Array.from({length: 5}, (_, i) => {
+  const ticks = Array.from({length: 5}, (_, i) => {
     const y = yTop + (yBottom - yTop) * i / 4;
     const value = scale.max - (scale.max - scale.min) * i / 4;
+    return `<text class="trend-axis-label" x="${config.realtime ? pad.left - 8 : 36}" y="${y + 3}">${escapeHtml(trendAxisLabel(value, config))}</text>`;
+  });
+  const grid = Array.from({length: 5}, (_, i) => {
+    const y = yTop + (yBottom - yTop) * i / 4;
     return `<line class="trend-grid-line${i % 2 ? ' minor' : ''}" x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}"></line>
-      <text class="trend-axis-label" x="${pad.left - 8}" y="${y + 3}">${escapeHtml(trendAxisLabel(value, config))}</text>`;
+      ${config.realtime ? ticks[i] : ''}`;
   }).join('') + Array.from({length: 6}, (_, i) => {
     const x = pad.left + (width - pad.left - pad.right) * i / 5;
     return `<line class="trend-grid-line vertical" x1="${x}" y1="${yTop}" x2="${x}" y2="${yBottom}"></line>`;
@@ -1037,12 +1041,15 @@ function renderTrendCard(points, config, availability = trendAvailability(points
         <span>${escapeHtml(subLabel || '')}</span>
         <span>${escapeHtml(formatter(scale.min))}-${escapeHtml(formatter(scale.max))}</span>
       </div>
-      <div class="trend-chart-scroll" tabindex="0">
-        <svg class="trend-mini-svg" ${config.realtime ? 'data-realtime="true" preserveAspectRatio="none"' : ''} viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
+      <div class="trend-chart-frame">
+        ${config.realtime ? '' : `<svg class="trend-y-axis" viewBox="0 0 44 ${height}" preserveAspectRatio="none" aria-hidden="true">${ticks.join('')}</svg>`}
+        <div class="trend-chart-scroll" tabindex="0">
+        <svg class="trend-mini-svg" ${config.realtime ? 'data-realtime="true"' : ''} preserveAspectRatio="none" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}趋势">
           ${grid}
           ${paths}
           ${dots}
         </svg>
+        </div>
       </div>
       <div class="trend-card-foot">
         <span>${escapeHtml(formatTrendTime(points[0]))}</span>
@@ -1122,8 +1129,10 @@ function renderSystemTrend(system = {}) {
   const nextCards = Array.from(template.content.querySelectorAll('.trend-card'));
   cards.forEach((card, i) => {
     const next = nextCards[i];
-    const svg = card.querySelector('svg');
-    const nextSvg = next.querySelector('svg');
+    const svg = card.querySelector('.trend-mini-svg');
+    const nextSvg = next.querySelector('.trend-mini-svg');
+    const axis = card.querySelector('.trend-y-axis');
+    const nextAxis = next.querySelector('.trend-y-axis');
     if (!svg && !nextSvg) {
       ['.trend-card-head', '.trend-card-meta', '.trend-card-empty'].forEach(selector => {
         if (i === 0 && selector === '.trend-card-head') {
@@ -1134,7 +1143,7 @@ function renderSystemTrend(system = {}) {
       });
       return;
     }
-    if (!svg || !nextSvg) {
+    if (!svg || !nextSvg || Boolean(axis) !== Boolean(nextAxis)) {
       card.replaceWith(next);
       DashboardMotion.followLatest(next.querySelector('.trend-chart-scroll'), viewportKey);
       if (i === 0) DashboardMotion.reading(next.querySelector('strong'), latest.cpu_percent, formatPercent);
@@ -1149,6 +1158,7 @@ function renderSystemTrend(system = {}) {
       }
       card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
     });
+    if (axis) axis.replaceChildren(...Array.from(nextAxis.childNodes));
     DashboardMotion.morph(svg, nextSvg);
     DashboardMotion.followLatest(scroll, viewportKey);
   });

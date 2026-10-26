@@ -1,6 +1,8 @@
 """Resource-map data fidelity and the working server workspace at common viewports."""
 import time
 
+import pytest
+
 from test_ssh_browser import page as page, playwright
 from test_deployment_removal import http_server as http_server, runtime as runtime
 from scripts.preview_server_overview import system
@@ -18,6 +20,57 @@ def preview(page, http_server, payload, *, realtime=True):
     if realtime:
         page.locator('[data-trend-range="realtime"]').click()
     playwright.expect(page.locator('.load-cell')).to_have_count(180)
+
+
+@pytest.mark.parametrize('width,theme', [(1440, 'light'), (1920, 'dark'), (390, 'light')])
+def test_history_axis_stays_left_for_sparse_and_scrolled_charts(page, http_server, tmp_path, width, theme):
+    page.set_viewport_size({'width': width, 'height': 1000})
+    preview(page, http_server, system())
+    page.evaluate('(theme) => applyTheme(theme)', theme)
+    now = int(time.time() // 30) * 30
+    data = {}
+    page.route('**/performance/server?*', lambda route: route.fulfill(json=data))
+    for count in (3, 120):
+        data.update(interval_seconds=30, until=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now)),
+            points=[{'ts': now - 30 * (count - i - 1), 'cpu_percent': 20 + i % 30,
+                     'memory_percent': 30 + i % 10, 'network_rx_kib_s': 10000 + i * 20,
+                     'network_tx_kib_s': 1000} for i in range(count)])
+        for period in ('1h', '6h', '24h', '7d', 'all'):
+            page.locator(f'[data-trend-range="{period}"]').click()
+            playwright.expect(page.locator('.trend-y-axis')).to_have_count(3)
+            playwright.expect(page.locator('.trend-card.cpu .trend-point')).to_have_count(count)
+            for card in page.locator('.trend-card').all():
+                geometry = card.evaluate('''card => {
+                    const axis = card.querySelector('.trend-y-axis');
+                    const scroll = card.querySelector('.trend-chart-scroll');
+                    const plot = scroll.querySelector('svg');
+                    const labels = [...axis.querySelectorAll('text')];
+                    const positions = [];
+                    for (const fraction of [0, .5, 1]) {
+                        scroll.scrollLeft = (scroll.scrollWidth - scroll.clientWidth) * fraction;
+                        const bounds = axis.getBoundingClientRect();
+                        const origin = new DOMPoint(0, 14).matrixTransform(plot.getScreenCTM());
+                        const tick = new DOMPoint(36, 14).matrixTransform(axis.getScreenCTM());
+                        positions.push({left:bounds.left, labelsInside:labels.every(label => {
+                            const r = label.getBoundingClientRect();
+                            return r.left >= bounds.left - 1 && r.right <= bounds.right + 1;
+                        }), aligned:Math.abs(origin.y - tick.y) < 1,
+                        origin:origin.x, scrollLeft:scroll.getBoundingClientRect().left});
+                    }
+                    return {positions, overflowing:scroll.scrollWidth > scroll.clientWidth,
+                            outside:!scroll.contains(axis)};
+                }''')
+                assert geometry['outside']
+                assert geometry['overflowing'] if count == 120 else True
+                assert all(item['labelsInside'] and item['aligned'] for item in geometry['positions'])
+                assert len({item['left'] for item in geometry['positions']}) == 1
+                # Sparse SVGs must start at the plot edge, without meet/centering gutters.
+                assert abs(geometry['positions'][0]['origin'] - geometry['positions'][0]['scrollLeft']) < 1
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        page.locator('#systemTrendChart').screenshot(path=str(tmp_path / f'history-axis-{count}-{width}-{theme}.png'))
+        page.locator('[data-trend-range="realtime"]').click()
+        playwright.expect(page.locator('.trend-y-axis')).to_have_count(0)
+        playwright.expect(page.locator('.trend-mini-svg[data-realtime=true]')).to_have_count(3)
 
 
 def test_network_cumulative_totals_refresh_and_distinguish_missing_from_zero(page, http_server, tmp_path):
