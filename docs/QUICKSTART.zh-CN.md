@@ -1,5 +1,7 @@
 # mini_deploy 快速上手
 
+首次安装或某项功能还不会开启，先读[完整安装与功能使用指南](../ui/user-guide.md)：包含所有主要功能的准备条件、操作步骤、可复制命令、成功标准与排查方法。安装后可从面板顶部文档图标或「功能检查」直接打开、搜索和下载，本机命令按实际安装路径生成。
+
 mini_deploy 是轻量的服务器运维与请求监控面板，名称保持不变。保留服务器监控、Docker 容器与镜像管理、Nginx/证书、请求采集和独立网关；不再提供 Git 部署、脚本执行、WebHook 自动发布或业务运行环境生成。
 
 > [!WARNING]
@@ -7,15 +9,13 @@ mini_deploy 是轻量的服务器运维与请求监控面板，名称保持不�
 
 ## 安装与登录
 
-需要 Linux、root/sudo、systemd、Python 3.10+，以及用于下载面板自身的 Git。不需要业务仓库、Deploy Key 或部署脚本。Docker 和 Nginx 按需使用。
+需要 Linux、root/sudo、systemd、Python 3.10+，以及用于下载面板自身的 Git。不需要业务仓库、Deploy Key 或部署脚本。Docker 和 Nginx 按需使用。缺少基础依赖时先执行完整指南中对应系统的安装步骤；已有代理无需重复安装。
 
 ```bash
-git clone https://gitee.com/XC1960/mini_deploy.git /opt/mini_deploy
-cd /opt/mini_deploy
-bash install.sh
+mini_deploy_source="$(mktemp -d /tmp/mini-deploy-source.XXXXXX)" && git clone --depth 1 --branch main https://github.com/jokerXueC/mini_deploy.git "$mini_deploy_source" && SETUP_NGINX=no SETUP_HTTPS=no bash "$mini_deploy_source/install.sh"
 ```
 
-安装时选择语言并设置管理员密码。随后打开 `http://服务器公网IP:6868`，使用该密码登录。面板固定监听 `0.0.0.0:6868`，无需域名或证书。云安全组需允许 TCP 6868，建议限制访问来源；提交私钥等敏感信息前使用 HTTPS 或 SSH 隧道。可选的 `DEPLOY_DOMAIN` 用于配置面板自身的域名入口。
+安装时选择语言并设置管理员密码。随后打开 `http://服务器公网IP:6868`，使用该密码登录。面板固定监听 `0.0.0.0:6868`，无需域名或证书。云安全组需允许 TCP 6868，建议限制访问来源；提交私钥等敏感信息前使用 HTTPS 或 SSH 隧道。上面的命令先提供 IP 访问；后续创建面板域名入口需按完整指南设置 `DEPLOY_DOMAIN`、`SETUP_NGINX=yes` 和 `SETUP_HTTPS=yes`，先核对 80/443 未被其他代理占用。
 
 Docker 可选，用于容器管理、Docker Nginx 和独立请求网关。安装器默认 `SETUP_DOCKER=ask`：交互时询问，默认回答“否”，无终端时跳过，不自动选择“是”。无需 Docker Compose 或 PyYAML。仅查看已有 Caddy 请求日志时，无需再安装 Nginx。
 

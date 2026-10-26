@@ -1,6 +1,15 @@
 # mini_deploy 首次使用与升级说明
 
-此文件保留旧链接，原“部署流程”已退役。mini_deploy 名称不变，现定位为服务器运维与请求监控面板。
+mini_deploy 是服务器运维与请求监控面板。完整的新手指引在[安装与功能使用指南](../ui/user-guide.md)，包含从首次安装到各功能启用、命令和验收的完整步骤；安装后也可从面板顶部文档图标离线阅读。
+
+## 按问题直达
+
+- [首次安装](../ui/user-guide.md#install) · [打不开网页与 HTTPS](../ui/user-guide.md#access) · [密码与路径](../ui/user-guide.md#login)
+- [资源监控](../ui/user-guide.md#resources) · [性能历史与报告](../ui/user-guide.md#history) · [Docker 与日志](../ui/user-guide.md#docker)
+- [请求记录、地图与手动接入](../ui/user-guide.md#requests) · [域名证书](../ui/user-guide.md#certificates)
+- [SSH 与文件管理](../ui/user-guide.md#ssh) · [AI 运维与代码分析](../ui/user-guide.md#ai)
+- [登录与基础防护](../ui/user-guide.md#security) · [Swap](../ui/user-guide.md#swap) · [异常监测](../ui/user-guide.md#monitoring) · [通知](../ui/user-guide.md#notifications)
+- [更新与备份](../ui/user-guide.md#maintenance) · [排查命令](../ui/user-guide.md#troubleshooting) · [逐项验收](../ui/user-guide.md#acceptance)
 
 ## 从哪里开始
 

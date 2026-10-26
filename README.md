@@ -4,6 +4,7 @@ Lightweight, self-hosted server operations and request monitoring panel for Linu
 The name stays mini_deploy; Git-based application deployment is no longer part of
 the product.
 
+- [完整安装与功能启用指南（含命令）](ui/user-guide.md)
 - [中文快速上手](docs/QUICKSTART.zh-CN.md)
 - [Public website preview](website/index.html) (standalone static files)
 - [首次使用与升级说明](docs/BEGINNER_DEPLOY_FLOW.zh-CN.md)
@@ -62,21 +63,26 @@ Compose nor PyYAML is required.
 > Use a dedicated, controlled Linux test server.
 
 ```bash
-git clone https://gitee.com/XC1960/mini_deploy.git /root/mini_deploy
-cd /root/mini_deploy
-bash install.sh
+mini_deploy_source="$(mktemp -d /tmp/mini-deploy-source.XXXXXX)" && git clone --depth 1 --branch main https://github.com/jokerXueC/mini_deploy.git "$mini_deploy_source" && SETUP_NGINX=no SETUP_HTTPS=no bash "$mini_deploy_source/install.sh"
 ```
 
 Set the administrator password in the installer, then open
 `http://<server-public-ip>:6868`. The Agent listens on `0.0.0.0:6868`; allow TCP
 6868 in the cloud security group and restrict sources. The installer can adjust
 active UFW/firewalld rules. Use HTTPS or an SSH tunnel before sending sensitive
-values. A domain is optional; `DEPLOY_DOMAIN` configures the panel's additional
-Nginx entry point.
+values. The command above starts with IP access. To add a domain later, follow the
+guide's HTTPS section; creating a new Nginx entry requires `DEPLOY_DOMAIN`,
+`SETUP_NGINX=yes` and `SETUP_HTTPS=yes`, with available ports 80/443.
 
 Start with server metrics and Docker status. For an existing website, select a
 supported proxy log source or follow the [request gateway guide](docs/REQUEST_GATEWAY.zh-CN.md).
 Monitoring does not require adding a Git project.
+
+Open the document icon or **Feature checks** for the bundled guide, feature-specific
+instructions, searchable commands and an offline Markdown download. **Local diagnostic
+commands** use this installation's real paths, Python runtime and service name.
+The guide includes prerequisites, cloud firewall/DNS steps, Nginx/Caddy examples,
+SSH/AI setup, protection, notifications, verification and upgrade recovery boundaries.
 
 ## Upgrade Boundary
 

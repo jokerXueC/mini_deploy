@@ -2,6 +2,8 @@
 import json
 import io
 import sqlite3
+import shlex
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +12,26 @@ import agent
 import setup_checks
 
 NOW = 1_800_000_000
+
+
+def test_installation_commands_quote_custom_paths_and_use_running_runtime():
+    app = PurePosixPath("/srv/my panel;$(touch should-not-exist)")
+    env = PurePosixPath("/etc/private config's.env")
+    commands = setup_checks.installation_commands(app, '/srv/custom data', env, 'custom-agent', '/opt/python/bin/python3')
+    by_key = {item['key']: item for item in commands['commands']}
+    assert commands['available'] and commands['app'] == str(app)
+    assert shlex.split(by_key['doctor']['command']) == [f'DEPLOY_AGENT_ENV_FILE={env}', 'bash', str(app / 'scripts/doctor.sh')]
+    assert shlex.split(by_key['ssh']['command'])[0] == '/opt/python/bin/python3'
+    assert shlex.split(by_key['status']['command'])[2] == 'custom-agent'
+    assert [item['key'] for item in commands['commands'] if item['changes_server']] == ['password']
+    password = shlex.split(by_key['password']['command'])
+    assert password[:4] == [f'DEPLOY_AGENT_ENV_FILE={env}', 'DEPLOY_AGENT_SERVICE_NAME=custom-agent',
+                            '/opt/python/bin/python3', str(app / 'agent.py')]
+
+
+def test_local_development_never_offers_production_service_commands(tmp_path):
+    result = setup_checks.installation_commands(tmp_path, tmp_path, tmp_path / 'env', 'unused', 'python', linux=False)
+    assert not result['available'] and result['commands'] == []
 
 
 def check(home, **kwargs):
@@ -149,7 +171,11 @@ def test_agent_adapter_redacts_model_details_and_does_not_start_protection(tmp_p
     assert not tmp_path.joinpath('performance').exists()
 
 
-@pytest.mark.parametrize('name,content_type', [('setup-checks.js', 'application/javascript'), ('setup-checks.css', 'text/css')])
+@pytest.mark.parametrize('name,content_type', [
+    ('setup-checks.js', 'application/javascript'), ('setup-checks.css', 'text/css'),
+    ('user-guide.js', 'application/javascript'), ('user-guide.css', 'text/css'),
+    ('user-guide.md', 'text/markdown'),
+])
 def test_new_assets_are_served_by_the_production_handler(name, content_type):
     handler = agent.Handler.__new__(agent.Handler)
     handler.path = '/ui/' + name

@@ -33,7 +33,7 @@
           const key = String(item.key || '');
           return `<article class="setup-row" data-state="${state}" data-setup-row="${h(key)}">
           <div class="setup-feature"><span class="setup-state" data-state="${state}">${labels[state]}</span><h4>${h(item.title)}</h4></div>
-          <div class="setup-evidence"><p>${h(item.detail)}</p><details data-setup-detail="${h(key)}" ${expanded.has(key) ? 'open' : ''}><summary>配置与验收步骤</summary><ol>${(item.steps || []).map(step => `<li>${h(step)}</li>`).join('')}</ol></details></div>
+          <div class="setup-evidence"><p>${h(item.detail)}</p><details data-setup-detail="${h(key)}" ${expanded.has(key) ? 'open' : ''}><summary>配置与验收步骤</summary><ol>${(item.steps || []).map(step => `<li>${h(step)}</li>`).join('')}</ol><button class="setup-guide-link" type="button" data-user-guide="${h(key)}">完整指引与命令</button></details></div>
           <button class="ghost-button compact-action" type="button" data-setup-view="${h(views.has(item.view) ? item.view : 'server')}" data-setup-key="${h(key)}">${h(item.action || '查看设置')}</button>
           </article>`;
         }).join('')}</section>`;

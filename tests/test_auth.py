@@ -8,10 +8,50 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
 
 import agent
+
+
+@pytest.mark.parametrize('topic,expected', [
+    ('install', 'ui?view=setup&guide=install'),
+    ('', 'ui'), ('//evil.example', 'ui'), ('https://evil.example', 'ui'),
+    ('install\r\nSet-Cookie: injected=1', 'ui'), ('" onfocus="alert(1)', 'ui'),
+    ('a' * 49, 'ui'),
+])
+def test_login_preserves_only_safe_guide_topic(monkeypatch, topic, expected):
+    monkeypatch.setattr(agent, 'UI_PASSWORD_HASH', 'configured')
+    monkeypatch.setattr(agent, 'UI_SESSION_SECRET', 'configured')
+    monkeypatch.setattr(agent, '_verify_password', lambda _: True)
+    monkeypatch.setattr(agent, '_reserve_login_attempt', lambda _: True)
+    monkeypatch.setattr(agent, '_clear_login_attempts', lambda _: None)
+    monkeypatch.setattr(agent, '_audit_event', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent, '_ip_security', lambda: SimpleNamespace(
+        guard=SimpleNamespace(blocked=lambda _: False, record_panel=lambda *_: None)))
+    handler = agent.Handler.__new__(agent.Handler)
+    body = urlencode({'password': 'test', 'guide': topic}).encode()
+    handler.headers = {'Content-Length': str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler.client_address = ('203.0.113.10', 12345)
+    statuses, headers, cookies = [], {}, []
+    handler.send_response = statuses.append
+    handler.send_header = headers.__setitem__
+    handler.end_headers = lambda: None
+    handler._set_session_cookie = lambda: cookies.append(True)
+    handler._handle_login()
+    assert statuses == [303] and headers['Location'] == expected and cookies == [True]
+    rendered = agent._render_login(guide_topic=topic)
+    assert 'value="install"' in rendered if topic == 'install' else 'name="guide" value=""' in rendered
+    monkeypatch.setattr(agent, '_verify_password', lambda _: False)
+    handler.rfile = io.BytesIO(body)
+    pages = []
+    handler._write_html = lambda status, body: pages.append((status, body))
+    handler._handle_login()
+    assert pages[0][0] == 401 and cookies == [True]
+    assert 'value="install"' in pages[0][1] if topic == 'install' else 'name="guide" value=""' in pages[0][1]
 
 
 def test_password_hash_round_trip_and_wrong_password(monkeypatch: pytest.MonkeyPatch) -> None:

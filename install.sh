@@ -2116,6 +2116,8 @@ Open the dashboard and sign in:
 
 After signing in, open Feature checks to configure and verify optional features:
    $DASHBOARD_URL/ui?view=setup
+Complete setup guide with copyable commands (also bundled offline):
+   $DASHBOARD_URL/ui?view=setup&guide=install
 Host health alone does not verify request collection, SSH, AI, protection or notifications.
 
 Local fallback URL:
@@ -2166,6 +2168,8 @@ Agent 状态：$HEALTH_RESULT
 
 登录后打开“功能检查”，按需配置并逐项验收：
    $DASHBOARD_URL/ui?view=setup
+完整安装与功能使用指南（含可复制命令，随面板离线提供）：
+   $DASHBOARD_URL/ui?view=setup&guide=install
 主机在线不代表请求采集、SSH、AI、防护或通知已经启用。
 
 本机备用访问地址：

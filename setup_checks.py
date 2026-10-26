@@ -1,12 +1,34 @@
 """Read-only installation evidence; never probe or change a business service."""
 from contextlib import closing, contextmanager
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import shlex
 import sqlite3
 import time
 
 from certificates import trusted_path
 
+
+def installation_commands(app, home, env, service, runtime, *, linux=True):
+    """Copyable commands for the actual installation; never expose env contents."""
+    if not linux:
+        return {'available': False, 'detail': '本地开发环境不生成 Linux 服务操作命令，请按指南在目标服务器执行。', 'commands': []}
+    def q(value):
+        return shlex.quote(str(value))
+    service, app, home, env, runtime = str(service), PurePosixPath(app), PurePosixPath(home), PurePosixPath(env), str(runtime)
+    commands = [
+        ('status', '服务状态', 'maintenance', f'systemctl status {q(service)} --no-pager -l'),
+        ('logs', '最近运行日志', 'troubleshooting', f'journalctl -u {q(service)} -n 100 --no-pager -l'),
+        ('health', '本机健康检查', 'access', 'curl -fsS http://127.0.0.1:6868/health'),
+        ('doctor', '安装与配置诊断', 'troubleshooting', f'DEPLOY_AGENT_ENV_FILE={q(env)} bash {q(app / "scripts/doctor.sh")}'),
+        ('storage', '数据磁盘与 inode', 'history', f'df -h {q(home)} && df -i {q(home)}'),
+        ('ssh', '检查实际 Python 的 SSH 依赖', 'ssh', f'{q(runtime)} -c {q("import paramiko; print(paramiko.__version__)")}'),
+        ('password', '交互修改面板密码并重启面板', 'login',
+         f'DEPLOY_AGENT_ENV_FILE={q(env)} DEPLOY_AGENT_SERVICE_NAME={q(service)} {q(runtime)} {q(app / "agent.py")} admin set-password && systemctl restart {q(service)}'),
+    ]
+    return {'available': True, 'app': str(app), 'data': str(home), 'service': service, 'runtime': runtime,
+            'commands': [{'key': key, 'title': title, 'topic': topic, 'command': command,
+                          'changes_server': key == 'password'} for key, title, topic, command in commands]}
 
 @contextmanager
 def database(path):
@@ -109,7 +131,7 @@ def snapshot(home, *, system, authenticated, ssh_available, ai, notifications,
                          '核对线上状态、证书域名与有效期，并测试续期；已有证书不等于自动续期已就绪。'], action='检查网站与证书')
     add('monitoring', '网站与接口监测', 'pending' if website_targets else 'setup',
         f'已配置 {website_targets} 个监测目标；请到异常中心核对检测结果与预期状态。' if website_targets else '尚未添加业务监测目标；主机与容器采样不会自动覆盖所有网站和接口。',
-        'events', ['在异常中心添加网站或接口地址，设置预期状态码、超时和检测周期。',
+        'events', ['在异常中心添加网站或接口地址，设置预期状态码和需要的响应校验。',
                    '先验证一次正常结果，按需绑定通知；认证接口应提供专用健康检查地址。'], action='配置业务监测')
     add('ssh', 'SSH 与文件管理', 'available' if ssh_available else 'setup',
         'SSH 依赖可用；尚未在本页验证任何远程连接。' if ssh_available else '当前 Python 缺少 Paramiko 依赖；其他功能可继续使用。',

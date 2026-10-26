@@ -34,8 +34,9 @@
   document.querySelectorAll('[data-repository]').forEach(button => button.addEventListener('click', () => {
     document.querySelectorAll('[data-repository]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
     const remote = button.dataset.repository === 'github' ? 'https://github.com/jokerXueC/mini_deploy.git' : 'https://gitee.com/XC1960/mini_deploy.git';
-    document.getElementById('install-code').textContent = `git clone ${remote} mini-deploy-source\ncd mini-deploy-source\nbash install.sh`;
-    document.getElementById('copy-status').textContent = '在 root 终端执行。Git 需预先安装。';
+    const branch = button.dataset.repository === 'github' ? 'main' : 'master';
+    document.getElementById('install-code').textContent = `mini_deploy_source="$(mktemp -d /tmp/mini-deploy-source.XXXXXX)" && git clone --depth 1 --branch ${branch} ${remote} "$mini_deploy_source" && SETUP_NGINX=no SETUP_HTTPS=no bash "$mini_deploy_source/install.sh"`;
+    document.getElementById('copy-status').textContent = '在 root 终端执行。Git 需预先安装；详细准备步骤见下方指南。';
   }));
   document.getElementById('copy-command').onclick = async () => {
     const text = document.getElementById('install-code').textContent;

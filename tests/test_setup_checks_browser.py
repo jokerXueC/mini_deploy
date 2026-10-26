@@ -35,6 +35,9 @@ def test_setup_states_instructions_and_navigation(browser_page, tmp_path, width,
     page.screenshot(path=str(tmp_path / f'feature-checks-{width}-{theme}.png'), full_page=True)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     assert not state['posts']  # Merely inspecting must never run a mutation.
+    detail.locator('[data-user-guide=requests]').click()
+    playwright.expect(page.locator('[data-guide-link=requests]')).to_have_attribute('aria-current', 'location')
+    page.keyboard.press('Escape')
     page.locator('[data-setup-key=requests]').click()
     playwright.expect(page.locator('#requestsView')).to_have_class('dashboard-view active')
 

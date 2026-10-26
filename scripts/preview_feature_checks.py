@@ -4,7 +4,7 @@ import sys
 import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent  # noqa: E402
@@ -17,11 +17,15 @@ from scripts.preview_request_export import seed  # noqa: E402
 
 class Handler(GatewayHandler):
     def do_GET(self):  # noqa: N802
-        path = agent._normal_path(urlparse(self.path).path)
-        if path in {'/', '/ui', '/ui/'} and self._authenticated():
-            self._write_html(200, agent._render_ui().replace('<body class="panel-workspace">',
-                '<body class="panel-workspace"><div class="setup-demo-note" role="status">'
-                '本地演示 · 模拟示例，不代表真实服务器验收</div>'))
+        parsed = urlparse(self.path)
+        path = agent._normal_path(parsed.path)
+        if path in {'/', '/ui', '/ui/'}:
+            if self._authenticated():
+                self._write_html(200, agent._render_ui().replace('<body class="panel-workspace">',
+                    '<body class="panel-workspace"><div class="setup-demo-note" role="status">'
+                    '本地演示 · 模拟示例，不代表真实服务器验收</div>'))
+            else:
+                self._write_html(200, agent._render_login(guide_topic=parse_qs(parsed.query).get('guide', [''])[0]))
             return
         if path != '/setup/checks':
             return super().do_GET()
@@ -37,6 +41,9 @@ class Handler(GatewayHandler):
             authenticated=True, ssh_available=True, ai={'configured': True}, notifications=False,
             protection={'phase': 'partial'}, discovered_sites=2, now=now, started_at=now - 300)
         data['environment'] = '本地演示数据，不代表真实服务器验收'
+        data['installation'] = setup_checks.installation_commands(
+            Path(__file__).resolve().parents[1], agent.STATE_FILE.parent, agent.AGENT_ENV_FILE,
+            agent.AGENT_SERVICE_NAME, sys.executable, linux=False)
         self._write_json(200, data)
 
 

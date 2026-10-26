@@ -2779,7 +2779,7 @@ def _setup_payload():
     if monitor is not None and monitor.path.parent == STATE_FILE.parent:
         with monitor.lock:
             website_targets = len(monitor.targets)
-    return setup_checks.snapshot(STATE_FILE.parent, system=_system_status_payload(),
+    result = setup_checks.snapshot(STATE_FILE.parent, system=_system_status_payload(),
         authenticated=bool(UI_PASSWORD_HASH and UI_SESSION_SECRET),
         ssh_available=ssh_terminal.paramiko is not None, ai=ai,
         notifications=_any_notification_enabled(_notification_config_payload(include_secret=False)),
@@ -2787,6 +2787,10 @@ def _setup_payload():
         history_error=history.error if history is not None and history.path.parent.parent == STATE_FILE.parent else '',
         started_at=AGENT_STARTED_AT, linux=sys.platform.startswith('linux'),
         discovered_sites=discovered_sites, website_targets=website_targets)
+    result['installation'] = setup_checks.installation_commands(
+        Path(__file__).resolve().parent, STATE_FILE.parent, AGENT_ENV_FILE, AGENT_SERVICE_NAME,
+        sys.executable, linux=sys.platform.startswith('linux'))
+    return result
 
 
 def _hash_password(password: str, salt: bytes | None = None) -> str:
@@ -2988,6 +2992,9 @@ def _normal_path(path: str) -> str:
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 UI_ASSET_TYPES = {
+    "user-guide.md": "text/markdown; charset=utf-8",
+    "user-guide.js": "application/javascript; charset=utf-8",
+    "user-guide.css": "text/css; charset=utf-8",
     "setup-checks.js": "application/javascript; charset=utf-8",
     "setup-checks.css": "text/css; charset=utf-8",
     "performance.js": "application/javascript; charset=utf-8",
@@ -3061,7 +3068,11 @@ def _render_template(name: str, **values: str) -> str:
     return rendered
 
 
-def _render_login(error: str = "") -> str:
+def _login_guide_topic(value: str) -> str:
+    return value if re.fullmatch(r"[a-z][a-z-]{0,47}", value) else ""
+
+
+def _render_login(error: str = "", *, guide_topic: str = "") -> str:
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     setup_note = ""
     if not UI_PASSWORD_HASH:
@@ -3078,8 +3089,9 @@ def _render_login(error: str = "") -> str:
         """
         form_html = ""
     else:
-        form_html = """
+        form_html = f"""
         <form method="post" action="login" class="login-form">
+          <input type="hidden" name="guide" value="{_login_guide_topic(guide_topic)}">
           <input type="password" name="password" placeholder="访问密码" autofocus autocomplete="current-password">
           <button type="submit">进入面板</button>
         </form>
@@ -3816,7 +3828,7 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             if self._authenticated():
                 self._write_html(200, _render_ui())
             else:
-                self._write_html(200, _render_login())
+                self._write_html(200, _render_login(guide_topic=parse_qs(parsed.query).get("guide", [""])[0]))
             return
         if path.startswith("/ui/"):
             self._write_ui_asset(path.removeprefix("/ui/"))
@@ -4371,13 +4383,14 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8", errors="replace")
         fields = parse_qs(body)
         password = fields.get("password", [""])[0]
+        guide_topic = _login_guide_topic(fields.get("guide", [""])[0])
         if not _verify_password(password):
             _audit_event("login", actor=ip, success=False, detail={"reason": "bad_password"})
             try:
                 _ip_security().guard.record_panel(ip, False)
             except (OSError, ValueError, RuntimeError, sqlite3.Error):
                 _log('panel login observation unavailable')
-            self._write_html(401, _render_login("密码错误。"))
+            self._write_html(401, _render_login("密码错误。", guide_topic=guide_topic))
             return
 
         _clear_login_attempts(ip)
@@ -4387,7 +4400,7 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
         except (OSError, ValueError, RuntimeError, sqlite3.Error):
             _log('panel login observation unavailable')
         self.send_response(303)
-        self.send_header("Location", "ui")
+        self.send_header("Location", f"ui?view=setup&guide={guide_topic}" if guide_topic else "ui")
         self._set_session_cookie()
         self.end_headers()
 
