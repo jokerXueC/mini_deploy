@@ -14,6 +14,8 @@ import uuid
 from security_center import SCHEMA
 
 DEFAULTS = {'enabled': True, 'maxretry': 5, 'findtime': 600, 'bantime': 3600, 'ignoreip': []}
+MAX_BANTIME = 7 * 86400
+REPEAT_RETENTION = 30 * 86400
 TABLE = 'mini_deploy_login_guard_v1'
 OWNER = 'mini_deploy login guard v1'
 SCHEMA_GUARD = '''
@@ -21,6 +23,10 @@ CREATE TABLE IF NOT EXISTS login_guard_settings (id INTEGER PRIMARY KEY CHECK(id
 CREATE TABLE IF NOT EXISTS login_guard_bans (
  ip TEXT NOT NULL, source TEXT NOT NULL, started REAL NOT NULL, expires REAL NOT NULL, reason TEXT NOT NULL,
  PRIMARY KEY(ip,source));
+CREATE TABLE IF NOT EXISTS login_guard_repeats (
+ ip TEXT NOT NULL, source TEXT NOT NULL, strikes INTEGER NOT NULL, expires REAL NOT NULL,
+ PRIMARY KEY(ip,source));
+CREATE INDEX IF NOT EXISTS login_guard_repeat_expiry ON login_guard_repeats(expires);
 CREATE TABLE IF NOT EXISTS login_guard_geo (ip TEXT PRIMARY KEY, checked REAL NOT NULL, value TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS login_guard_source ON security_activity(source,kind,ts,ip);
 '''
@@ -100,6 +106,9 @@ class Guard:
         self._enforced_ssh = set()
         with self.maintenance(), history.connection() as db:
             db.executescript(SCHEMA + SCHEMA_GUARD)
+            # Preserve an existing automatic ban as the first strike when upgrading.
+            db.execute('INSERT OR IGNORE INTO login_guard_repeats '
+                       "SELECT ip,source,1,expires FROM login_guard_bans WHERE reason<>'管理员手动封禁'")
 
     def _settings(self, db):
         row = db.execute('SELECT value FROM login_guard_settings WHERE id=1').fetchone()
@@ -116,8 +125,9 @@ class Guard:
     def _evaluate(self, db, now):
         settings = self._settings(db)
         for item in db.execute('SELECT * FROM login_guard_bans WHERE expires<=?', (now,)).fetchall():
-            self._event(db, item['source'], 'unban', item['ip'], '临时封禁到期', now)
+            self._event(db, item['source'], 'unban', item['ip'], '临时封禁到期', item['expires'])
         db.execute('DELETE FROM login_guard_bans WHERE expires<=?', (now,))
+        db.execute('DELETE FROM login_guard_repeats WHERE expires<=?', (now - REPEAT_RETENTION,))
         if not settings['enabled']:
             return
         # Historical backfill cannot ban a visitor: require an actual recent failure.
@@ -135,8 +145,13 @@ class Guard:
                                (ip, source, max(last or 0, now - settings['findtime']), now)).fetchone()[0]
             if count < settings['maxretry']:
                 continue
-            reason = f'{settings["findtime"] // 60} 分钟内认证失败 {count} 次'
-            db.execute('INSERT INTO login_guard_bans VALUES (?,?,?,?,?)', (ip, source, now, now + settings['bantime'], reason))
+            previous = db.execute('SELECT strikes FROM login_guard_repeats WHERE ip=? AND source=?', (ip, source)).fetchone()
+            strikes = previous['strikes'] + 1 if previous else 1
+            duration = min(MAX_BANTIME, settings['bantime'] * (1 << min(strikes - 1, 14)))
+            length = f'{duration // 3600} 小时' if duration % 3600 == 0 else f'{duration // 60} 分钟'
+            reason = f'{settings["findtime"] // 60} 分钟内认证失败 {count} 次；第 {strikes} 次自动封禁，时长 {length}'
+            db.execute('INSERT INTO login_guard_bans VALUES (?,?,?,?,?)', (ip, source, now, now + duration, reason))
+            db.execute('INSERT OR REPLACE INTO login_guard_repeats VALUES (?,?,?,?)', (ip, source, strikes, now + duration))
             self._event(db, source, 'ban', ip, reason, now)
 
     def record_panel(self, ip, success):

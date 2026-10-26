@@ -40,6 +40,7 @@ def test_login_map_real_records_filter_pagination_theme_and_retained_errors(page
     playwright.expect(page.locator('#securityActivityList .security-login-row')).to_have_count(10)
     playwright.expect(page.locator('#securityMapLand path').first).to_be_visible()
     playwright.expect(page.locator('#securityMapDots circle')).to_have_count(2)
+    playwright.expect(page.locator('#securityPolicySummary')).to_contain_text('重复触发逐次翻倍')
     assert page.locator('#securityCoverage, #securityRisks, #ipSecurityJail').count() == 0
     assert page.locator('body').evaluate('el => el.scrollWidth <= innerWidth')
     assert page.locator('#securityMapDots circle').first.evaluate('el => getComputedStyle(el).animationName') == 'none'

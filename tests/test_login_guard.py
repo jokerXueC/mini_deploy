@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 import pytest
 
 import agent
-from login_guard import DEFAULTS, Firewall, Guard, OWNER, TABLE
+from login_guard import DEFAULTS, MAX_BANTIME, REPEAT_RETENTION, Firewall, Guard, OWNER, TABLE
 from security_observation import History
 from test_deployment_removal import http_server as http_server, runtime as runtime
 
@@ -55,6 +55,111 @@ def test_panel_failure_threshold_real_block_restart_and_expiry(guard):
     assert not restored.blocked('8.8.8.8')
     restored.tick({'ready': True, 'ports': [2222]})
     assert restored.status()['ban_total'] == 0
+
+
+@pytest.mark.parametrize('ip,source', [('8.8.8.8', 'panel'), ('2001:4860:4860::8888', 'ssh')])
+def test_repeat_failures_double_after_expiry_and_survive_restart(guard, ip, source):
+    engine, now, kernel = guard
+    for attempt, hours in enumerate((1, 2, 4, 8), start=1):
+        fail(engine, now, ip, count=4, source=source)
+        engine.tick({'ready': True, 'ports': [2222]})
+        assert engine.status()['ban_total'] == 0
+        fail(engine, now, ip, count=1, source=source)
+        engine.tick({'ready': True, 'ports': [2222]})
+        ban = engine.status()['bans'][0]
+        assert ban['expires'] - ban['started'] == pytest.approx(hours * 3600)
+        assert f'第 {attempt} 次自动封禁' in ban['reason']
+        assert ban['enforced']
+        if source == 'ssh':
+            assert kernel.calls[-1][1][0]['expires'] == ban['expires']
+        now[0] += 1
+        engine.tick({'ready': True, 'ports': [2222]})
+        assert engine.status()['bans'][0]['expires'] == ban['expires']
+        engine = Guard(engine.history, clock=lambda: now[0], firewall=kernel)
+        now[0] = ban['expires'] + 1
+        engine.tick({'ready': True, 'ports': [2222]})
+        assert engine.status()['ban_total'] == 0
+
+
+def test_repeat_state_outlives_pruned_activity_and_is_scoped_to_ip_and_source(guard):
+    engine, now, kernel = guard
+    fail(engine, now)
+    now[0] = engine.status()['bans'][0]['expires'] + 1
+    engine.tick({'ready': True, 'ports': [22]})
+    with engine.history.connection() as db:
+        db.execute('DELETE FROM security_activity')
+    engine = Guard(engine.history, clock=lambda: now[0], firewall=kernel)
+    fail(engine, now)
+    fail(engine, now, '8.8.8.8', source='ssh')
+    fail(engine, now, '9.9.9.9')
+    engine.tick({'ready': True, 'ports': [22]})
+    durations = {(ban['ip'], ban['source']): ban['expires'] - ban['started'] for ban in engine.status()['bans']}
+    assert durations == {('8.8.8.8', 'panel'): 7200, ('8.8.8.8', 'ssh'): 3600, ('9.9.9.9', 'panel'): 3600}
+
+
+@pytest.mark.parametrize('quiet,expected', [(REPEAT_RETENTION - 60, 7200), (REPEAT_RETENTION, 3600)])
+def test_repeat_retention_is_measured_from_ban_expiry(guard, quiet, expected):
+    engine, now, _ = guard
+    fail(engine, now)
+    now[0] = engine.status()['bans'][0]['expires'] + quiet
+    fail(engine, now)
+    ban = engine.status()['bans'][0]
+    assert ban['expires'] - ban['started'] == expected
+
+
+def test_delayed_ssh_collection_counts_failures_after_real_expiry(guard):
+    engine, now, _ = guard
+    fail(engine, now, source='ssh')
+    engine.tick({'ready': True, 'ports': [22]})
+    now[0] = engine.status()['bans'][0]['expires'] + 1
+    # The collector ingests new failures before its first post-expiry tick.
+    fail(engine, now, source='ssh')
+    engine.tick({'ready': True, 'ports': [22]})
+    ban = engine.status()['bans'][0]
+    assert ban['expires'] - ban['started'] == 7200
+
+
+def test_custom_base_duration_and_repeated_bans_stop_at_seven_days(guard):
+    engine, now, _ = guard
+    engine.change({**DEFAULTS, 'action': 'settings', 'bantime': 60}, '1.1.1.1')
+    for repeat in range(17):
+        fail(engine, now)
+        ban = engine.status()['bans'][0]
+        assert ban['expires'] - ban['started'] == min(MAX_BANTIME, 60 * 2 ** repeat)
+        now[0] = ban['expires'] + 1
+        engine.tick({'ready': True, 'ports': [22]})
+
+
+def test_manual_bans_do_not_increment_automatic_history_and_unban_does_not_replay(guard):
+    engine, now, _ = guard
+    engine.change({'action': 'ban', 'ip': '8.8.8.8', 'source': 'panel'}, '1.1.1.1')
+    now[0] += 1
+    engine.change({'action': 'unban', 'ip': '8.8.8.8', 'source': 'panel'}, '1.1.1.1')
+    fail(engine, now)
+    assert engine.status()['bans'][0]['expires'] - engine.status()['bans'][0]['started'] == 3600
+    now[0] += 1
+    engine.change({'action': 'unban', 'ip': '8.8.8.8', 'source': 'panel'}, '1.1.1.1')
+    engine.tick({'ready': True, 'ports': [22]})
+    assert not engine.status()['bans']
+    fail(engine, now)
+    assert engine.status()['bans'][0]['expires'] - engine.status()['bans'][0]['started'] == 7200
+
+
+def test_legacy_active_automatic_ban_adopted_once_and_manual_ban_excluded(guard):
+    engine, now, kernel = guard
+    with engine.history.connection() as db:
+        db.execute('DROP TABLE login_guard_repeats')
+        db.executemany('INSERT INTO login_guard_bans VALUES (?,?,?,?,?)', [
+            ('8.8.8.8', 'panel', now[0], now[0] + 3600, '10 分钟内认证失败 5 次'),
+            ('9.9.9.9', 'panel', now[0], now[0] + 3600, '管理员手动封禁'),
+        ])
+    for _ in range(2):
+        engine = Guard(engine.history, clock=lambda: now[0], firewall=kernel)
+    now[0] += 3601
+    fail(engine, now)
+    fail(engine, now, '9.9.9.9')
+    durations = {ban['ip']: ban['expires'] - ban['started'] for ban in engine.status()['bans']}
+    assert durations == {'8.8.8.8': 7200, '9.9.9.9': 3600}
 
 
 def test_manual_ban_applies_both_scopes_persists_does_not_extend_and_expires(guard):

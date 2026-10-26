@@ -203,7 +203,7 @@
     $('securityLocationCount').textContent = status.location_total;
     $('securityGuardToggle').setAttribute('aria-checked', String(settings.enabled));
     $('securityPolicySummary').textContent = minutes(settings.findtime) + '内认证失败 ' +
-      settings.maxretry + ' 次，临时封禁 ' + minutes(settings.bantime);
+      settings.maxretry + ' 次，首次封禁 ' + minutes(settings.bantime) + '，重复触发逐次翻倍（最长 7 天）';
     $('securityEnforcement').textContent = !settings.enabled ? '自动封禁已暂停 · 登录继续记录' :
       '面板登录防护已启用 · ' + status.ssh.detail;
     $('securityEnforcement').dataset.state = settings.enabled && !status.ssh.ready ? 'partial' : 'ready';
