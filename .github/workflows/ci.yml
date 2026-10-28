@@ -60,7 +60,7 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: Test authenticated browser workflows
         run: python -m pytest tests/*browser.py -q --junitxml=browser-results.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: browser-results
