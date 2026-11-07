@@ -105,6 +105,18 @@ def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(inc
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
     badge = page.locator('#eventsTabCount')
     playwright.expect(badge).to_have_text('5')
+    tabs = page.locator('.view-tab').all()[:3]
+    boxes = [tab.bounding_box() for tab in tabs]
+    gaps = [boxes[i + 1]['x'] - boxes[i]['x'] - boxes[i]['width'] for i in range(2)]
+    assert abs(gaps[0] - gaps[1]) < 1
+    # A hidden badge and the widest count must leave every tab in the same place.
+    for hidden, text in ((True, '0'), (False, '99+'), (False, '5')):
+        badge.evaluate('(el, state) => { el.hidden = state[0]; el.textContent = state[1]; }', [hidden, text])
+        assert [tab.bounding_box() for tab in tabs] == boxes
+        if not hidden:
+            badge_box = badge.bounding_box()
+            assert badge_box['x'] + badge_box['width'] < boxes[2]['x']
+    page.locator('.view-tabs').screenshot(path=str(tmp_path / f'nav-spacing-{width}-{theme}.png'))
     choose(page, 'incidentSource', 'docker')
     playwright.expect(badge).to_have_text('5')
     page.locator('#acknowledgeAllBtn').click()
