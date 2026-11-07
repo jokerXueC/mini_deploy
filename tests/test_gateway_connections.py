@@ -133,6 +133,87 @@ def test_caddy_parser_preserves_placeholders_strings_and_static_routes():
     assert '/cloud/*' in routes[1]['label']
 
 
+@pytest.mark.parametrize('kind,text', [('caddy', CADDY), ('nginx', NGINX.replace('127.0.0.1:8000', 'backend:8000'))],
+                         ids=['caddy', 'nginx'])
+@pytest.mark.parametrize('state', ['connected', 'applying', 'recovery_required'])
+def test_overwritten_rule_keeps_its_original_gateway_instead_of_creating_duplicate(setup, kind, text, state):
+    store, source, path = setup
+    source['kind'] = kind
+    path.write_text(text, encoding='utf-8')
+    first = preview(store, source)
+    store.apply({'key': 'api', 'token': first['token']})
+    record_path = store.directory('api') / 'connection.json'
+    record = connections.read_record(record_path)
+    record['state'] = state
+    atomic_write(record_path, json.dumps(record))
+    # A business deployment restores the backend without removing panel ownership.
+    path.write_text(text, encoding='utf-8')
+    inspected = store.inspect(source)
+    route = next(route for route in inspected['routes'] if route['kind'] == 'proxy')
+    assert route['existing_key'] == 'api' and not route['supported']
+    assert '自动修复' in route['reason']
+    with pytest.raises(CertificateError, match='入口 api'):
+        preview(store, source, key='api-2')
+    assert not (store.root / 'api-2' / 'plan.json').exists()
+    assert connections.read_record(record_path) == record
+    assert path.read_text(encoding='utf-8') == text
+
+
+def test_same_backend_in_different_rules_is_allowed_but_same_rule_is_not(setup):
+    store, source, path = setup
+    original = 'site.test {\n handle /a/* {\n reverse_proxy api:80\n }\n handle /b/* {\n reverse_proxy api:80\n }\n}\n'
+    path.write_text(original, encoding='utf-8')
+    first = preview(store, source)
+    store.apply({'key': 'api', 'token': first['token']})
+    path.write_text(original.replace('reverse_proxy api:80', 'reverse_proxy updated:80', 1), encoding='utf-8')
+    inspected = store.inspect(source)
+    first_route, second_route = inspected['routes']
+    assert first_route['existing_key'] == 'api' and not first_route['supported']
+    assert second_route['supported'] and 'existing_key' not in second_route
+    second = store.preview({'source': source, 'source_revision': inspected['revision'],
+                            'route_id': second_route['id'], 'key': 'other-rule', 'port': 18082,
+                            'network': 'app_default'})
+    store.apply({'key': 'other-rule', 'token': second['token']})
+    assert 'mini-gateway-other-rule:10000' in connections.read_config(path)
+    assert 'reverse_proxy updated:80' in connections.read_config(path)
+
+
+def test_recreated_proxy_mount_does_not_lose_rule_ownership(setup):
+    store, source, path = setup
+    first = preview(store, source)
+    store.apply({'key': 'api', 'token': first['token']})
+    new_path = path.with_name('new-Caddyfile')
+    new_path.write_text(CADDY, encoding='utf-8')
+    source.update(path=str(new_path), container_id='b' * 64)
+    route = next(route for route in store.inspect(source)['routes'] if route['kind'] == 'proxy')
+    assert route['existing_key'] == 'api' and not route['supported']
+
+
+def test_host_network_gateway_is_recognized_as_connected(setup):
+    store, source, path = setup
+    source['networks'] = ['host']
+    first = preview(store, source, network='host')
+    store.apply({'key': 'api', 'token': first['token']})
+    route = next(route for route in store.inspect(source)['routes'] if route['kind'] == 'proxy')
+    assert route['upstream'] == 'http://127.0.0.1:18080'
+    assert route['existing_key'] == 'api' and not route['supported']
+    with pytest.raises(CertificateError, match='入口 api'):
+        preview(store, source, key='api-2', network='host')
+
+
+def test_old_preview_cannot_create_second_gateway_after_rule_was_claimed(setup, monkeypatch):
+    store, source, path = setup
+    first = preview(store, source)
+    second = preview(store, source, key='api-2')
+    store.apply({'key': 'api', 'token': first['token']})
+    path.write_text(CADDY, encoding='utf-8')
+    monkeypatch.setattr(store.gateways, 'save', lambda *_: pytest.fail('must not create another gateway'))
+    with pytest.raises(CertificateError, match='入口 api'):
+        store.apply({'key': 'api-2', 'token': second['token']})
+    assert not (store.gateways.root / 'api-2' / 'entry.json').exists()
+    assert path.read_text(encoding='utf-8') == CADDY
+
+
 @pytest.mark.parametrize('newline', ['\n', '\r\n'])
 def test_caddy_embedded_placeholders_and_proxy_options_are_supported(newline):
     text = ZHUNKEDA.replace('\n', newline)

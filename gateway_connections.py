@@ -733,10 +733,37 @@ class Connections:
                 result['error'] = f'无法核对当前代理配置：{detail}；可自动重新检测，已有历史保留'
         return result
 
+    def existing_route(self, source: dict, route: dict) -> str:
+        for path in self.root.glob('*/connection.json') if self.root.exists() else []:
+            trusted_path(path)
+            record = read_record(path)
+            previous = record['source']
+            same_source = previous['kind'] == source['kind'] and (
+                previous['path'] == source['path'] or
+                (previous['mode'] == source['mode'] == 'docker' and
+                 previous['container'] == source['container'] and
+                 previous['config_path'] == source['config_path']))
+            if record['state'] == 'not_connected' or not same_source or record['site'] != route['site']:
+                continue
+            if (not record.get('rule_scoped') or route['kind'] != 'proxy' or
+                    record.get('selector') == route['_selector'] or
+                    route['upstream'].rstrip('/') == 'http://' + self.target(record)):
+                return record['spec']['key']
+        return ''
+
+    @staticmethod
+    def existing_notice(key: str) -> str:
+        return f'该规则已由入口 {key} 接入；如采集中断，请对原入口使用自动修复，保留原请求历史'
+
     def inspect(self, raw: dict) -> dict:
         source = resolve(raw)
         text = read_config(Path(source['path']))
-        return {'source': source, 'revision': digest(text), 'routes': [public_route(r) for r in routes(text, source['kind'], source.get('addresses'))],
+        found = routes(text, source['kind'], source.get('addresses'))
+        for route in found:
+            key = self.existing_route(source, route)
+            if key:
+                route.update(existing_key=key, supported=False, reason=self.existing_notice(key))
+        return {'source': source, 'revision': digest(text), 'routes': [public_route(r) for r in found],
                 'networks': source['networks'], 'help': help_items(source)}
 
     def preview(self, data: dict, *, repair: bool = False) -> dict:
@@ -745,19 +772,15 @@ class Connections:
         if data.get('source_revision') != digest(text):
             raise CertificateError('代理配置已变化，请重新检测网站')
         route = next((r for r in routes(text, source['kind'], source.get('addresses')) if r['id'] == data.get('route_id')), None)
+        existing_key = self.existing_route(source, route) if route else ''
+        if existing_key:
+            raise CertificateError(self.existing_notice(existing_key))
         if not route or not route['supported']:
             raise CertificateError(route['reason'] if route else '请选择本次检测出的站点规则')
         key = data.get('key', '')
         directory = self.directory(key)
         if self.status(key)['state'] != 'not_connected':
             raise CertificateError('此网关已有接入或待恢复操作，请先撤销接入')
-        for record in self.root.glob('*/connection.json') if self.root.exists() else []:
-            existing = read_record(record)
-            if existing['state'] == 'not_connected':
-                continue
-            if existing['source']['path'] == source['path'] and existing['site'] == route['site']:
-                if route['kind'] != 'proxy' or not existing.get('rule_scoped'):
-                    raise CertificateError('此站点已有整站接入记录，请先撤销原接入；分开的后端规则可独立接入')
         network = data.get('network', '')
         if network not in source['networks']:
             raise CertificateError('请选择前置代理已加入的网络')
@@ -898,6 +921,12 @@ class Connections:
         original = read_config(path)
         if digest(original) != plan['source_revision']:
             raise CertificateError('配置已变化，原预览失效，请重新检测')
+        route = next((route for route in routes(original, source['kind'], source.get('addresses'))
+                      if route['_selector'] == plan['selector']), None)
+        if route:
+            existing_key = self.existing_route(source, route)
+            if existing_key:
+                raise CertificateError(self.existing_notice(existing_key))
         if source['kind'] == 'caddy':
             self.validate(source, plan['candidate'])
         self.gateways.save(plan['spec'], plan['gateway_revision'])

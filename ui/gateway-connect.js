@@ -140,7 +140,9 @@ window.GatewayConnect = (() => {
       option.disabled = !route.supported;
       return option;
     }));
-    if (!visible.some(item => item.route.supported)) feedback.textContent = '未找到可自动接入的后端。可调整检测来源；未经过代理的 HTTP 服务可在高级设置中创建自定义入口。';
+    if (!visible.some(item => item.route.supported)) feedback.textContent = visible.some(item => item.route.existing_key)
+      ? '检测到的后端已有接入记录，无需重复创建。可在原入口查看请求；采集中断时请使用原入口的“自动修复”，保留原请求历史。'
+      : '未找到可自动接入的后端。可调整检测来源；未经过代理的 HTTP 服务可在高级设置中创建自定义入口。';
     window.AppSelects?.syncAll();
   }
 

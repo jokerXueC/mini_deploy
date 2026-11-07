@@ -4,6 +4,40 @@ import pytest
 from test_onboarding_browser import browser_page as browser_page, playwright
 
 
+@pytest.mark.parametrize('width', [1440, 390])
+def test_existing_rule_is_not_offered_as_new_backend_and_cards_show_scope(browser_page, tmp_path, width):
+    page, state = browser_page
+    page.set_viewport_size({'width': width, 'height': 950})
+    state['gateway_entries'] = [{
+        'key': 'original', 'name': 'api.test', 'upstream': 'http://api:8766', 'state': 'running',
+        'network': 'app_default', 'local_address': '127.0.0.1:18080',
+        'caddy_upstream': 'mini-gateway-original:10000',
+        'connection': {'state': 'connected', 'site': 'api.test', 'scope': 'handle /cloud/*',
+                       'config_state': 'changed', 'error': '代理配置已变化'}}]
+    page.route('**/gateway-connections', lambda route: route.fulfill(json={
+        'source': {'kind': 'caddy', 'mode': 'docker', 'container': 'edge',
+                   'config_path': '/etc/caddy/Caddyfile'},
+        'revision': 'revision', 'networks': ['app_default'], 'routes': [{
+            'id': 'api', 'site': 'api.test', 'kind': 'proxy', 'label': 'handle /cloud/*',
+            'upstream': 'http://api:8766', 'supported': False, 'existing_key': 'original',
+            'reason': '该规则已由入口 original 接入；请使用自动修复'}]}))
+    page.locator('#requestsViewTab').click()
+    playwright.expect(page.locator('.gateway-connection-scope')).to_have_text('采集范围：handle /cloud/*')
+    page.locator('#gatewayConnectOpen').click()
+    playwright.expect(page.locator('#gatewayConnectFeedback')).to_contain_text('无需重复创建')
+    playwright.expect(page.locator('#connectService option[value="0"]')).to_have_js_property('disabled', True)
+    page.locator('#connectService-button').click()
+    option = page.get_by_role('option').filter(has_text='http://api:8766')
+    playwright.expect(option).to_have_attribute('aria-disabled', 'true')
+    option.click(force=True)
+    playwright.expect(page.locator('#connectService')).to_have_value('')
+    page.keyboard.press('Escape')
+    playwright.expect(page.locator('#connectReview')).to_be_hidden()
+    assert not any(payload.get('action') in ('preview', 'apply') for _, payload in state['posts'])
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(tmp_path / f'existing-gateway-{width}.png'), full_page=True)
+
+
 @pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'dark')])
 def test_new_connection_consent_and_health_expectations_are_reviewed(browser_page, tmp_path, width, theme):
     page, state = browser_page

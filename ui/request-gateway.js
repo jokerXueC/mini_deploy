@@ -12,7 +12,7 @@ window.RequestGateway = (() => {
     $('requestGatewayKey').replaceChildren(...choices.map(entry => {
       const option = document.createElement('option');
       option.value = entry.key;
-      option.textContent = entry.connection?.site ? `${entry.upstream} · ${entry.connection.site}` : `自定义入口 · ${entry.name}`;
+      option.textContent = entry.connection?.site ? `${entry.upstream} · ${entry.connection.site}${entry.connection.scope ? ` · ${entry.connection.scope}` : ''}` : `自定义入口 · ${entry.name}`;
       return option;
     }));
     if (choices.some(entry => entry.key === selected)) $('requestGatewayKey').value = selected;
@@ -26,6 +26,7 @@ window.RequestGateway = (() => {
         <div class="request-gateway-title"><strong>${escapeHtml(entry.name)}</strong><span class="badge ${entry.state === 'running' ? 'success' : 'neutral'}">${escapeHtml(states[entry.state] || entry.state)}</span></div>
         <div class="request-gateway-route"><code>${escapeHtml(entry.caddy_upstream)}</code><span aria-hidden="true"> → </span><code>${escapeHtml(entry.upstream)}</code></div>
         <div class="muted">本机地址：${escapeHtml(entry.local_address)} · 网络：${escapeHtml(entry.network)}</div>
+        ${entry.connection?.scope ? `<p class="gateway-connection-scope muted">采集范围：${escapeHtml(entry.connection.scope)}</p>` : ''}
         <p class="gateway-connection-state">${entry.connection?.error ? escapeHtml(entry.connection.error) : entry.connection?.state === 'connected' ? `配置已指向采集网关 · ${escapeHtml(entry.connection.site)}` : entry.connection && entry.connection.state !== 'not_connected' ? '接入操作待恢复，请撤销接入后重试' : '尚未通过向导接入网站流量'}</p>
         ${entry.collection ? `<p class="gateway-collection-state" role="status">${escapeHtml(entry.collection.detail)}${entry.collection.latest_at ? ` · 最近请求 ${escapeHtml(new Date(entry.collection.latest_at * 1000).toLocaleString('zh-CN'))}` : ''}</p>` : ''}
         ${entry.connection?.verification ? `<p class="muted">后端检测 HTTP ${escapeHtml(entry.connection.verification.status)} · ${escapeHtml(entry.connection.verification.notice)}</p>` : ''}
