@@ -22,17 +22,15 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   exit 1
 fi
 
-for command in awk dirname flock grep install mktemp mv python3 readlink sha256sum stat sync tar; do
+for command in awk dirname flock grep install mktemp mv readlink sha256sum stat sync tar; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "Missing backup dependency: $command" >&2
     exit 1
   fi
 done
-PYTHON_BIN="$(readlink -f -- "$(command -v python3)")"
-if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-  echo "Python 3.10 or newer is required." >&2
-  exit 1
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/python-runtime.sh
+source "$SCRIPT_DIR/python-runtime.sh"
 
 acquire_maintenance_lock() {
   local lock_parent=""
@@ -488,6 +486,9 @@ env_file_value() {
 }
 
 if [[ -f "$ENV_FILE" ]]; then
+  if [[ -z "${PYTHON_BIN:-}" ]]; then
+    PYTHON_BIN="$(env_file_value "DEPLOY_AGENT_PYTHON_BIN")"
+  fi
   configured_projects_file="$(env_file_value "DEPLOY_PROJECTS_FILE")"
   if [[ -n "$configured_projects_file" ]]; then
     if [[ "$configured_projects_file" != /* ]]; then
@@ -502,6 +503,7 @@ if [[ -f "$ENV_FILE" ]]; then
     fi
   fi
 fi
+PYTHON_BIN="$(select_python)"
 
 # Archive new site/monitoring data and legacy configuration verbatim. The
 # runtime selects sites.json first; original projects.json and state.json stay.

@@ -418,8 +418,8 @@ function animateNumberText(id, value, formatter) {
 }
 
 function setView(view) {
-  activeView = ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security', 'setup'].includes(view) ? view : 'server';
-  ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security', 'setup'].forEach(name => {
+  activeView = ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'databases', 'security', 'setup'].includes(view) ? view : 'server';
+  ['server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'databases', 'security', 'setup'].forEach(name => {
     $(`${name}View`)?.classList.toggle('active', activeView === name);
     $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
   });
@@ -434,6 +434,7 @@ function setView(view) {
     certificates: ['域名与证书', '已发现的网站、证书有效期与线上状态。'],
     requests: ['请求记录', '后端 HTTP 请求、响应状态与耗时'],
     terminal: ['远程终端', 'SSH 连接与服务器操作'],
+    databases: ['数据库', '数据库连接、表结构与只读查询'],
     security: ['安全中心', '主机风险、登录活动与防护状态'],
     setup: ['功能检查', '安装验收、功能配置与实际运行状态'],
   };
@@ -458,6 +459,7 @@ function setView(view) {
   window.TerminalAI?.viewChanged(activeView);
   window.IPSecurity?.viewChanged(activeView);
   window.SetupChecks?.viewChanged(activeView);
+  window.Databases?.viewChanged(activeView);
 }
 
 
@@ -1708,6 +1710,7 @@ $('refreshBtn').addEventListener('click', () => {
   else if (activeView === 'requests') window.NginxRequests?.refresh();
   else if (activeView === 'terminal') { window.SSHTerminal?.viewChanged('terminal'); window.TerminalAI?.viewChanged('terminal'); }
   else if (activeView === 'setup') window.SetupChecks?.refresh();
+  else if (activeView === 'databases') window.Databases?.refresh();
 });
 $('serverViewTab').addEventListener('click', () => setView('server'));
 $('eventsViewTab')?.addEventListener('click', () => setView('events'));
@@ -1716,6 +1719,7 @@ $('certificatesViewTab')?.addEventListener('click', () => setView('certificates'
 $('requestsViewTab')?.addEventListener('click', () => setView('requests'));
 $('securityViewTab')?.addEventListener('click', () => setView('security'));
 $('setupViewTab')?.addEventListener('click', () => setView('setup'));
+$('databasesViewTab')?.addEventListener('click', () => setView('databases'));
 document.querySelectorAll('[data-server-refresh]').forEach(button => {
   button.addEventListener('click', () => setServerRefreshInterval(button.dataset.serverRefresh));
 });

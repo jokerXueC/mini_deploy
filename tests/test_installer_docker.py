@@ -5,7 +5,8 @@ import pytest
 from test_installer_operations import INSTALLER, ROOT, bash_run, function
 
 
-def run_docker_setup(setting="", package_manager="apt-get", present=False, approve=False, fail=False, language="en"):
+def run_docker_setup(setting="", package_manager="apt-get", present=False, approve=False, fail=False,
+                     language="en", engine_package="docker-ce", engine_ready=True, podman=False):
     mocks = r'''
 command() {
   if [[ "$1" == "-v" ]]; then
@@ -17,8 +18,19 @@ command() {
   builtin command "$@"
 }
 apt-get() { printf 'PACKAGE apt-get %s\n' "$*"; [[ "$TEST_FAIL" != true ]]; }
-dnf() { printf 'PACKAGE dnf %s\n' "$*"; [[ "$TEST_FAIL" != true ]]; }
-yum() { printf 'PACKAGE yum %s\n' "$*"; [[ "$TEST_FAIL" != true ]]; }
+dnf() {
+  if [[ "$1" == -q ]]; then [[ "$4" == "$TEST_ENGINE_PACKAGE" ]]; return; fi
+  printf 'PACKAGE dnf %s\n' "$*"; [[ "$TEST_FAIL" != true ]];
+}
+yum() {
+  if [[ "$1" == -q ]]; then [[ "$4" == "$TEST_ENGINE_PACKAGE" ]]; return; fi
+  printf 'PACKAGE yum %s\n' "$*"; [[ "$TEST_FAIL" != true ]];
+}
+docker() {
+  if [[ "$1" == --version ]]; then
+    if [[ "$TEST_PODMAN" == true ]]; then echo 'podman version 5.0'; else echo 'Docker version 27.0'; fi
+  else [[ "$TEST_ENGINE_READY" == true ]]; fi
+}
 systemctl() { printf 'SERVICE %s\n' "$*"; }
 '''
     if approve:
@@ -30,7 +42,8 @@ systemctl() { printf 'SERVICE %s\n' "$*"; }
         "install_docker_if_requested </dev/null",
     ])
     return bash_run(script, SETUP_DOCKER=setting, TEST_PACKAGE_MANAGER=package_manager,
-                    TEST_DOCKER_PRESENT=str(present).lower(), TEST_FAIL=str(fail).lower(), INSTALL_LANG=language)
+                    TEST_DOCKER_PRESENT=str(present).lower(), TEST_FAIL=str(fail).lower(), INSTALL_LANG=language,
+                    TEST_ENGINE_PACKAGE=engine_package, TEST_ENGINE_READY=str(engine_ready).lower(), TEST_PODMAN=str(podman).lower())
 
 
 @pytest.mark.parametrize("setting", ["", "ask", "false", "no", "0", "off"])
@@ -43,8 +56,8 @@ def test_noninteractive_default_or_disabled_does_not_install_or_start_docker(set
 
 @pytest.mark.parametrize("package_manager, expected", [
     ("apt-get", ["PACKAGE apt-get update", "PACKAGE apt-get install -y docker.io"]),
-    ("dnf", ["PACKAGE dnf install -y docker"]),
-    ("yum", ["PACKAGE yum install -y docker"]),
+    ("dnf", ["PACKAGE dnf install -y docker-ce"]),
+    ("yum", ["PACKAGE yum install -y docker-ce"]),
 ])
 def test_preapproved_install_adds_only_engine_and_starts_service(package_manager, expected):
     result = run_docker_setup("yes", package_manager=package_manager)
@@ -72,7 +85,8 @@ def test_prompt_approval_installs_engine_with_operations_wording(language, promp
 
 def test_failed_package_install_does_not_start_docker():
     result = run_docker_setup("yes", fail=True)
-    assert result.returncode != 0
+    assert result.returncode == 0
+    assert 'core panel remains available' in result.stdout
     assert "SERVICE " not in result.stdout
 
 
@@ -81,6 +95,29 @@ def test_unsupported_package_manager_skips_service_changes():
     assert result.returncode == 0, result.stderr
     assert "No supported package manager" in result.stdout
     assert "SERVICE " not in result.stdout
+
+
+def test_dnf_uses_moby_only_when_available_and_never_installs_podman_alias():
+    result = run_docker_setup('yes', package_manager='dnf', engine_package='moby-engine')
+    assert result.returncode == 0
+    assert 'PACKAGE dnf install -y moby-engine' in result.stdout
+    result = run_docker_setup('yes', package_manager='dnf', engine_package='none')
+    assert result.returncode == 0
+    assert 'SERVICE ' not in result.stdout and 'PACKAGE ' not in result.stdout
+    assert 'core panel remains available' in result.stdout
+
+
+def test_podman_alias_is_not_misreported_or_reconfigured_as_docker():
+    result = run_docker_setup('yes', present=True, podman=True)
+    assert result.returncode == 0
+    assert 'Unrecognized Docker CLI' in result.stdout
+    assert 'SERVICE ' not in result.stdout and 'PACKAGE ' not in result.stdout
+
+
+def test_installed_package_with_unavailable_daemon_reports_incomplete_setup():
+    result = run_docker_setup('yes', engine_ready=False)
+    assert result.returncode == 0
+    assert 'Docker engine is not ready' in result.stdout
 
 
 def test_docker_setup_remains_optional_and_after_upgrade_backup():

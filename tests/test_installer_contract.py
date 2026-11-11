@@ -11,7 +11,7 @@ DOCTOR_SCRIPT = (ROOT / "scripts" / "doctor.sh").read_text(encoding="utf-8")
 
 def test_upgrade_backup_precedes_installer_mutations() -> None:
     backup_call = INSTALLER.index('bash "$SOURCE_DIR/scripts/backup-installation.sh"')
-    verify_call = INSTALLER.index('python3 "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH"')
+    verify_call = INSTALLER.index('"$PYTHON_BIN" "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH"')
     mutation_boundary = INSTALLER.index("# Only now may the installer mutate the system.")
     first_app_creation = INSTALLER.index('install -d -m 755 "$APP_HOME"', mutation_boundary)
     first_data_marker_write = INSTALLER.index("printf 'data_home=%s\\n'", mutation_boundary)
@@ -22,7 +22,7 @@ def test_upgrade_backup_precedes_installer_mutations() -> None:
 
 def test_project_config_migration_follows_verified_original_state_backup() -> None:
     backup_call = INSTALLER.index('bash "$SOURCE_DIR/scripts/backup-installation.sh"')
-    verify_call = INSTALLER.index('python3 "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH"')
+    verify_call = INSTALLER.index('"$PYTHON_BIN" "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH"')
     migration_call = INSTALLER.index("\nmigrate_projects_config\n", verify_call)
     first_release_mutation = INSTALLER.index("\nsecure_app_release_files\n", migration_call)
 
@@ -66,7 +66,7 @@ def test_doctor_delegates_full_config_validation_to_agent_cli() -> None:
     )
 
     assert fixed_path in DOCTOR_SCRIPT
-    assert 'PYTHON_BIN="$(readlink -f -- "$PYTHON_BIN")"' in DOCTOR_SCRIPT
+    assert 'PYTHON_BIN="$(select_python)"' in DOCTOR_SCRIPT
     assert validation in DOCTOR_SCRIPT
 
 
@@ -146,7 +146,7 @@ def test_authoritative_data_layout_does_not_parse_stale_legacy_json() -> None:
 def test_active_legacy_agent_stops_only_after_verified_backup() -> None:
     backup = INSTALLER.index('bash "$SOURCE_DIR/scripts/backup-installation.sh"')
     verify = INSTALLER.index(
-        'python3 "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH"'
+        '"$PYTHON_BIN" "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH"'
     )
     stop = INSTALLER.index("\nstop_existing_agent_for_upgrade\n", verify)
     migration = INSTALLER.index("\nmigrate_projects_config\n", stop)
@@ -284,12 +284,14 @@ def test_systemd_recreates_private_runtime_lock_directory_after_reboot() -> None
 
 
 def test_python_310_is_required_before_installer_state_mutation() -> None:
-    version_check = INSTALLER.index("sys.version_info >= (3, 10)")
+    version_check = INSTALLER.index('PYTHON_BIN="$(select_python)"')
     lock_call = INSTALLER.index("\nacquire_maintenance_lock\n")
 
     assert version_check < lock_call
-    assert "Python 3.10 or newer is required" in INSTALLER
-    assert "sys.version_info >= (3, 10)" in BACKUP_SCRIPT
+    selector = (ROOT / 'scripts/python-runtime.sh').read_text(encoding='utf-8')
+    assert "Python 3.10 or newer is required" in selector
+    assert "sys.version_info >= (3, 10)" in selector
+    assert 'PYTHON_BIN="$(select_python)"' in BACKUP_SCRIPT
 
 
 def test_nested_mounts_are_rejected_before_recursive_operations() -> None:

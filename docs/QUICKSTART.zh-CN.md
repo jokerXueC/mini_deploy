@@ -11,6 +11,8 @@ mini_deploy 是轻量的服务器运维与请求监控面板，名称保持不�
 
 需要 Linux、root/sudo、systemd、Python 3.10+，以及用于下载面板自身的 Git。不需要业务仓库、Deploy Key 或部署脚本。Docker 和 Nginx 按需使用。缺少基础依赖时先执行完整指南中对应系统的安装步骤；已有代理无需重复安装。
 
+推荐 Debian 12/13、Ubuntu 22.04/24.04；其他 systemd 发行版属于条件兼容，尚未完成整机验收。Alpine/OpenRC 和普通容器不支持标准主机安装。下载后可先执行 `bash install.sh --check`，只检查环境，不修改系统。RPM 系、并行 Python、Docker 仓库和 SELinux 处理见[系统兼容指南](PLATFORM_SUPPORT.zh-CN.md)。
+
 ```bash
 mini_deploy_source="$(mktemp -d /tmp/mini-deploy-source.XXXXXX)" && git clone --depth 1 --branch main https://github.com/jokerXueC/mini_deploy.git "$mini_deploy_source" && SETUP_NGINX=no SETUP_HTTPS=no bash "$mini_deploy_source/install.sh"
 ```

@@ -532,6 +532,7 @@ class Maintenance:
                 phase('创建并校验完整备份')
                 env = dict(os.environ, APP_HOME=str(self.app), DATA_HOME=str(self.home), ENV_FILE=str(self.env),
                            LOG_HOME=str(self.log), SERVICE_NAME=self.service, BACKUP_DIR=str(self.backup))
+                env['PYTHON_BIN'] = sys.executable
                 bundle = command(['bash', str(self.app / 'scripts/backup-installation.sh')], timeout=600, env=env)
                 verified = verify_backup(Path(bundle))
                 job['full_backup'] = verified.bundle.name

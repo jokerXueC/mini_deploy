@@ -24,14 +24,14 @@ def function(name):
     return INSTALLER[start:INSTALLER.index("\n}\n", start) + 3]
 
 
-def bash_run(script, **environment):
+def bash_run(script, *, timeout=30, **environment):
     bash = "C:/Program Files/Git/bin/bash.exe" if os.name == "nt" else shutil.which("bash")
     if not bash or not Path(bash).is_file():
         pytest.skip("Bash and coreutils required")
     return subprocess.run(
         [bash, "-c", "set -euo pipefail\n" + script],
         env={**os.environ, **{key: str(value) for key, value in environment.items()}},
-        capture_output=True, text=True, encoding="utf-8", timeout=30,
+        capture_output=True, text=True, encoding="utf-8", timeout=timeout,
     )
 
 
@@ -153,7 +153,8 @@ def test_release_copy_preserves_business_files_and_skips_unshipped_sources(tmp_p
             function("copy_without_rsync").replace("root:root", '"$(id -u):$(id -g)"'),
             "copy_without_rsync",
         ])
-    result = bash_run(MANIFEST + copy, SOURCE_DIR=source.as_posix(), APP_HOME=target.as_posix())
+    result = bash_run(MANIFEST + copy, SOURCE_DIR=source.as_posix(), APP_HOME=target.as_posix(),
+                      timeout=120 if os.name == 'nt' else 30)
     assert result.returncode == 0, result.stderr
     assert (target / "agent.py").read_text() == "new release"
     assert (target / "ui/index.html").read_text() == "new UI"

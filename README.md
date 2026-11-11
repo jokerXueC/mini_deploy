@@ -9,6 +9,7 @@ the product.
 - [Public website preview](website/index.html) (standalone static files)
 - [首次使用与升级说明](docs/BEGINNER_DEPLOY_FLOW.zh-CN.md)
 - [Linux 验收清单](docs/LINUX_TEST.zh-CN.md)
+- [Linux 系统兼容与准备](docs/PLATFORM_SUPPORT.zh-CN.md)
 - [独立请求网关](docs/REQUEST_GATEWAY.zh-CN.md)
 - [Roadmap](docs/ROADMAP.zh-CN.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
@@ -20,6 +21,7 @@ the product.
 - Sustained alerts, recovery messages, repeat limits and temporary notification mute via WeCom, DingTalk or email.
 - Docker container status, logs and management; image listing, search, pull and removal.
 - Edit existing host Docker mirror settings in the panel, with validation, backups and automatic activation.
+- Optional read-only MySQL/MariaDB and PostgreSQL workspace: encrypted connections, Docker address discovery, table data and structure, foreign-key relationship diagrams, filtering, restricted SELECT queries and current-result CSV. Install optional drivers and configure a dedicated SELECT account using the bundled database guide.
 - Discover websites and public certificates from local services, Docker configurations and common certificate directories, without initial proxy selection or path entry.
 - Local or Docker Nginx, business sites and uploaded PEM certificate management.
 - Request collection from supported Nginx/Caddy logs.
@@ -47,6 +49,14 @@ have been removed without deleting existing server configuration.
 Requirements: Linux with root/sudo, systemd, Python 3.10+ and Git to download
 mini_deploy itself. Docker and Nginx are optional, depending on the features used.
 No business repository or deployment credentials are needed.
+
+Recommended targets are Debian 12/13 and Ubuntu 22.04/24.04. Other systemd-based
+distributions require separate acceptance testing; Alpine/OpenRC and ordinary
+containers are not supported host installations. Run `bash install.sh --check`
+from the downloaded repository for a read-only prerequisite check. Existing Python
+3.10+ runtimes can be selected with `PYTHON_BIN`; system Python is never replaced.
+See the [platform guide](docs/PLATFORM_SUPPORT.zh-CN.md) for RPM distributions,
+Docker Engine repositories, SELinux and isolated SSH dependencies.
 
 The installer attempts to install the distribution's `python3-paramiko` package
 for SSH terminals. If unavailable, other panel features continue working.

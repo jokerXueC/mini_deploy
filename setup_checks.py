@@ -7,6 +7,8 @@ import sqlite3
 import time
 
 from certificates import trusted_path
+import host_platform
+import database_readonly
 
 
 def installation_commands(app, home, env, service, runtime, *, linux=True):
@@ -57,6 +59,15 @@ def snapshot(home, *, system, authenticated, ssh_available, ai, notifications,
     def add(key, title, state, detail, view, steps, *, optional=True, at=None, action='查看设置'):
         items.append(dict(key=key, title=title, state=state, detail=detail, view=view,
                           steps=steps, optional=optional, evidence_at=at, action=action))
+
+    host = host_platform.inspect_host()
+    add('platform', '系统兼容性', host['state'] if linux else 'unsupported',
+        host['detail'] if linux else '本地开发预览不能代替 Linux 主机安装验收。', 'setup',
+        ['推荐 Debian 12/13、Ubuntu 22.04/24.04；其他发行版显示待验证，不保证所有组件开箱即用。',
+         '标准安装需要 Linux、root、运行中的 systemd 和含 SQLite/SSL 的 Python 3.10+。',
+         '安装前可执行 bash install.sh --check，只检查环境，不安装软件或改配置。',
+         'SELinux 开启时保留策略；代理访问失败请按指南检查 AVC 日志，不关闭系统安全机制。'],
+        optional=False, action='查看安装指南')
 
     add('login', '面板登录', 'verified' if authenticated else 'error',
         '管理员口令与会话签名已配置。' if authenticated else '管理员口令或会话签名缺失。', 'server',
@@ -152,10 +163,18 @@ def snapshot(home, *, system, authenticated, ssh_available, ai, notifications,
         ['在安全中心开启所需防护，检查 SSH 日志是否可读、主机封禁是否生效及网站入口覆盖范围。',
          'SSH 主机封禁需要 nftables 与相应权限；不依赖安装 Fail2ban。',
          '本机限流无法抵挡超过服务器带宽的大规模攻击，需要云厂商或上游防护。'], action='查看防护范围')
+    db_dependencies = database_readonly.dependencies()
+    db_ready = db_dependencies['sql'] and all(db_dependencies[engine]['available'] for engine in ('mysql', 'postgres'))
+    add('databases', '数据库只读工作区', 'available' if db_ready else 'setup',
+        '驱动和加密组件可用；需提供只读账号并在数据库页面测试，未验证任何业务连接。' if db_ready else
+        '数据库为可选功能，缺少驱动或解析组件；按数据库指南在面板独立 Python 环境安装依赖。',
+        'databases', ['打开数据库使用指南，核对运行 Python 并安装可选组件。',
+                      '由数据库管理员创建只读账号，填写面板服务器可达的地址并测试。',
+                      '选择业务库与数据表，核验结构、数据或单条 SELECT；不要开放公网数据库端口。'], action='配置数据库')
     add('notifications', '异常通知', 'pending' if notifications else 'setup',
         '已启用通知渠道；需要发送测试确认投递，不会在检查时发送消息。' if notifications else '通知渠道尚未启用；不影响异常中心记录。',
         'notify', ['填写钉钉或邮件渠道，发送一次测试通知确认投递。',
                    '网站与接口异常还需添加相应监测目标；不要把主机在线等同于业务正常。'], action='配置并测试通知')
-    return {'generated_at': now, 'items': items, 'environment': 'Linux 主机' if linux else '本地开发环境',
+    return {'generated_at': now, 'items': items, 'environment': host['name'] if linux else '本地开发环境',
             'summary': {s: sum(item['state'] == s for item in items) for s in
                         ('verified', 'available', 'pending', 'setup', 'error', 'unsupported')}}

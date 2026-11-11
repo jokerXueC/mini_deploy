@@ -3,14 +3,14 @@
   if (!root) return;
   const el = id => document.getElementById(id);
   const labels = {verified: '已核验', available: '依赖就绪', pending: '待验证', setup: '按需配置', error: '需处理', unsupported: '当前环境不支持'};
-  const views = new Set(['server', 'requests', 'terminal', 'security', 'notify', 'events', 'certificates']);
+  const views = new Set(['server', 'requests', 'terminal', 'databases', 'security', 'notify', 'events', 'certificates']);
   const h = escapeHtml;
   let visible = false, timer = null, controller = null, sequence = 0;
   const expanded = new Set();
 
   function render(data) {
     const summary = data.summary || {};
-    el('setupSummary').textContent = `${summary.verified || 0} 项已核验 · ${summary.error || 0} 项需处理 · ${summary.pending || 0} 项待验证 · ${summary.setup || 0} 项可按需配置`;
+    el('setupSummary').textContent = `${summary.verified || 0} 项已核验 · ${summary.error || 0} 项需处理 · ${summary.pending || 0} 项待验证 · ${summary.setup || 0} 项可按需配置${summary.unsupported ? ` · ${summary.unsupported} 项环境不支持` : ''}`;
     const items = Array.isArray(data.items) ? data.items : [];
     const existing = [...el('setupItems').querySelectorAll('[data-setup-row]')];
     const byKey = new Map(items.map(item => [String(item.key), item]));
@@ -33,8 +33,8 @@
           const key = String(item.key || '');
           return `<article class="setup-row" data-state="${state}" data-setup-row="${h(key)}">
           <div class="setup-feature"><span class="setup-state" data-state="${state}">${labels[state]}</span><h4>${h(item.title)}</h4></div>
-          <div class="setup-evidence"><p>${h(item.detail)}</p><details data-setup-detail="${h(key)}" ${expanded.has(key) ? 'open' : ''}><summary>配置与验收步骤</summary><ol>${(item.steps || []).map(step => `<li>${h(step)}</li>`).join('')}</ol><button class="setup-guide-link" type="button" data-user-guide="${h(key)}">完整指引与命令</button></details></div>
-          <button class="ghost-button compact-action" type="button" data-setup-view="${h(views.has(item.view) ? item.view : 'server')}" data-setup-key="${h(key)}">${h(item.action || '查看设置')}</button>
+          <div class="setup-evidence"><p>${h(item.detail)}</p><details data-setup-detail="${h(key)}" ${expanded.has(key) ? 'open' : ''}><summary>配置与验收步骤</summary><ol>${(item.steps || []).map(step => `<li>${h(step)}</li>`).join('')}</ol><button class="setup-guide-link" type="button" data-user-guide="${h(key === 'platform' ? 'install' : key)}">完整指引与命令</button></details></div>
+          <button class="ghost-button compact-action" type="button" ${key === 'platform' ? 'data-user-guide="install"' : `data-setup-view="${h(views.has(item.view) ? item.view : 'server')}"`} data-setup-key="${h(key)}">${h(item.action || '查看设置')}</button>
           </article>`;
         }).join('')}</section>`;
       }).join('');

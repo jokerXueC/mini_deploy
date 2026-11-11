@@ -19,6 +19,7 @@ env_file_value() {
       if (separator == 0) next
       name = substr($0, 1, separator - 1)
       value = substr($0, separator + 1)
+      sub(/\r$/, "", value)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       if (name != wanted) next
@@ -47,10 +48,33 @@ CONFIG_FILE="$SITES_FILE"
 if [[ ! -e "$SITES_FILE" && ! -L "$SITES_FILE" ]]; then
   CONFIG_FILE="$PROJECTS_FILE"
 fi
-PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
-if [[ -n "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="$(readlink -f -- "$PYTHON_BIN")"
+runtime_config_is_trusted() {
+  local current="$ENV_FILE" owner mode
+  [[ "$current" == /* && -f "$current" && ! -L "$current" ]] || return 1
+  [[ "$(readlink -m -- "$current")" == "$current" ]] || return 1
+  [[ "$(stat -c '%h' -- "$current")" == 1 ]] || return 1
+  while true; do
+    [[ ! -L "$current" && -e "$current" ]] || return 1
+    owner="$(stat -c '%u' -- "$current")"
+    mode="$(stat -c '%a' -- "$current")"
+    [[ "$owner" == 0 ]] && (( (8#$mode & 022) == 0 )) || return 1
+    [[ "$current" == / ]] && break
+    current="$(dirname -- "$current")"
+  done
+}
+
+if [[ -z "${PYTHON_BIN:-}" && -f "$ENV_FILE" ]]; then
+  if runtime_config_is_trusted; then
+    PYTHON_BIN="$(env_file_value DEPLOY_AGENT_PYTHON_BIN)"
+  else
+    echo '[FAIL] Untrusted environment file; refusing to execute its saved Python runtime.' >&2
+    exit 1
+  fi
 fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/python-runtime.sh
+source "$SCRIPT_DIR/python-runtime.sh"
+PYTHON_BIN="$(select_python)" || PYTHON_BIN=""
 
 ok=0
 warn=0
@@ -70,6 +94,13 @@ check_file "$APP_HOME/ui/index.html" "UI"
 check_file "$CONFIG_FILE" "sites config (including legacy fallback)"
 check_file "$ENV_FILE" "environment file"
 check_file "$APP_HOME/systemd/mini-deploy-agent.service" "systemd unit source"
+if [[ -n "$PYTHON_BIN" && -f "$APP_HOME/host_platform.py" ]]; then
+  if "$PYTHON_BIN" "$APP_HOME/host_platform.py" --check; then
+    pass "host prerequisites"
+  else
+    bad "host prerequisites are not satisfied"
+  fi
+fi
 
 if [[ -f "$CONFIG_FILE" ]]; then
   if [[ -z "$PYTHON_BIN" ]]; then

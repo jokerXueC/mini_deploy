@@ -76,6 +76,7 @@ import prometheus_metrics
 import panel_maintenance
 import ssh_files
 import setup_checks
+import database_readonly
 
 RUNNING_RELEASE = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 AGENT_STARTED_AT = time.time()
@@ -164,6 +165,7 @@ UI_SESSION_TTL_SECONDS = int(os.getenv("DEPLOY_UI_SESSION_TTL_SECONDS", str(24 *
 COOKIE_SECURE_MODE = os.getenv("DEPLOY_COOKIE_SECURE", "auto").strip().lower()
 COOKIE_NAME = "mini_deploy_session"
 TERMINAL_HTTP_COOKIE = "mini_deploy_terminal_http"
+DATABASE_HTTP_COOKIE = "mini_deploy_database_http"
 PASSWORD_HASH_ITERATIONS = 260_000
 MIN_PASSWORD_HASH_ITERATIONS = 200_000
 MAX_PASSWORD_HASH_ITERATIONS = 2_000_000
@@ -3038,6 +3040,12 @@ UI_ASSET_TYPES = {
 }
 UI_ASSET_TYPES.update({'request-export.js': 'application/javascript; charset=utf-8',
                        'request-export.css': 'text/css; charset=utf-8'})
+UI_ASSET_TYPES.update({'databases.js': 'application/javascript; charset=utf-8',
+                       'database-graph.js': 'application/javascript; charset=utf-8',
+                       'vendor/cytoscape.min.js': 'application/javascript; charset=utf-8',
+                       'vendor/dagre.min.js': 'application/javascript; charset=utf-8',
+                       'vendor/cytoscape-dagre.js': 'application/javascript; charset=utf-8',
+                       'databases.css': 'text/css; charset=utf-8'})
 UI_ASSET_TYPES.update({'server-performance.js': 'application/javascript; charset=utf-8',
                        'server-performance-panel.css': 'text/css; charset=utf-8',
                        'server-overview.js': 'application/javascript; charset=utf-8',
@@ -3131,7 +3139,90 @@ def _ssh_manager():
         return _ssh_manager_instance
 
 
+_database_manager_instance = None
+_database_manager_lock = threading.Lock()
+
+
+def _database_manager():
+    global _database_manager_instance
+    with _database_manager_lock:
+        if _database_manager_instance is None or _database_manager_instance.profiles.home != STATE_FILE.parent / 'databases':
+            _database_manager_instance = database_readonly.Manager(STATE_FILE.parent)
+        return _database_manager_instance
+
+
 class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
+    def _database_grant(self):
+        session = self._session_cookie_value()
+        material = f"database-http-v1:{session}:{self.headers.get('Host', '')}"
+        return hmac.new(UI_SESSION_SECRET.encode(), material.encode(), hashlib.sha256).hexdigest() if session else ''
+
+    def _database_http_enabled(self):
+        jar = cookies.SimpleCookie()
+        try:
+            jar.load(self.headers.get('Cookie', ''))
+        except cookies.CookieError:
+            return False
+        grant = jar.get(DATABASE_HTTP_COOKIE)
+        return bool(grant and self._database_grant() and _constant_time_equal(grant.value, self._database_grant()))
+
+    def _handle_databases(self, path, parsed):
+        if not self._require_auth_json():
+            return
+        try:
+            manager = _database_manager()
+            owner = database_readonly.owner(self._session_cookie_value())
+            secure, allowed_http = self._ssh_secure(), self._database_http_enabled()
+            if self.command == 'GET' and path == '/databases':
+                self._write_json(200, {**manager.snapshot(), 'secure': secure, 'http_enabled': allowed_http,
+                                       'csrf_token': self._csrf_token_for_request()})
+                return
+            data = None
+            if self.command == 'POST':
+                origin = urlparse(self.headers.get('Origin', ''))
+                if origin.scheme not in {'http', 'https'} or origin.netloc != self.headers.get('Host', ''):
+                    raise database_readonly.DatabaseError('请求来源无效，请刷新面板重试。', 403)
+                data = _read_json_body(self, max_bytes=96 * 1024)
+                if path == '/databases/allow-http':
+                    if data.get('consent') is not True:
+                        raise database_readonly.DatabaseError('请确认已了解 HTTP 会明文传输数据库凭据和查询结果。')
+                    _audit_event('database_http_allowed', actor=_request_client_ip(self), success=True)
+                    self._write_json(200, {'http_enabled': True}, headers={'Set-Cookie':
+                        f'{DATABASE_HTTP_COOKIE}={self._database_grant()}; Path=/; HttpOnly; SameSite=Strict'})
+                    return
+            if not (secure or allowed_http):
+                raise database_readonly.DatabaseError('请使用 HTTPS / 本地隧道，或先确认本次登录允许通过 HTTP 访问数据库。', 403)
+            if self.command == 'GET' and path == '/databases/job':
+                key = parse_qs(parsed.query).get('id', [''])[0]
+                self._write_json(200, manager.job(owner, key))
+                return
+            if self.command != 'POST':
+                raise database_readonly.DatabaseError('不支持的数据库接口。', 404)
+            action = data.get('action')
+            if path == '/databases/cancel':
+                result = manager.cancel(owner, data.get('job'))
+            elif path == '/databases/discover':
+                result = database_readonly.discover()
+            elif path == '/databases' and action == 'save':
+                with _maintenance_shared_lock():
+                    result = {'connection': manager.profiles.save(data)}
+            elif path == '/databases' and action == 'remove':
+                with _maintenance_shared_lock():
+                    manager.profiles.remove(data.get('id'), data.get('revision'))
+                result = {'removed': True}
+            elif path == '/databases/test':
+                result = manager.start(owner, data, draft=True)
+            elif path == '/databases/query':
+                result = manager.start(owner, data)
+            else:
+                raise database_readonly.DatabaseError('不支持的数据库操作。', 404)
+            _audit_event('database_operation', actor=_request_client_ip(self), success=True,
+                         detail={'action': action if action in {'save', 'remove'} else path.rsplit('/', 1)[-1]})
+            self._write_json(202 if path in {'/databases/test', '/databases/query'} else 200, result)
+        except (ValueError, OSError, RuntimeError, _MaintenanceLockError) as exc:
+            detail = str(exc) if isinstance(exc, database_readonly.DatabaseError) else '数据库操作未完成，请检查面板数据目录权限或稍后重试。'
+            self._write_json(getattr(exc, 'status', 503), {'error': 'database_failed', 'detail': detail})
+
     def _terminal_http_grant(self):
         cookie = self._session_cookie_value()
         if not cookie:
@@ -3738,6 +3829,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path in {'/databases', '/databases/job'}:
+            self._handle_databases(path, parsed)
+            return
         if path == '/security/protection':
             if self._require_auth_json():
                 try:
@@ -4099,6 +4193,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         path = _normal_path(parsed.path)
+        if path == '/databases' or path.startswith('/databases/'):
+            self._handle_databases(path, parsed)
+            return
         if path == '/security/protection':
             if self._require_auth_json():
                 try:

@@ -22,7 +22,7 @@ def test_guide_topics_search_copy_download_and_layout(browser_page, tmp_path, wi
     page.set_viewport_size({'width': width, 'height': 900})
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
     page.locator('#userGuideOpen').click()
-    playwright.expect(page.locator('#userGuideNav a')).to_have_count(19)
+    playwright.expect(page.locator('#userGuideNav a')).to_have_count(20)
     page.locator('[data-guide-link=local]').click()
     playwright.expect(page.locator('[data-guide-topic=local]')).to_contain_text('/srv/custom-panel')
     # Simulate HTTP/denied clipboard access; fallback must live inside the modal.
@@ -35,7 +35,8 @@ def test_guide_topics_search_copy_download_and_layout(browser_page, tmp_path, wi
     playwright.expect(page.locator('#userGuideFeedback')).to_contain_text('已复制')
     page.locator('#userGuideSearch').fill('nftables')
     playwright.expect(page.locator('[data-guide-topic=security]')).to_be_visible()
-    playwright.expect(page.locator('[data-guide-topic=install]')).to_be_hidden()
+    playwright.expect(page.locator('[data-guide-topic=install]')).to_be_visible()
+    playwright.expect(page.locator('[data-guide-topic=resources]')).to_be_hidden()
     page.locator('#userGuideSearch').fill('definitely-no-matching-guide-topic')
     playwright.expect(page.locator('#userGuideEmpty')).to_be_visible()
     page.locator('#userGuideSearch').fill('')

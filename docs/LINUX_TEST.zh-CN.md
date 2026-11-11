@@ -1,10 +1,31 @@
 # Linux 实测清单
 
-实现已完成：全量自动化测试 476 通过、19 跳过（缺少 Linux/Docker 环境），另有真实后端站点 UI 增改删测试通过。Linux 实机验收尚未执行；以下是待执行清单，不是实测报告。
+以下是待执行的 Linux 实机验收清单，不是实测报告。自动化测试数量随版本变化，应以对应提交的实际测试输出为准；本地单元测试和浏览器验证不能代替整机安装验收。
 
 使用专用、可丢弃的 Linux 测试机，记录发行版、Python/Docker/Nginx 版本和待验收提交号。
 
 仅测试面板安装、运维和请求监控。不创建真实业务部署任务、不 push、不删除服务器业务数据。所有变更使用隔离测试站点、容器和端口。
+
+## 0. 系统兼容性与只读预检
+
+按[系统兼容范围](PLATFORM_SUPPORT.zh-CN.md)逐项记录；下表仅列验收目标，不代表已通过。
+
+| 系统 | 重点 | 整机结果 |
+| --- | --- | --- |
+| Debian 12 / 13 | 默认 Python、APT、systemd | 待执行 |
+| Ubuntu 22.04 / 24.04 | Python、UFW、已有业务入口 | 待执行 |
+| Rocky / AlmaLinux / RHEL 9 | 系统 Python 3.9 与并行 3.11、DNF、SELinux enforcing | 待执行 |
+| RHEL 10 / Fedora | 新版 Python、实际 Docker Engine 包、SELinux enforcing | 待执行 |
+| Alpine / OpenRC / 普通容器 | 标准安装应明确拒绝，不能创建服务或目录 | 待执行 |
+
+- 安装前执行 `bash install.sh --check`，对照 PID 1、`/proc`、root、Python SQLite/SSL 与 SELinux 状态；检查不应创建锁、安装目录、服务或改写配置。
+- 默认 Python 不满足要求时，验证选择已有新版或显式 `PYTHON_BIN`；不能替换系统 Python。无可用版本时应给出准备说明并停止。
+- 用独立 `venv --copies` 安装 SSH 依赖，核对生成的 systemd `ExecStart`、升级、面板备份和 `doctor.sh` 使用同一个解释器。再次升级不传 `PYTHON_BIN` 也应沿用已保存路径。
+- 显式指定损坏的 Python 或不安全的环境文件时应拒绝，不能偷偷换运行环境。
+- Docker 包不存在、仓库不可达、引擎启动失败和 Podman 兼容命令均不得误报就绪；基础面板应能启动，未就绪功能应有指引。
+- 保留已有 Docker 和业务 Nginx/Caddy；`SETUP_HTTPS=no` 不应安装 Certbot。
+- SELinux enforcing 保持开启，核对实际代理访问、数据目录写入、证书读取与 AVC；不能以关闭策略代替通过。
+- 每个目标记录 x86_64/aarch64 的实际验证架构，不用一种架构的结果推断全部架构。
 
 ## 1. 安装与登录
 

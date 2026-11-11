@@ -4,6 +4,7 @@ mini_deploy 是服务器运维与请求监控面板。完整的新手指引在[�
 
 ## 按问题直达
 
+- [Linux 发行版、Python 与 SELinux 兼容说明](PLATFORM_SUPPORT.zh-CN.md)
 - [首次安装](../ui/user-guide.md#install) · [打不开网页与 HTTPS](../ui/user-guide.md#access) · [密码与路径](../ui/user-guide.md#login)
 - [资源监控](../ui/user-guide.md#resources) · [性能历史与报告](../ui/user-guide.md#history) · [Docker 与日志](../ui/user-guide.md#docker)
 - [请求记录、地图与手动接入](../ui/user-guide.md#requests) · [域名证书](../ui/user-guide.md#certificates)

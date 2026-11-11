@@ -1,5 +1,23 @@
 # Third-Party Notices
 
+## Optional Database Runtime Dependencies
+
+The read-only relationship view bundles Cytoscape.js 3.33.1, @dagrejs/dagre 1.1.5
+(including @dagrejs/graphlib 2.2.4), and cytoscape-dagre 2.5.0 from their npm
+distributions. All use the MIT license. Their complete notices are preserved in
+`ui/vendor/cytoscape-LICENSE.txt`, `ui/vendor/dagre-LICENSE.txt`,
+`ui/vendor/graphlib-LICENSE.txt`, and `ui/vendor/cytoscape-dagre-LICENSE.txt`.
+The view loads these local assets on demand and makes no external diagram requests.
+
+The database workspace installs these separately through `ui/requirements-database.txt`:
+
+- PyMySQL (MIT): https://github.com/PyMySQL/PyMySQL
+- psycopg2 (LGPL with exceptions; binary distribution includes its own notices): https://www.psycopg.org/docs/license.html
+- cryptography (Apache-2.0 or BSD-3-Clause): https://github.com/pyca/cryptography
+- SQLGlot (MIT): https://github.com/tobymao/sqlglot
+
+These packages are not vendored in this repository. Their installed distributions retain their respective license files.
+
 ## Natural Earth
 
 `ui/world-land.geojson` contains Natural Earth 1:110m land geometry (public domain).

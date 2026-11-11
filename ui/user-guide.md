@@ -20,17 +20,111 @@ mini_deploy 管理已经运行的 Linux 服务器和业务。它不会替你购�
 | 域名、证书 | 自动扫描已有配置 | DNS、云安全组、证书申请与续期需验证 |
 | SSH、远程文件 | 依赖 Paramiko 与目标 SSH | 提供账号并核对指纹 |
 | AI 运维 | 需要自己的模型服务 | 配置模型、测试连接、授权本轮操作 |
+| 数据库只读工作区 | 需要可选驱动和数据库账号 | 安装依赖、提供只读账号、测试连接 |
 | 登录防护 | 默认启用内置失败阈值策略 | SSH 拦截还需 nftables、有效日志和识别出的 SSH 端口 |
 | 基础防护 | 默认关闭 | 主动开启并逐项核对生效范围 |
 | 外部通知 | 默认未配置 | 填写渠道并发送测试 |
 
 「依赖就绪」「已保存配置」「待验证」不等于故障，也不等于端到端成功。没有业务网站就无需把网站相关项全部变绿。
 
+<h2 id="databases">数据库只读工作区</h2>
+
+初版支持 MySQL / MariaDB 和 PostgreSQL：保存连接、发现本机 Docker 数据库地址、查看库表、字段与索引、筛选排序和分页浏览、只读关系视图、单条只读 SQL、取消查询、导出当前页或当前 SQL 结果 CSV。没有编辑数据、执行脚本、建表或删除数据库的入口；移除连接只移除面板配置。
+
+### 关系视图
+
+选择数据库后点击「关系视图」，按数据库实际声明的外键绘制表之间的引用。箭头从外键所在表指向被引用表；PK 为主键、FK 为外键。复合外键和自关联也会显示。只有相同名称的 `user_id`、`order_id` 等字段不会自动连线；未声明外键的表保留为独立节点。图表示结构引用，不表示实时查询流量或程序中的全部业务关联。
+
+可搜索或定位表、按 Schema 缩小范围、只看有关联的表；支持拖动表、平移画布、缩放、展开视图、导出 PNG。选择表后查看全部已载入字段和关联外键，再进入数据或结构页。点击外键可核对两端字段映射与更新/删除规则；这里只展示规则，不执行规则或修改约束。
+
+关系图只读取元数据，不扫描业务数据。只读账号只能画出当前有权限查看的表；引用表在其他库、其他 Schema 筛选范围或没有权限时，会提示未绘制的引用数量。一次最多载入 500 张表、10000 个字段和 5000 条键列记录，超出会明确提示不完整；可按 Schema 缩小范围。表节点展示前 10 个字段，其他已载入字段在详情查看。图谱组件随面板安装，不向外部服务发送数据库结构。
+
+### 安装可选组件
+
+数据库驱动不随基础安装强制安装。缺少依赖时数据库页会显示指引，其他面板功能继续使用。在面板服务器执行，先确认实际安装目录和 Python：
+
+```bash
+systemctl show mini-deploy-agent --property=WorkingDirectory --property=ExecStart --no-pager
+```
+
+如果面板**已经使用专用虚拟环境**，用该环境的绝对路径执行以下命令（替换 `/opt/mini-deploy-runtime` 和面板目录）：
+
+```bash
+/opt/mini-deploy-runtime/bin/python -m pip install -r /opt/mini_deploy/ui/requirements-database.txt
+/opt/mini-deploy-runtime/bin/python -c 'import pymysql, psycopg2, cryptography, sqlglot; print("database dependencies ready")'
+systemctl restart mini-deploy-agent
+```
+
+如果面板当前使用系统 Python，先建立独立环境，避免修改系统包。Debian/Ubuntu 先执行 `apt-get update && apt-get install -y python3-venv`；其他系统参考 SSH 章节的 Python 3.11 运行环境准备步骤。下例在已安装面板目录执行，逐行检查成功后继续；已有 `/opt/mini-deploy-runtime` 时先核对其用途，不覆盖其他项目：
+
+```bash
+cd /opt/mini_deploy
+test ! -e /opt/mini-deploy-runtime && python3 -m venv --copies /opt/mini-deploy-runtime
+/opt/mini-deploy-runtime/bin/python -m pip install -r requirements-ssh.txt -r ui/requirements-database.txt
+/opt/mini-deploy-runtime/bin/python -c 'import sqlite3, ssl, paramiko, pymysql, psycopg2, cryptography, sqlglot; print("runtime ready")'
+PYTHON_BIN=/opt/mini-deploy-runtime/bin/python SETUP_NGINX=no SETUP_HTTPS=no SETUP_DOCKER=no bash install.sh
+```
+
+服务名称或路径自定义时，以「本机排查命令」为准。依赖安装失败先处理错误，不使用 `--break-system-packages`；虚拟环境不包含在面板数据备份中，迁移时需重建。
+
+### 准备只读账号
+
+请使用独立的 SELECT 账号，不使用 root、Postgres 超级用户或业务写入账号。面板会检查 SQL 并开启只读事务，账号授权是额外的数据库侧边界；已有视图、策略、自定义类型和函数也可能包含数据库端逻辑，应仅授权可信业务对象。以下授权命令由数据库管理员执行一次，会创建账号和修改授权；不在面板 SQL 编辑器执行。
+
+PostgreSQL：先连接**要查看的业务库**，将 `业务库`、`业务schema`、`业务表所有者`、`替换为随机强密码` 换成真实值。授权只影响指定库和 Schema；多个 Schema 分别授权。账户已存在时跳过 CREATE ROLE：
+
+```sql
+CREATE ROLE panel_reader LOGIN PASSWORD '替换为随机强密码';
+GRANT CONNECT ON DATABASE "业务库" TO panel_reader;
+GRANT USAGE ON SCHEMA "业务schema" TO panel_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA "业务schema" TO panel_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE "业务表所有者" IN SCHEMA "业务schema" GRANT SELECT ON TABLES TO panel_reader;
+```
+
+最后一行仅覆盖指定所有者以后创建的表。不要授予写权限、创建 Schema 权限或高权限角色成员资格。PostgreSQL 连接中的默认数据库填写业务库；库列表仅表示允许连接，不保证每个库都有可读表。
+
+MySQL / MariaDB：将库名、密码和**面板来源 IP** 换成真实值；容器数据库看到的来源可能是 Docker 网桥地址，不能直接照抄 `127.0.0.1`，也不建议开放 `%`：
+
+```sql
+CREATE USER 'panel_reader'@'面板来源IP' IDENTIFIED BY '替换为随机强密码';
+GRANT SELECT, SHOW VIEW ON `业务库`.* TO 'panel_reader'@'面板来源IP';
+```
+
+如果数据库在 Docker 中，可由管理员用 `docker exec -it 容器名 psql -U 管理账号 -d 业务库` 或 `docker exec -it 容器名 mysql -u 管理账号 -p` 进入，再执行授权。不要把密码写进命令行或截图。
+
+### 建立连接与验证
+
+1. 打开「数据库」→「新建连接」，或点击「发现本机数据库」。自动发现只读取镜像、名称、端口和网络地址，不读取容器环境变量或业务密码。
+2. 地址相对于**面板服务器**，不是浏览器所在手机或电脑。只检测面板所在主机的 Docker，不自动通过 SSH 读取其他主机数据库；远程数据库需要该服务器可达的地址或管理员预先建立的隧道。
+3. 填写只读账号、密码和默认数据库。公网或跨不可信网络保持 TLS 开启；自签名证书填写 CA PEM。不要为了使用面板把数据库端口开放到公网。本机回环或可信隔离网络确认后可关闭数据库 TLS。
+4. 点击测试连接，成功后保存，再点击连接。选择数据库、数据表，用「数据 / 结构 / SQL」查看；所有标识符和筛选值按目标数据库处理。
+5. SQL 仅接受单条 SELECT 和只读 WITH，支持常见聚合与窗口函数；不支持任意 SQL、存储函数、文件或网络调用、锁表和管理语句。被拒绝时页面会说明原因。
+
+浏览器到面板的 HTTPS 与面板到数据库的 TLS 是两条独立链路。公网 HTTP 会明文传输连接凭据和查询结果；数据库页面需要单独确认本次登录允许 HTTP，SSH 页面的确认不会自动授予数据库权限。推荐 HTTPS 或本地隧道。
+
+### 结果与凭据保存
+
+表数据每页 50 行；SQL 最多返回 200 行、256 列，单元格长文本截断，单次结果最多约 2 MiB。数据库语句超时约 15 秒，连接超时 5 秒；取消中断本次连接，不终止其他业务会话。这些是保护服务器的查询限制，不影响 AI 模型响应长度。
+
+分页采用 OFFSET；并发写入或排序字段不唯一时，跨页结果可能变化。触及结果大小上限会停止继续翻页并提示缩小字段范围。CSV 仅导出**已读取的当前结果**，不是全库备份；导出保留可见值，NULL 使用空字段，长文本或二进制可能已截断/转换，文本公式会加前导单引号。
+
+密码加密保存在数据目录 `databases/connections.json`，解密密钥为同目录 `credentials.key`；两者都需随面板数据一起备份，丢失密钥不能恢复密码。加密用于保护静态凭据，不能防止拥有面板服务器权限的人读取。页面和审计记录不回显已保存密码。查询结果仅在服务内存短期保留约 5 分钟并绑定当前登录会话，关闭页面不会形成持久 SQL 历史；下载后的文件自行妥善保管。
+
 <h2 id="install">安装与首次登录</h2>
 
 ### 1. 准备服务器
 
 推荐先使用 Debian 12/13 或 Ubuntu 22.04/24.04 的普通云服务器。运行环境必须有 systemd、root 权限和 Python 3.10 以上；不要直接在不运行 systemd 的普通 Docker 容器里安装面板。其他发行版先确认相同前提，尚未完成所有发行版实机验收。
+
+Rocky/AlmaLinux/RHEL、Fedora 等 systemd 系统属于条件兼容，显示「待验证」，不承诺全部组件开箱即用。Alpine/OpenRC、OpenWrt、普通 Docker/Podman 容器不支持标准主机安装。Windows/macOS 只用于本地开发预览。x86_64 和 ARM64 应分别核对软件包、容器镜像和整机验收结果。
+
+下载仓库后，可在仓库目录先执行只读预检，不安装软件、不改配置、不启动或停止服务：
+
+```bash
+bash install.sh --check
+```
+
+预检通过不等于云安全组、域名、SSH、防护或网站采集均已开启。安装后的「功能检查 → 系统兼容性」展示实际系统、解释器及兼容限制。
 
 在 Debian/Ubuntu 执行基础依赖安装：
 
@@ -47,6 +141,39 @@ df -h /opt /var
 ```
 
 Python 应至少为 3.10，PID 1 应为 systemd，程序和数据磁盘都应有剩余空间。旧发行版优先升级操作系统；不要随意替换系统 Python 或给系统 Python 强制执行 pip 安装。
+
+### RPM 系与并行 Python
+
+Rocky/AlmaLinux/RHEL/Fedora 先准备基础工具：
+
+```bash
+dnf install -y bash git curl ca-certificates util-linux coreutils tar
+```
+
+RHEL 9 系常见默认 Python 为 3.9；在发行版仓库提供对应包时并行安装 3.11。新版本系统已有合适的默认 Python 时不用重复安装：
+
+```bash
+dnf install -y python3.11 python3.11-pip
+/usr/bin/python3.11 -c 'import sqlite3, ssl; print("Python prerequisites OK")'
+PYTHON_BIN=/usr/bin/python3.11 bash install.sh --check
+PYTHON_BIN=/usr/bin/python3.11 SETUP_NGINX=no SETUP_HTTPS=no bash install.sh
+```
+
+找不到包先核对系统版本、订阅与已启用仓库，不混装其他发行版的软件包。安装器会选择已有的合适解释器，并记录到 `/etc/mini-deploy-agent.env` 的 `DEPLOY_AGENT_PYTHON_BIN`，升级沿用；显式指定错误解释器时会停止，不静默换回系统 Python。
+
+DNF/YUM 下仅从已配置的仓库选择 `docker-ce` 或 `moby-engine`；不添加第三方仓库，也不把 `podman-docker` 当成 Docker Engine。找不到引擎包时基础面板继续安装，Docker 显示未就绪；按当前发行版的官方说明安装引擎后，再到功能检查核验。
+
+### SELinux 与可选组件
+
+SELinux enforcing 会被明确提示，安装器不会关闭策略。若出现 Nginx 502、Permission denied 或自定义目录不可读，先检查 AVC 日志：
+
+```bash
+getenforce
+ausearch -m AVC,USER_AVC -ts recent
+journalctl -u nginx -n 80 --no-pager -l
+```
+
+没有 `ausearch` 时需安装发行版 audit 工具。由管理员按实际拒绝原因处理网络访问和文件上下文，不直接关闭 SELinux 或应用宽泛允许规则。SSH 封禁需要 nftables；RPM 系可按需执行 `dnf install -y nftables`，不主动替换既有防火墙服务。Docker/SSH 依赖失败会在安装结果明确列出；面板健康通过不代表这些功能已经就绪。
 
 ### 2. 下载并安装
 
@@ -243,6 +370,8 @@ docker logs --timestamps --tail 80 容器名称
 
 镜像拉取失败先检查服务器到镜像仓库的网络和账号权限。镜像加速填写你实际可用的服务地址，保存后按页面提示验证；有运行容器且不能安全重启 Docker 时，页面会要求进一步处理。拉取镜像不等于业务容器已经升级。
 
+DNF/YUM 只能安装当前仓库已有的 Docker Engine 包。可分别用 `docker --version`、`systemctl status docker --no-pager -l`、`docker --host unix:///var/run/docker.sock info` 核对 CLI、服务和本机引擎；安装了 Podman 或只有 Docker CLI 不等于 Docker Engine 可用。
+
 <h2 id="requests">请求记录、地图与导出</h2>
 
 ### 推荐接入流程
@@ -391,6 +520,19 @@ apt-get update && apt-get install -y python3-paramiko && systemctl restart mini-
 ```
 
 使用「本机排查命令」检查实际运行 Python 的导入结果。若使用自定义 Python/虚拟环境，发行版包可能不在它的搜索路径中；在已有专用虚拟环境中执行其 `bin/python -m pip install -r /实际面板目录/requirements-ssh.txt`，再重启面板。不要对受系统管理的 Python 使用 `--break-system-packages`。
+
+RPM 系并行 Python 无法使用发行版 Paramiko 时，可给面板建立独立运行环境。先按安装章节准备 `/usr/bin/python3.11` 和 pip；Debian/Ubuntu 使用默认 Python 时先安装 `python3-venv`，将下面的 `/usr/bin/python3.11` 换成 `python3`。在已下载的面板仓库目录执行（目录内应有 `install.sh`、`requirements-ssh.txt`）：
+
+```bash
+test ! -e /opt/mini-deploy-runtime && /usr/bin/python3.11 -m venv --copies /opt/mini-deploy-runtime
+/opt/mini-deploy-runtime/bin/python -m pip install -r requirements-ssh.txt
+/opt/mini-deploy-runtime/bin/python -c 'import sqlite3, ssl, paramiko; print(paramiko.__version__)'
+PYTHON_BIN=/opt/mini-deploy-runtime/bin/python SETUP_NGINX=no SETUP_HTTPS=no bash install.sh
+```
+
+每步成功后再执行下一步。独立目录已存在时先确认归属，不覆盖其他项目；`--copies` 避免解析软链接后脱离虚拟环境。安装器重新生成服务并记录解释器路径，后续升级沿用。网络或依赖安装失败时先处理错误，不强制修改系统 Python。
+
+面板备份不包含独立 Python 环境或系统软件包；迁移主机时需要先重建同路径的运行环境和依赖，再恢复并验证面板服务。
 
 ### 建立连接
 

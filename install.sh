@@ -13,6 +13,15 @@ SERVICE_NAME_EXPLICIT="false"
 [[ -n "${DATA_HOME:-}" ]] && DATA_HOME_EXPLICIT="true"
 [[ -n "${LOG_HOME:-}" ]] && LOG_HOME_EXPLICIT="true"
 [[ -n "${SERVICE_NAME:-}" ]] && SERVICE_NAME_EXPLICIT="true"
+PYTHON_BIN_EXPLICIT="false"
+[[ -n "${PYTHON_BIN:-}" ]] && PYTHON_BIN_EXPLICIT="true"
+INSTALL_CHECK_ONLY="false"
+if [[ "${1:-}" == "--check" && "$#" == "1" ]]; then
+  INSTALL_CHECK_ONLY="true"
+elif (( $# > 0 )); then
+  echo "Usage: bash install.sh [--check]" >&2
+  exit 1
+fi
 
 APP_HOME="${APP_HOME:-/opt/mini_deploy}"
 ENV_FILE="${ENV_FILE:-/etc/mini-deploy-agent.env}"
@@ -55,30 +64,20 @@ if [[ ! "$SERVICE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]*$ ]]; then
   exit 1
 fi
 
-for command in awk dirname find flock grep install mktemp mv python3 readlink sha256sum stat systemd-analyze tar; do
+for command in awk dirname find flock grep install mktemp mv readlink sha256sum stat systemd-analyze tar; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "缺少安装依赖 / Missing installer dependency: $command" >&2
     exit 1
   fi
 done
-PYTHON_BIN="$(readlink -f -- "$(command -v python3)")"
-if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
-  echo "Python 版本过低，需要 Python 3.10 或更高版本 / Python 3.10 or newer is required." >&2
-  exit 1
-fi
-
-RELEASE_MANIFEST="$("$PYTHON_BIN" - "$SOURCE_DIR/release.json" <<'PY'
-import json, re, sys
-entries = json.load(open(sys.argv[1], encoding='utf-8'))['program_entries']
-if not isinstance(entries, list) or not entries or len(entries) != len(set(entries)):
-    raise SystemExit('Invalid release manifest')
-for entry in entries:
-    if not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', entry) or any(p.startswith('.') for p in entry.split('/')):
-        raise SystemExit('Unsafe release entry')
-print('\n'.join(entries))
-PY
-)"
-mapfile -t RELEASE_ENTRIES <<< "$RELEASE_MANIFEST"
+for required in scripts/python-runtime.sh host_platform.py; do
+  if [[ ! -f "$SOURCE_DIR/$required" ]]; then
+    echo "安装包不完整，请重新下载完整仓库 / Incomplete installation package: $required" >&2
+    exit 1
+  fi
+done
+# shellcheck source=scripts/python-runtime.sh
+source "$SOURCE_DIR/scripts/python-runtime.sh"
 
 for path in "$APP_HOME" "$ENV_FILE" "$DATA_HOME" "$LOG_HOME" "$INSTALL_BACKUP_DIR" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   if [[ "$path" != /* ]]; then
@@ -90,14 +89,6 @@ done
 for path in "$ENV_FILE" "$SERVICE_FILE" "$NGINX_CONF_FILE"; do
   if [[ -L "$path" ]]; then
     echo "控制配置路径不能是符号链接 / Control file path must not be a symbolic link: $path" >&2
-    exit 1
-  fi
-done
-
-for required in "${RELEASE_ENTRIES[@]}"; do
-  if [[ "$required" == "ui" && ! -d "$SOURCE_DIR/$required" ]] \
-    || [[ "$required" != "ui" && ! -f "$SOURCE_DIR/$required" ]]; then
-    echo "安装包不完整 / Incomplete installation package: $required" >&2
     exit 1
   fi
 done
@@ -1300,7 +1291,7 @@ EOF
   printf '%s\n' "$admin_password" | \
     MINI_DEPLOY_HOME="$APP_HOME" \
     DEPLOY_AGENT_ENV_FILE="$ENV_FILE" \
-      python3 "$APP_HOME/agent.py" set-password-stdin
+      "$PYTHON_BIN" "$APP_HOME/agent.py" set-password-stdin
   admin_password=""
   admin_password_confirm=""
 
@@ -1401,12 +1392,11 @@ install_nginx_if_missing() {
     fi
   fi
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y nginx
+    apt-get update && apt-get install -y nginx || return 1
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y nginx
+    dnf install -y nginx || return 1
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y nginx
+    yum install -y nginx || return 1
   else
     if is_en; then
       echo "No supported package manager found. Please install nginx manually first."
@@ -1415,8 +1405,8 @@ install_nginx_if_missing() {
     fi
     return 1
   fi
-  systemctl enable nginx
-  systemctl start nginx
+  systemctl enable nginx && systemctl start nginx || return 1
+  command -v nginx >/dev/null 2>&1
 }
 
 install_certbot_if_missing() {
@@ -1427,16 +1417,15 @@ install_certbot_if_missing() {
   if is_en; then
     prompt="Certbot was not found. Install it automatically now for HTTPS certificates?"
   fi
-  if ! ask_yes_no "$prompt" "n"; then
+  if [[ "$SETUP_HTTPS" != "yes" ]] && ! ask_yes_no "$prompt" "n"; then
     return 1
   fi
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y certbot python3-certbot-nginx
+    apt-get update && apt-get install -y certbot python3-certbot-nginx || return 1
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y certbot python3-certbot-nginx
+    dnf install -y certbot python3-certbot-nginx || return 1
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y certbot python3-certbot-nginx
+    yum install -y certbot python3-certbot-nginx || return 1
   else
     if is_en; then
       echo "No supported package manager found. Please install certbot manually first."
@@ -1445,10 +1434,18 @@ install_certbot_if_missing() {
     fi
     return 1
   fi
+  command -v certbot >/dev/null 2>&1
 }
 
 install_docker_if_requested() {
+  DOCKER_SETUP_RESULT="skipped"
   if command -v docker >/dev/null 2>&1; then
+    if [[ "$(docker --version 2>/dev/null || true)" != 'Docker version '* ]]; then
+      DOCKER_SETUP_RESULT="unsupported"
+      echo "docker 命令不是可确认的 Docker CLI，可能是 Podman 兼容层；保留现状 / Unrecognized Docker CLI; existing engine preserved."
+      return 0
+    fi
+    DOCKER_SETUP_RESULT="present; verify local engine in Feature checks"
     if is_en; then
       echo "Docker is already installed."
     else
@@ -1476,24 +1473,39 @@ install_docker_if_requested() {
       ;;
   esac
 
+  local installed="false" manager="" package
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y docker.io
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y docker
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y docker
+    if apt-get update && apt-get install -y docker.io; then installed="true"; fi
+  elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    if command -v dnf >/dev/null 2>&1; then manager=dnf; else manager=yum; fi
+    # Use an actual engine package from configured repositories, never a Podman alias.
+    for package in docker-ce moby-engine; do
+      if "$manager" -q list --available "$package" >/dev/null 2>&1; then
+        if "$manager" install -y "$package"; then installed="true"; fi
+        break
+      fi
+    done
   else
     if is_en; then
       echo "No supported package manager found. Install Docker manually for container management and the request gateway."
     else
       echo "未找到支持的包管理器。若需容器管理和请求网关，请手动安装 Docker。"
     fi
-    return 0
   fi
 
-  systemctl enable docker
-  systemctl start docker
+  if [[ "$installed" != "true" ]]; then
+    DOCKER_SETUP_RESULT="not installed"
+    echo "Docker 未安装；面板基础功能继续安装。请检查软件仓库与网络，按系统兼容指南配置 Docker Engine 后重试 / Docker setup incomplete; core panel remains available."
+    echo "docs/PLATFORM_SUPPORT.zh-CN.md"
+    return 0
+  fi
+  if systemctl enable docker && systemctl start docker \
+    && docker --host unix:///var/run/docker.sock info >/dev/null 2>&1; then
+    DOCKER_SETUP_RESULT="ready"
+  else
+    DOCKER_SETUP_RESULT="service not ready"
+    echo "Docker 软件包已安装，但本机引擎尚未就绪；请运行 systemctl status docker --no-pager -l / Docker engine is not ready."
+  fi
 }
 
 setup_nginx() {
@@ -1523,6 +1535,9 @@ setup_nginx() {
   systemctl restart "$SERVICE_NAME"
   systemctl reload nginx || systemctl restart nginx
 
+  case "${SETUP_HTTPS,,}" in
+    0|false|no|off|disabled) return 0 ;;
+  esac
   if install_certbot_if_missing; then
     local cert_prompt="检测到 certbot。是否现在为 $domain 申请 HTTPS 证书？请确认域名已经解析到本服务器"
     if is_en; then
@@ -1534,11 +1549,11 @@ setup_nginx() {
   else
     if is_en; then
       echo "Skipped HTTPS certificate setup. HTTP access still works. To enable HTTPS later, run:"
-      echo "  apt install -y certbot python3-certbot-nginx"
+      echo "  # Install certbot and its Nginx plugin using this distribution's package manager; see the platform guide."
       echo "  certbot --nginx -d $domain"
     else
       echo "已跳过 HTTPS 证书配置。HTTP 访问仍然可用。后续可用下面命令开启 HTTPS："
-      echo "  apt install -y certbot python3-certbot-nginx"
+      echo "  # 先按当前发行版安装 certbot 和 Nginx 插件，见系统兼容指南。"
       echo "  certbot --nginx -d $domain"
     fi
   fi
@@ -1549,7 +1564,7 @@ dashboard_public_address() {
   if [[ -z "$address" ]] && command -v curl >/dev/null 2>&1; then
     address="$(curl -4 -fsS --connect-timeout 2 --max-time 4 https://api.ipify.org 2>/dev/null || true)"
   fi
-  if python3 - "$address" <<'PY'
+  if "$PYTHON_BIN" - "$address" <<'PY'
 import ipaddress
 import sys
 try:
@@ -1568,7 +1583,7 @@ PY
 }
 
 check_dashboard_port() {
-  python3 - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import socket
 import sys
 try:
@@ -1615,11 +1630,50 @@ migrate_nginx_dashboard_port() {
   rm -f -- "$backup"
 }
 
+# Read the saved runtime only after validating the file and its parent chain.
+# This must precede default-Python probing on hosts whose system Python is old.
+if [[ "$PYTHON_BIN_EXPLICIT" != "true" && -f "$ENV_FILE" ]]; then
+  assert_no_symlink_components "$ENV_FILE"
+  assert_trusted_directory_chain "$(dirname -- "$ENV_FILE")"
+  validate_existing_control_file "$ENV_FILE"
+  PYTHON_BIN="$(env_file_value "DEPLOY_AGENT_PYTHON_BIN")"
+fi
+PYTHON_BIN="$(select_python)"
+"$PYTHON_BIN" "$SOURCE_DIR/host_platform.py" --check
+if [[ "$INSTALL_CHECK_ONLY" == "true" ]]; then exit 0; fi
+
+RELEASE_MANIFEST="$("$PYTHON_BIN" - "$SOURCE_DIR/release.json" <<'PY'
+import json, re, sys
+entries = json.load(open(sys.argv[1], encoding='utf-8'))['program_entries']
+if not isinstance(entries, list) or not entries or len(entries) != len(set(entries)):
+    raise SystemExit('Invalid release manifest')
+for entry in entries:
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', entry) or any(p.startswith('.') for p in entry.split('/')):
+        raise SystemExit('Unsafe release entry')
+print('\n'.join(entries))
+PY
+)"
+mapfile -t RELEASE_ENTRIES <<< "$RELEASE_MANIFEST"
+for required in "${RELEASE_ENTRIES[@]}"; do
+  if [[ "$required" == "ui" && ! -d "$SOURCE_DIR/$required" ]] \
+    || [[ "$required" != "ui" && ! -f "$SOURCE_DIR/$required" ]]; then
+    echo "安装包不完整 / Incomplete installation package: $required" >&2
+    exit 1
+  fi
+done
+
 acquire_maintenance_lock
 
 if [[ -f "$ENV_FILE" ]]; then
   ensure_trusted_parent_directory "$ENV_FILE"
   validate_existing_control_file "$ENV_FILE"
+  if [[ "$PYTHON_BIN_EXPLICIT" != "true" ]]; then
+    existing_value="$(env_file_value "DEPLOY_AGENT_PYTHON_BIN")"
+    if [[ -n "$existing_value" ]]; then
+      PYTHON_BIN="$existing_value"
+      PYTHON_BIN="$(select_python)"
+    fi
+  fi
   if [[ "$APP_HOME_EXPLICIT" != "true" ]]; then
     existing_value="$(env_file_value "MINI_DEPLOY_HOME")"
     [[ -z "$existing_value" ]] || APP_HOME="$existing_value"
@@ -1894,9 +1948,10 @@ if [[ "$EXISTING_INSTALLATION" == "true" ]]; then
     BACKUP_ALLOW_LEGACY_INSTALLATION="$LEGACY_INSTALLATION" \
     BACKUP_MAINTENANCE_LOCK_HELD="true" \
     BACKUP_MAINTENANCE_LOCK_FD="$MAINTENANCE_LOCK_FD" \
+    PYTHON_BIN="$PYTHON_BIN" \
       bash "$SOURCE_DIR/scripts/backup-installation.sh"
   )"
-  python3 "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH" >/dev/null
+  "$PYTHON_BIN" "$SOURCE_DIR/scripts/verify_backup.py" "$UPGRADE_BACKUP_PATH" >/dev/null
   if is_en; then
     echo "Created and verified a non-destructive upgrade backup: $UPGRADE_BACKUP_PATH"
     echo "This installer never deletes upgrade backups automatically."
@@ -1997,6 +2052,7 @@ case "$(env_file_value DEPLOY_UI_SESSION_TTL_SECONDS)" in
 esac
 upsert_env_assignment "DEPLOY_AGENT_ENV_FILE" "$ENV_FILE"
 upsert_env_assignment "DEPLOY_AGENT_SERVICE_NAME" "$SERVICE_NAME"
+upsert_env_assignment "DEPLOY_AGENT_PYTHON_BIN" "$PYTHON_BIN"
 upsert_env_assignment "DEPLOY_PROJECTS_FILE" "$DATA_HOME/projects.json"
 upsert_env_assignment "DEPLOY_AGENT_LOG" "$LOG_HOME/mini-deploy-agent.log"
 upsert_env_assignment "DEPLOY_AGENT_STATE_FILE" "$DATA_HOME/state.json"
@@ -2031,6 +2087,7 @@ chown root:root "$marker"
 chmod 644 "$marker"
 
 install_ssh_dependency() {
+  SSH_SETUP_RESULT="available"
   if "$PYTHON_BIN" -c 'import paramiko' >/dev/null 2>&1; then
     return 0
   fi
@@ -2048,11 +2105,13 @@ install_ssh_dependency() {
     if yum install -y python3-paramiko; then installed="true"; fi
   fi
   if [[ "$installed" != "true" ]] || ! "$PYTHON_BIN" -c 'import paramiko' >/dev/null 2>&1; then
+    SSH_SETUP_RESULT="not ready for selected Python"
     if is_en; then
       echo "SSH dependency unavailable for $PYTHON_BIN; other panel features remain available. Install Paramiko for this Python runtime, then restart $SERVICE_NAME."
     else
       echo "远程终端依赖暂不可用（$PYTHON_BIN）；其他面板功能可正常使用。请为此 Python 安装 Paramiko 后重启 $SERVICE_NAME。"
     fi
+    echo "See the isolated Python environment instructions in ui/user-guide.md; do not replace the system Python or force pip into it."
   fi
 }
 
@@ -2110,6 +2169,8 @@ mini_deploy installed.
 
 Agent health: $HEALTH_RESULT
 Administrator credentials: initialized
+Docker setup: $DOCKER_SETUP_RESULT
+SSH dependency: $SSH_SETUP_RESULT
 
 Open the dashboard and sign in:
    $DASHBOARD_URL
@@ -2138,7 +2199,7 @@ Administrator maintenance (restart the Agent after either command):
    systemctl restart $SERVICE_NAME
 
 Manual safety backup:
-   APP_HOME=$APP_HOME ENV_FILE=$ENV_FILE DATA_HOME=$DATA_HOME LOG_HOME=$LOG_HOME SERVICE_NAME=$SERVICE_NAME SERVICE_FILE=$SERVICE_FILE NGINX_CONF_FILE=$NGINX_CONF_FILE BACKUP_DIR=$INSTALL_BACKUP_DIR bash $APP_HOME/scripts/backup-installation.sh
+   PYTHON_BIN=$PYTHON_BIN APP_HOME=$APP_HOME ENV_FILE=$ENV_FILE DATA_HOME=$DATA_HOME LOG_HOME=$LOG_HOME SERVICE_NAME=$SERVICE_NAME SERVICE_FILE=$SERVICE_FILE NGINX_CONF_FILE=$NGINX_CONF_FILE BACKUP_DIR=$INSTALL_BACKUP_DIR bash $APP_HOME/scripts/backup-installation.sh
 
 Optional: edit environment config:
    nano $ENV_FILE
@@ -2162,6 +2223,8 @@ mini_deploy 安装完成。
 
 Agent 状态：$HEALTH_RESULT
 管理员凭据：已初始化
+Docker 安装结果：$DOCKER_SETUP_RESULT
+SSH 依赖结果：$SSH_SETUP_RESULT
 
 打开下面地址并登录：
    $DASHBOARD_URL
@@ -2190,7 +2253,7 @@ Agent 状态：$HEALTH_RESULT
    systemctl restart $SERVICE_NAME
 
 手动创建安全备份：
-   APP_HOME=$APP_HOME ENV_FILE=$ENV_FILE DATA_HOME=$DATA_HOME LOG_HOME=$LOG_HOME SERVICE_NAME=$SERVICE_NAME SERVICE_FILE=$SERVICE_FILE NGINX_CONF_FILE=$NGINX_CONF_FILE BACKUP_DIR=$INSTALL_BACKUP_DIR bash $APP_HOME/scripts/backup-installation.sh
+   PYTHON_BIN=$PYTHON_BIN APP_HOME=$APP_HOME ENV_FILE=$ENV_FILE DATA_HOME=$DATA_HOME LOG_HOME=$LOG_HOME SERVICE_NAME=$SERVICE_NAME SERVICE_FILE=$SERVICE_FILE NGINX_CONF_FILE=$NGINX_CONF_FILE BACKUP_DIR=$INSTALL_BACKUP_DIR bash $APP_HOME/scripts/backup-installation.sh
 
 可选：修改环境配置：
    nano $ENV_FILE

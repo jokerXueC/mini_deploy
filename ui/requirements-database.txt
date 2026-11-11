@@ -1,0 +1,5 @@
+# Optional read-only database workspace; install in the panel's Python runtime.
+PyMySQL[rsa]>=1.1.1,<2
+psycopg2-binary>=2.9.10,<3
+cryptography>=43,<47
+sqlglot>=28,<29

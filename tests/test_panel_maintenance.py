@@ -4,6 +4,7 @@ import subprocess
 import time
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,26 @@ def panel(tmp_path, monkeypatch):
     monkeypatch.setattr(maintenance, 'supported', lambda: None)
     monkeypatch.setattr(maintenance, 'exclusive', nullcontext)
     return maintenance
+
+
+def test_full_backup_uses_running_interpreter_despite_stale_inherited_override(panel, monkeypatch):
+    monkeypatch.setenv('PYTHON_BIN', '/missing/old-runtime')
+    calls = []
+    bundle = panel.backup / 'full-backup'
+
+    def command(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return str(bundle)
+
+    monkeypatch.setattr(pm, 'command', command)
+    monkeypatch.setattr(pm, 'verify_backup', lambda path: SimpleNamespace(bundle=path))
+    monkeypatch.setattr(panel, 'snapshot', lambda: 'program-snapshot')
+    job = {'id': '9' * 32, 'action': 'backup', 'started_at': time.time()}
+    panel.worker(job)
+    assert job['state'] == 'succeeded', job
+    assert job['full_backup'] == 'full-backup'
+    assert calls[0][0] == ['bash', str(panel.app / 'scripts/backup-installation.sh')]
+    assert calls[0][1]['env']['PYTHON_BIN'] == pm.sys.executable
 
 
 def test_program_snapshot_integrity_and_restore_preserve_business_and_new_files(panel, monkeypatch):

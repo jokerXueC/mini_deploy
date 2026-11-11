@@ -23,7 +23,7 @@ def test_setup_states_instructions_and_navigation(browser_page, tmp_path, width,
     page.set_viewport_size({'width': width, 'height': 950})
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
     page.locator('#setupViewTab').click()
-    playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(11)
+    playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(len(data['items']))
     playwright.expect(page.locator('#setupSummary')).to_contain_text('2 项需处理')
     playwright.expect(page.locator('[data-setup-key=ai]')).to_have_text('配置模型')
     detail = page.locator('[data-setup-detail=requests]')
@@ -35,6 +35,10 @@ def test_setup_states_instructions_and_navigation(browser_page, tmp_path, width,
     page.screenshot(path=str(tmp_path / f'feature-checks-{width}-{theme}.png'), full_page=True)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     assert not state['posts']  # Merely inspecting must never run a mutation.
+    page.locator('[data-setup-key=platform]').click()
+    playwright.expect(page.locator('[data-guide-link=install]')).to_have_attribute('aria-current', 'location')
+    playwright.expect(page.locator('[data-guide-topic=install]')).to_contain_text('bash install.sh --check')
+    page.keyboard.press('Escape')
     detail.locator('[data-user-guide=requests]').click()
     playwright.expect(page.locator('[data-guide-link=requests]')).to_have_attribute('aria-current', 'location')
     page.keyboard.press('Escape')
@@ -52,11 +56,11 @@ def test_failed_recheck_is_visible_and_recovers_without_losing_instructions(brow
 
     page.route('**/setup/checks', respond)
     page.locator('#setupViewTab').click()
-    playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(11)
+    playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(len(data['items']))
     fail[0] = True
     page.locator('#setupRefresh').click()
     playwright.expect(page.locator('#setupFeedback')).to_contain_text('检查未完成：暂时不可用')
-    playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(11)
+    playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(len(data['items']))
     fail[0] = False
     page.locator('#setupRefresh').click()
     playwright.expect(page.locator('#setupFeedback')).to_be_empty()
