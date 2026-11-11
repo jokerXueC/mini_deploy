@@ -179,7 +179,7 @@ def test_persisted_hour_uses_real_peaks_weighted_means_and_exact_interval_eviden
     cell = page.locator('.load-cell').nth(59)
     playwright.expect(cell).to_have_attribute('data-level', 'high')
     cell.hover()
-    playwright.expect(page.locator('#loadMapDetail')).to_contain_text('65.0% 平均 · 峰值 95.0% · 2 个样本')
+    playwright.expect(page.locator('#loadMapDetail')).to_contain_text('65.0% 平均 · 峰值 95.0% · 2 组统计')
     cell.click()
     playwright.expect(page.locator('#observationEvidence')).to_be_visible()
     playwright.expect(page.locator('#observationProcesses')).to_contain_text('<script>bad</script>')

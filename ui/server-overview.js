@@ -103,6 +103,7 @@ window.ServerOverview = (() => {
     $('observationStatus').textContent = historyError ? `${historyError} · ${history ? '保留上次结果，' : ''}稍后重试`
       : history?.error || (history?.stale ? '历史采样已中断，最近超过 65 秒没有新记录'
       : request && !history ? '正在读取已保存的采样…' : target ? '容器 CPU · 内存；网络吞吐请查看服务器整体'
+      : history?.capacity_limited ? '当前范围有统计因容量限制被轮换，覆盖率按实际保留记录计算'
       : '已保存的历史采样 · 点击时段查看现场');
     $('observationStatus').dataset.error = String(Boolean(historyError || history?.error || history?.stale));
     if (derived) return derived;
@@ -137,7 +138,7 @@ window.ServerOverview = (() => {
       emptyMessage: historyError ? '历史暂时无法读取，将自动重试' : history?.error ? '历史采样保存失败，请查看上方原因'
         : history?.stale || !points.length && history?.last_saved_at ? '所选时段没有新的已保存采样' : '',
       contexts: history?.contexts || [],
-      hint: `${select.selectedOptions[0]?.textContent} · ${rangeLabel} · 每 30 秒采集 · ${points.length} 个时间点${target ? ' · 区间均值' : ''}${points.length ? ` · 最新 ${clock(points.at(-1).ts)}` : ''}`};
+      hint: `${select.selectedOptions[0]?.textContent} · ${rangeLabel} · 每 30 秒保存统计 · ${points.length} 组统计${target ? ' · 区间均值' : ''}${points.length ? ` · 最新 ${clock(points.at(-1).ts)}` : ''}`};
     return derived;
   }
   const number = value => value == null || value === '' || typeof value === 'boolean' || !Number.isFinite(Number(value))
@@ -325,6 +326,7 @@ window.ServerOverview = (() => {
   function update(input, options = {}) {
     latestPoints = input; latestOptions = options;
     const {realtime = false, intervalSeconds = 1800, container = false, rangeLabel} = options;
+    const pointUnit = realtime ? '个样本' : container ? '个时间点' : '组统计';
     if (container && selectedMetric === 'network_total_kbps') selectedMetric = 'cpu_percent';
     document.querySelector('.load-summary').dataset.metric = selectedMetric;
     document.querySelectorAll('[data-observation-metric]').forEach(button => {
@@ -363,7 +365,7 @@ window.ServerOverview = (() => {
         const from = clock(start + column * span, hasDate);
         const until = span > interval ? ` 至 ${clock(start + (column + 1) * span, hasDate)}` : '';
         const detail = `${metric.name} · ${from}${until} · ${count
-          ? `${format(average, metric.unit)} 平均 · ${peakLabel} ${format(peak, metric.unit)} · ${count} 个样本`
+          ? `${format(average, metric.unit)} 平均 · ${peakLabel} ${format(peak, metric.unit)} · ${count} ${pointUnit}`
           : '无有效采样'}`;
         descriptions.push(detail);
         cell.setAttribute('aria-label', detail);
@@ -377,7 +379,9 @@ window.ServerOverview = (() => {
         $('loadPeak').textContent = format(result.peak, metric.unit);
         $('loadLatest').textContent = format(number(points.at(-1)?.[metric.key]), metric.unit);
         $('loadHighCount').textContent = values.length ? threshold ? `${result.high} / ${values.length}` : String(values.length) : '—';
-        $('loadSampleCount').textContent = (values.length ? `${values.length} 个有效${container ? '时间点' : ` ${metric.name} 样本`}` : `尚无有效 ${metric.name} 样本`)
+        const observations = points.reduce((count, point) => count + (number(point[metric.key + '_samples']) || 0), 0);
+        $('loadSampleCount').textContent = (values.length ? `${values.length} ${pointUnit}` : `尚无有效 ${metric.name} 样本`)
+          + (!realtime && !container && observations ? ` · ${observations} 次 ${metric.name} 观测` : '')
           + (container && rowIndex === 0 ? ' · 100% = 1 个逻辑核' : '');
         $('observationLocate').disabled = !result.count;
       }

@@ -88,6 +88,49 @@ def test_private_key_is_not_accepted_as_ca():
         db.normalize({**profile(), 'ca_pem': '-----BEGIN CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----'})
 
 
+def test_root_is_accepted_without_changing_account_permissions():
+    assert db.normalize({**profile(), 'user': 'root'})['user'] == 'root'
+
+
+def test_connection_is_rejected_if_readonly_transaction_was_not_enabled(monkeypatch):
+    import psycopg2
+    flags = []
+
+    class Connection:
+        def set_session(self, **kwargs):
+            assert kwargs == {'readonly': True, 'autocommit': False}
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql):
+            assert 'transaction_read_only' in sql
+
+        def fetchone(self):
+            return 'root', 'off'
+
+        def fetchall(self):
+            return []
+
+        def rollback(self):
+            flags.append('rollback')
+
+        def close(self):
+            flags.append('close')
+
+    monkeypatch.setattr(psycopg2, 'connect', lambda **kwargs: Connection())
+    with pytest.raises(DatabaseError, match='未确认只读事务'):
+        with db.Session({**profile(), 'user': 'root'}, threading.Event()).opened():
+            pytest.fail('unverified transaction must not be exposed')
+    assert flags == ['rollback', 'close']
+
+
 class Cursor:
     def __init__(self, rows, columns=('id',)):
         self.rows = iter(rows)

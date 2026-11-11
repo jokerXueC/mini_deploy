@@ -190,6 +190,21 @@ def test_real_database_relationships_respect_readonly_visibility(request, fixtur
 
 
 @pytest.mark.parametrize('fixture', ['postgres_spec', 'mysql_spec'])
+def test_administrator_accounts_work_but_transactions_still_reject_writes(request, fixture):
+    spec = request.getfixturevalue(fixture)
+    admin = {**spec, 'user': 'fixture_admin' if spec['engine'] == 'postgres' else 'root', 'password': ''}
+    schema = 'public' if spec['engine'] == 'postgres' else 'fixture'
+    with opened(admin) as session:
+        assert session.access['transaction_read_only']
+        assert session.access['account'].split('@')[0] == admin['user']
+        assert session.query(f'SELECT COUNT(*) FROM {schema}.orders')['rows'] == [[123]]
+        with pytest.raises(Exception):
+            session.query(f'UPDATE {schema}.orders SET name=\'should not change\' WHERE id=1')
+    with opened(spec) as session:
+        assert session.query(f'SELECT name FROM {schema}.orders WHERE id=1')['rows'] == [['order-1']]
+
+
+@pytest.mark.parametrize('fixture', ['postgres_spec', 'mysql_spec'])
 def test_real_query_cancel(request, fixture):
     spec = request.getfixturevalue(fixture)
     session = Session(spec, threading.Event())

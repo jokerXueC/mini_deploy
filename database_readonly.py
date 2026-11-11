@@ -227,6 +227,7 @@ class Session:
     def __init__(self, spec, cancel):
         self.spec, self.cancelled = spec, cancel
         self.connection = None
+        self.access = {}
         self._lock = threading.Lock()
 
     def interrupt(self):
@@ -307,6 +308,15 @@ class Session:
                         cursor.execute('SET SESSION MAX_EXECUTION_TIME=15000')
                     cursor.execute('SET SESSION TRANSACTION READ ONLY')
                     cursor.execute('START TRANSACTION READ ONLY')
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT current_user,current_setting('transaction_read_only')" if spec['engine'] == 'postgres'
+                               else 'SELECT CURRENT_USER(),@@SESSION.' + ('tx_read_only' if 'mariadb' in version.lower() else 'transaction_read_only'))
+                account, read_only = cursor.fetchone()
+                cursor.fetchall()
+            if str(read_only).lower() not in {'on', '1', 'true'}:
+                raise DatabaseError('数据库未确认只读事务，已停止连接，请检查数据库版本与事务设置。')
+            self.access = {'account': str(account), 'transaction_read_only': True,
+                           'detail': '已验证只读事务；面板不改变数据库账号原有权限。'}
             with self._lock:
                 self.connection = conn
             if self.cancelled.is_set():
@@ -506,6 +516,7 @@ class Manager:
                     result = database_schema.relationships(connection, data['schema'])
                 else:
                     result = connection.query('SELECT * FROM (' + data['sql'] + ') AS panel_readonly_result LIMIT 201')
+                result['access'] = connection.access
             state, error = 'succeeded', ''
         except Exception as exc:
             result, state = None, 'failed'
@@ -516,7 +527,7 @@ class Manager:
             elif code == '57014' or number in {3024, 1969, 2013} or isinstance(exc, (TimeoutError, socket.timeout)):
                 error = '查询超时或连接已中断，请缩小查询范围并检查网络。'
             elif code in {'28P01', '28000'} or number in {1044, 1045}:
-                error = '数据库认证失败或账号没有访问权限，请检查账号、密码和授权。'
+                error = '数据库认证失败或账号没有访问权限。请检查密码、数据库来源地址授权和认证方式；SSH 的 root 登录不等于数据库 root 可通过 TCP 登录。'
             else:
                 # Driver errors may embed passwords, SQL literals or returned data.
                 error = '数据库操作失败，请检查地址、账号权限、TLS 证书和查询字段；服务器错误详情不回显。'

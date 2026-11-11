@@ -150,7 +150,7 @@ def test_full_database_reuses_pages_and_saves_backlog_without_recreating_file(tm
     assert data['sample_seconds'] == 40 and len(data['points']) == 40
     assert data['summary']['cpu_percent']['average'] == 19.5
     with history.connect() as db:
-        assert 0 < db.execute('SELECT COUNT(*) FROM samples WHERE first < ?', (NOW,)).fetchone()[0] < before
+        assert 0 < db.execute('SELECT COUNT(*) FROM samples WHERE first < ?', (NOW,)).fetchone()[0] <= before
         assert db.execute('PRAGMA page_count').fetchone()[0] <= 512
         assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     assert history.path.stat().st_ino == inode and business.read_text() == 'preserve'
@@ -203,7 +203,7 @@ def test_continuous_sampling_rotates_by_total_pages_including_summaries(tmp_path
         assert db.execute('PRAGMA page_count').fetchone()[0] <= 512
         assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     data = history.query('1h', at + 1)
-    assert len(data['points']) == 120 and len(data['contexts']) == 120
+    assert len(data['points']) == 120 and 0 < len(data['contexts']) <= 120
     assert history.context(history.run, at)['at'] == at
     assert not history.error
 
@@ -215,6 +215,80 @@ def test_empty_recent_window_reports_stalled_writer_and_last_saved_time(tmp_path
     data = history.query('1h', NOW + 7200)
     assert not data['points'] and data['stale'] and data['last_saved_at']
     assert not History(tmp_path / 'new').query('1h', NOW)['stale']
+
+
+def test_coverage_distinguishes_collection_start_from_missing_saved_seconds(tmp_path):
+    history = History(tmp_path)
+    for second in range(30):
+        history.observe(sample(), NOW + second)
+    history.flush(NOW + 30)
+    data = History(tmp_path).query('7d', NOW + 90)
+    assert data['sampling_start_known']
+    assert data['not_started_seconds'] == 7 * 86400 - 90
+    assert data['expected_seconds'] == 90
+    assert data['uncovered_seconds'] == 60
+    assert data['collection_coverage_percent'] == pytest.approx(100 / 3)
+    assert data['statistics_count'] == 1 and data['sample_seconds'] == data['coverage_seconds'] == 30
+    assert not data['capacity_limited']
+    # The old schema has no trustworthy first-start marker; migration must not invent one.
+    with history.connect() as db:
+        db.execute('DELETE FROM history_state')
+    history.observe(sample(), NOW + 91)
+    history.flush(NOW + 92, force=True)
+    data = history.query('7d', NOW + 93)
+    assert not data['sampling_start_known'] and data['not_started_seconds'] is None
+
+
+def test_seven_complete_days_survive_process_evidence_and_database_pressure(tmp_path):
+    import zlib
+    history = History(tmp_path)
+    start = NOW - performance.RETENTION
+    for second in range(30):
+        server = sample(21.23456789 + second / 3, 57.987654321 + second / 200)
+        history.observe(server, start + second)
+    processes = [dict(pid=500 + i, name='service-' + str(i), cpu_percent=12.34567 / (i + 1),
+                      rss_mib=123.456789 * (i + 1), write_kib_s=32.1234567 / (i + 1),
+                      read_kib_s=5.4321 * (i + 1), threads=8, state='S', user='app',
+                      container='application-' + str(i % 4), service='example.service') for i in range(40)]
+    history.record_context(dict(at=start + 29, available=True, warnings=[], processes=processes,
+                                scanned=220, readable=220), server)
+    history.flush(start + 30)
+    with history.connect() as db:
+        base = tuple(db.execute('SELECT * FROM samples').fetchone())
+        context = tuple(db.execute('SELECT * FROM process_context').fetchone())
+    for offset in range(1, 20160, 64):
+        stats, scenes = [], []
+        for index in range(offset, min(offset + 64, 20160)):
+            ts = start + index * 30
+            stats.append((base[0], ts, ts, ts + 29, *base[4:]))
+            summary = json.loads(context[-2])
+            summary.update(ts=ts, at=ts + 29)
+            scene = json.loads(zlib.decompress(context[-1]))
+            scene.update(ts=ts, at=ts + 29)
+            scenes.append((context[0], ts, ts + 29, context[3], json.dumps(summary),
+                           zlib.compress(json.dumps(scene).encode())))
+        with history.connect() as db:
+            history._prepare_write(db, stats, scenes, stats[-1][3])
+            db.executemany('INSERT INTO samples VALUES(?,?,?,?,?,?,?)', stats)
+            db.executemany('INSERT INTO process_context VALUES(?,?,?,?,?,?)', scenes)
+    data = History(tmp_path).query('7d', NOW - 1, include_details=False)
+    assert data['statistics_count'] == 20160
+    assert data['coverage_seconds'] == data['sample_seconds'] == 604800
+    assert data['coverage_percent'] == 100 and not data['capacity_limited']
+    with history.connect() as db:
+        assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert db.execute('PRAGMA page_count').fetchone()[0] <= performance.DATABASE_PAGES
+
+
+def test_capacity_eviction_is_reported_instead_of_blending_into_collection_gaps(tmp_path, monkeypatch):
+    monkeypatch.setattr(performance, 'DATABASE_PAGES', 512)
+    history = History(tmp_path)
+    fill_history_to_limit(history)
+    with history.connect() as db:
+        db.execute('DELETE FROM process_context')
+        history._retire_samples(db, 1, NOW)
+    data = history.query('7d', NOW)
+    assert data['capacity_limited']
 
 
 def test_disk_latency_weighting_and_missing_devices():

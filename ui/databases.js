@@ -6,6 +6,11 @@
   let dependencies = {}, csrf = '', allowed = false, busy = false, jobId = '', page = 0, sort = '', direction = 'asc';
   let editing = null, dataResult = null, sqlResult = null, tableLoaded = false, structureLoaded = false;
   let workspaceMode = 'browse', graphLoaded = false, graphSequence = 0;
+  function access(result) {
+    const info = result?.access;
+    el('dbAccess').hidden = !info?.transaction_read_only;
+    el('dbAccess').textContent = info?.transaction_read_only ? `${info.account} · 只读事务已验证` : '';
+  }
   const connection = () => connections.find(item => item.id === el('dbConnection').value);
   const database = () => el('dbDatabase').value;
 
@@ -216,6 +221,7 @@
     structureLoaded = true; grid('dbFieldsGrid', result.fields); grid('dbIndexesGrid', result.indexes);
   }
   async function catalog() {
+    access(null);
     resetGraph();
     clearSelection(); tables = []; emptyGrid('dbTree', '正在读取库表…');
     el('dbConnectionState').textContent = '正在连接…';
@@ -228,6 +234,7 @@
     tables = result.tables; tree(); updateControls();
     options(el('dbGraphSchema'), [...new Set(tables.map(item => item.schema))], '全部 Schema');
     el('dbConnectionState').textContent = '已连接';
+    access(result);
     if (result.truncated) feedback('目录已截断，请缩小范围；初版最多显示 500 个数据库、1000 张表。');
     if (workspaceMode === 'graph') await graph();
   }
@@ -241,7 +248,7 @@
     const missing = ['mysql', 'postgres'].filter(engine => !dependencies[engine]?.available);
     el('dbDependencyNote').hidden = !missing.length && dependencies.sql;
     el('dbDependencyNote').querySelector('span').textContent = missing.length ?
-      `可选组件尚未就绪：${missing.map(e => e === 'mysql' ? 'MySQL / MariaDB' : 'PostgreSQL').join('、')}。` : '只读 SQL 解析组件尚未安装，库表浏览仍可使用。';
+      `数据库组件尚未就绪：${missing.map(e => e === 'mysql' ? 'MySQL / MariaDB' : 'PostgreSQL').join('、')}。重新运行新版安装器可自动准备，失败处理见指南。` : '只读 SQL 解析组件尚未安装，重新运行新版安装器可自动准备。';
     initialized = true; updateControls();
   }
   async function refresh() {
@@ -288,7 +295,7 @@
   el('dbCellClose').addEventListener('click', () => el('dbCellDialog').close());
   el('dbTest').addEventListener('click', () => safely(async () => {
     if (!el('dbConnectionForm').reportValidity()) return;
-    try { const result = await run('test', draft(), true); el('dbConnectionFeedback').textContent = result.detail; }
+    try { const result = await run('test', draft(), true); el('dbConnectionFeedback').textContent = result.detail + (result.access ? ` 当前账号：${result.access.account}；只读事务已验证。` : ''); }
     catch (error) { el('dbConnectionFeedback').textContent = error.message; throw error; }
   }));
   el('dbConnectionForm').addEventListener('submit', event => {
@@ -307,6 +314,7 @@
   });
   el('dbEngine').addEventListener('change', () => { el('dbPort').value = el('dbEngine').value === 'postgres' ? 5432 : 3306; });
   el('dbConnection').addEventListener('change', () => {
+    access(null);
     clearSelection(); resetGraph(); tables = []; tree();
     options(el('dbGraphSchema'), [], '全部 Schema');
     const db = connection()?.database || '';

@@ -89,7 +89,7 @@ def test_automatic_poll_updates_existing_canvas_preserves_reading_and_stops_when
     # A rolling 24-hour window can expire old samples as new ones arrive.
     expected_count = demo.query(now=clock[0])['sample_seconds']
     page.clock.run_for(15500)
-    playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text(f'{expected_count} 次有效采样')
+    playwright.expect(page.locator('#serverPerformanceFeedback')).to_contain_text(f'{expected_count} 次采样观测')
     page.clock.run_for(550)
     assert page.locator('#serverPerformanceFrame').get_attribute('srcdoc') == original_document
     assert frame.locator('body').evaluate('() => window.liveMarker') == 1

@@ -166,10 +166,10 @@ def snapshot(home, *, system, authenticated, ssh_available, ai, notifications,
     db_dependencies = database_readonly.dependencies()
     db_ready = db_dependencies['sql'] and all(db_dependencies[engine]['available'] for engine in ('mysql', 'postgres'))
     add('databases', '数据库只读工作区', 'available' if db_ready else 'setup',
-        '驱动和加密组件可用；需提供只读账号并在数据库页面测试，未验证任何业务连接。' if db_ready else
-        '数据库为可选功能，缺少驱动或解析组件；按数据库指南在面板独立 Python 环境安装依赖。',
-        'databases', ['打开数据库使用指南，核对运行 Python 并安装可选组件。',
-                      '由数据库管理员创建只读账号，填写面板服务器可达的地址并测试。',
+        '驱动和加密组件可用；填写已有数据库账号并测试，当前未验证任何业务连接。' if db_ready else
+        '数据库组件未就绪；新版安装器可自动准备独立环境，失败排查见数据库指南。',
+        'databases', ['缺少组件时重新运行新版安装器，查看自动准备结果。',
+                       '发现本机数据库或填写可达地址，用已有账号测试；推荐专用只读账号，也支持 root。',
                       '选择业务库与数据表，核验结构、数据或单条 SELECT；不要开放公网数据库端口。'], action='配置数据库')
     add('notifications', '异常通知', 'pending' if notifications else 'setup',
         '已启用通知渠道；需要发送测试确认投递，不会在检查时发送消息。' if notifications else '通知渠道尚未启用；不影响异常中心记录。',

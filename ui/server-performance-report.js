@@ -10,10 +10,15 @@
   meta = data.metadata || {};
   $('server').textContent = `${meta.hostname || '服务器'} · ${meta.logical_cores ? meta.logical_cores + ' 个逻辑核' : '核心数未记录'} · ${format(meta.memory_total_mb == null ? null : meta.memory_total_mb / 1024, 'GiB 内存')}`;
   $('range').textContent = `${data.since} 至 ${data.until}（UTC）`;
-  $('coverage').textContent = `覆盖率 ${format(data.coverage_percent, '%')} · ${format(data.coverage_seconds)} 个不同采样秒 · ${format(data.points.length)} 组统计 · ${data.session_count} 个采样批次${data.first_at ? ` · 实际记录 ${data.first_at} 至 ${data.latest_at}` : data.error ? ' · 历史采样保存失败' : data.stale || data.last_saved_at ? ' · 所选时段没有已保存的采样' : ' · 等待首次采样，通常在 30 秒内开始显示'}`;
+  $('coverage').textContent = `所选范围覆盖率 ${format(data.coverage_percent, '%')} · ${format(data.coverage_seconds)} 个不同采样秒 · ${format(data.sample_seconds)} 次采样观测 · ${format(data.points.length)} 组统计 · ${data.session_count} 个采样批次${data.first_at ? ` · 实际记录 ${data.first_at} 至 ${data.latest_at}` : data.error ? ' · 历史采样保存失败' : data.stale || data.last_saved_at ? ' · 所选时段没有已保存的采样' : ' · 等待首次采样，通常在 30 秒内开始显示'}`;
   $('notice').textContent = data.notice + ' 覆盖率按有有效指标的采样秒计算，各指标完整程度见下方有效采样数。';
   $('warnings').replaceChildren();
-  for (const text of [data.error, data.stale ? '最近采样已超过 65 秒，采集可能中断。' : '', data.coverage_percent < 95 ? '所选时间范围的数据尚未完整覆盖；升级前、停机时或采集失败的时间无法补回。' : ''].filter(Boolean)) {
+  for (const text of [data.error, data.stale ? '最近采样已超过 65 秒，采集可能中断。' : '',
+    data.capacity_limited ? '当前范围有基础统计因容量限制被轮换；这是历史保留缺口，不能据此判断当时没有采集。' : '',
+    data.not_started_seconds > 0 ? `所选范围中 ${format(data.not_started_seconds)} 秒早于已知采集起点，不属于采集中断；采集后的覆盖率为 ${format(data.collection_coverage_percent, '%')}。` : '',
+    data.uncovered_seconds > 0 ? `还有 ${format(data.uncovered_seconds)} 秒未被已保存记录覆盖，可能包含停机、采集或写入失败、历史轮换及最近待保存的采样；不补零。` : '',
+    !data.sampling_start_known && data.points.length ? '旧记录未保存可靠的首次采集时间，无法把缺口精确区分为安装前与采集中断。' : '',
+    data.coverage_percent < 95 && data.uncovered_seconds == null ? '所选时间范围的数据尚未完整覆盖；升级前、停机时或采集失败的时间无法补回。' : ''].filter(Boolean)) {
     const p = document.createElement('p'); p.textContent = text; $('warnings').append(p);
   }
   $('downloads').hidden = !data.package;

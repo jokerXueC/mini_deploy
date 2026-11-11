@@ -21,7 +21,7 @@ the product.
 - Sustained alerts, recovery messages, repeat limits and temporary notification mute via WeCom, DingTalk or email.
 - Docker container status, logs and management; image listing, search, pull and removal.
 - Edit existing host Docker mirror settings in the panel, with validation, backups and automatic activation.
-- Optional read-only MySQL/MariaDB and PostgreSQL workspace: encrypted connections, Docker address discovery, table data and structure, foreign-key relationship diagrams, filtering, restricted SELECT queries and current-result CSV. Install optional drivers and configure a dedicated SELECT account using the bundled database guide.
+- Read-only MySQL/MariaDB and PostgreSQL workspace: encrypted connections, Docker address discovery, table data and structure, foreign-key relationship diagrams, filtering, restricted SELECT queries and current-result CSV. The installer prepares drivers in a private runtime when needed; existing accounts including root are supported with verified read-only transactions. Dedicated SELECT accounts remain recommended.
 - Discover websites and public certificates from local services, Docker configurations and common certificate directories, without initial proxy selection or path entry.
 - Local or Docker Nginx, business sites and uploaded PEM certificate management.
 - Request collection from supported Nginx/Caddy logs.

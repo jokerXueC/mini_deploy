@@ -2115,6 +2115,65 @@ install_ssh_dependency() {
   fi
 }
 
+database_runtime_ready() {
+  "$1" -c 'import sqlite3, ssl, paramiko, pymysql, psycopg2, cryptography, sqlglot; assert sqlglot.__version__.split(".")[0] == "28"' >/dev/null 2>&1
+}
+
+install_database_dependencies() {
+  DATABASE_SETUP_RESULT="available"
+  case "${SETUP_DATABASE:-auto}" in
+    no|false|0|off) DATABASE_SETUP_RESULT="skipped"; return 0 ;;
+  esac
+  if database_runtime_ready "$PYTHON_BIN"; then return 0; fi
+  DATABASE_SETUP_RESULT="not ready; see database guide"
+  local runtime="${APP_HOME}-runtime" marker="${APP_HOME}-runtime/.mini-deploy-runtime"
+  echo "正在准备数据库和 SSH 的面板专用依赖环境 / Preparing the panel's isolated database and SSH runtime..."
+  if [[ -L "$runtime" || ( -e "$runtime" && ! -d "$runtime" ) ]]; then
+    echo "依赖环境路径不安全，保留现状 / Unsafe runtime path; existing files preserved: $runtime"
+    return 0
+  fi
+  if [[ -d "$runtime" ]]; then
+    assert_trusted_directory_chain "$runtime"
+    validate_existing_control_file "$marker"
+    if [[ ! -f "$marker" || "$(<"$marker")" != mini-deploy-database-runtime-v1 ]]; then
+      echo "不接管未识别的运行环境 / Unrecognized runtime preserved: $runtime"
+      return 0
+    fi
+  else
+    install -d -m 700 "$runtime"
+    install -m 600 /dev/null "$marker"
+    printf '%s\n' mini-deploy-database-runtime-v1 >"$marker"
+  fi
+  if [[ ! -x "$runtime/bin/python" ]] || ! "$runtime/bin/python" -m pip --version >/dev/null 2>&1; then
+    if ! "$PYTHON_BIN" -m venv --copies "$runtime"; then
+      # Debian splits ensurepip out of Python. Install the matching venv package only.
+      local version
+      version="$("$PYTHON_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+      if command -v apt-get >/dev/null 2>&1; then
+        if ! apt-get update || ! apt-get install -y "python$version-venv"; then
+          echo "无法安装 venv 组件，保留原运行环境 / Could not prepare venv; original runtime preserved."
+          return 0
+        fi
+      fi
+      if ! "$PYTHON_BIN" -m venv --copies "$runtime"; then
+        echo "无法创建专用运行环境；请查看数据库指南 / Runtime preparation failed; see the database guide."
+        return 0
+      fi
+    fi
+  fi
+  if ! "$runtime/bin/python" -m pip --disable-pip-version-check --no-input install --timeout 15 --retries 1 --prefer-binary \
+      -r "$APP_HOME/requirements-ssh.txt" -r "$APP_HOME/ui/requirements-database.txt" \
+    || ! database_runtime_ready "$runtime/bin/python"; then
+    echo "依赖下载或验证失败；其他面板功能继续使用原环境。重新运行安装器可重试，排查步骤见数据库指南 / Dependency setup failed; original runtime preserved. Retry the installer or see the database guide."
+    return 0
+  fi
+  PYTHON_BIN="$runtime/bin/python"
+  upsert_env_assignment "DEPLOY_AGENT_PYTHON_BIN" "$PYTHON_BIN"
+  SSH_SETUP_RESULT="available"
+  DATABASE_SETUP_RESULT="available in panel-managed runtime"
+}
+
+install_database_dependencies
 install_ssh_dependency
 initialize_admin_credentials
 
@@ -2171,6 +2230,7 @@ Agent health: $HEALTH_RESULT
 Administrator credentials: initialized
 Docker setup: $DOCKER_SETUP_RESULT
 SSH dependency: $SSH_SETUP_RESULT
+Database dependency: $DATABASE_SETUP_RESULT
 
 Open the dashboard and sign in:
    $DASHBOARD_URL
@@ -2225,6 +2285,7 @@ Agent 状态：$HEALTH_RESULT
 管理员凭据：已初始化
 Docker 安装结果：$DOCKER_SETUP_RESULT
 SSH 依赖结果：$SSH_SETUP_RESULT
+数据库依赖结果：$DATABASE_SETUP_RESULT
 
 打开下面地址并登录：
    $DASHBOARD_URL

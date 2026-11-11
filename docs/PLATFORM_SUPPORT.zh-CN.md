@@ -94,6 +94,8 @@ docker --host unix:///var/run/docker.sock info
 
 ## 非默认 Python 的 SSH 依赖
 
+新版安装器会先尝试自动准备数据库和 SSH 的专用运行环境（`<APP_HOME>-runtime`），成功验证后记录并切换服务解释器；不会替换系统 Python。Debian 缺少 venv 时会尝试安装与所选解释器匹配的 venv 软件包。只有自动准备失败、主动以 `SETUP_DATABASE=no` 跳过或需要自定义环境时，才使用以下手动步骤。
+
 发行版 Paramiko 不能供所选 Python 导入时，使用专用虚拟环境，不给系统 Python 强制执行 pip。以下示例要求已有 `/usr/bin/python3.11`。专用目录 `/opt/mini-deploy-runtime` 应尚不存在，或是你明确管理的该面板运行环境，不能覆盖其他项目。
 
 Debian/Ubuntu 需要对应版本的 venv 包（推荐版本使用 `python3-venv`）；RPM 系使用发行版对应的 Python/pip 包。以下在下载的仓库目录执行：

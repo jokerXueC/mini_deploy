@@ -57,6 +57,7 @@ def database_page(browser_page):
                 value = dict(columns=columns, rows=[[payload.get('page', 0) * 50 + 1, '<img src=x onerror=alert(1)>', '1.25', None],
                                                    [2, '=SUM(1,2)', '2.50', 'a very long text ' * 40]],
                              has_more=payload.get('page', 0) == 0, sort=payload.get('sort') or 'id', truncated=False)
+            value['access'] = dict(account=payload.get('user', saved['user']), transaction_read_only=True)
             state['jobs'][job] = value
             result = dict(id=job, state='running', elapsed_ms=10)
         elif path == '/job':
@@ -145,6 +146,18 @@ def test_database_http_requires_own_consent(database_page):
     page.locator('#dbAllowHttp').click()
     playwright.expect(page.locator('#dbHttpNote')).to_be_hidden()
     playwright.expect(page.locator('#dbNew')).to_be_enabled()
+
+
+def test_existing_root_account_can_be_tested_without_creating_a_new_user(database_page):
+    page, state = database_page
+    page.locator('#dbNew').click()
+    page.locator('#dbName').fill('Existing database')
+    page.locator('#dbUser').fill('root')
+    page.locator('#dbPassword').fill('fixture-password')
+    page.locator('#dbTest').click()
+    playwright.expect(page.locator('#dbConnectionFeedback')).to_contain_text('当前账号：root；只读事务已验证')
+    assert state['posts'][-1][0] == '/test' and state['posts'][-1][1]['user'] == 'root'
+    assert all(payload.get('action') not in {'create_user', 'grant'} for _, payload in state['posts'])
 
 
 @pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'dark')])

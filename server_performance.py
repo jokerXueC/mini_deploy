@@ -25,7 +25,7 @@ from certificates import trusted_path
 from request_export import stamp, numeric, write_csv, safe_cell
 
 INTERVAL = 30
-DATABASE_PAGES = 32768
+DATABASE_PAGES = 65536
 WRITE_BATCH_SIZE = 64
 EVIDENCE_BUDGET = 32 * 1024 * 1024
 RETENTION = 7 * 86400
@@ -117,7 +117,8 @@ class History:
                     CREATE TABLE IF NOT EXISTS process_context (
                     run TEXT NOT NULL, ts INTEGER NOT NULL, at REAL NOT NULL, score REAL NOT NULL,
                     summary TEXT NOT NULL, detail BLOB NOT NULL, PRIMARY KEY(run,ts));
-                    CREATE INDEX IF NOT EXISTS process_age ON process_context(at);''')
+                    CREATE INDEX IF NOT EXISTS process_age ON process_context(at);
+                    CREATE TABLE IF NOT EXISTS history_state (key TEXT PRIMARY KEY,value TEXT NOT NULL);''')
                 yield db
 
     def record_context(self, snapshot, server):
@@ -186,6 +187,16 @@ class History:
                 self.persisted.pop(key, None)
 
     def _prepare_write(self, db, samples, contexts, now):
+        earliest = db.execute('SELECT MIN(first) FROM samples').fetchone()[0]
+        incoming = min((row[2] for row in samples), default=None)
+        starts = [value for value in (earliest, incoming) if value is not None]
+        if starts:
+            started = db.execute("SELECT value FROM history_state WHERE key='started_at'").fetchone()
+            if started is None:
+                db.executemany('INSERT INTO history_state VALUES(?,?)',
+                               [('started_at', str(min(starts))), ('start_known', str(int(earliest is None)))])
+            elif min(starts) < float(started[0]):
+                db.execute("UPDATE history_state SET value=? WHERE key='started_at'", (str(min(starts)),))
         page_size = db.execute('PRAGMA page_size').fetchone()[0]
         limit = db.execute('PRAGMA max_page_count').fetchone()[0]
         # Include row/index overhead and overflow pages, not just compressed evidence.
@@ -197,9 +208,10 @@ class History:
         db.execute('DELETE FROM samples WHERE ts < ?', (now - RETENTION,))
         db.execute('DELETE FROM process_context WHERE at < ?', (now - RETENTION,))
         count = db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
-        if count + len(samples) > 22000:
-            db.execute('DELETE FROM samples WHERE rowid IN (SELECT rowid FROM samples ORDER BY ts LIMIT ?)',
-                       (count + len(samples) - 22000,))
+        existing = sum(db.execute('SELECT 1 FROM samples WHERE run=? AND ts=?', row[:2]).fetchone() is not None
+                       for row in samples)
+        if count + len(samples) - existing > 22000:
+            self._retire_samples(db, count + len(samples) - existing - 22000, now)
         used = db.execute('SELECT COALESCE(SUM(length(detail)),0) FROM process_context').fetchone()[0]
         required = sum(len(row[-1]) for row in contexts)
         if used + required > EVIDENCE_BUDGET:
@@ -219,18 +231,23 @@ class History:
             if limit - pages + free >= reserve:
                 return
             # Reuse old monitoring pages in place; never unlink or rebuild the database.
-            victims = list(db.execute('''SELECT kind,id FROM (
-                SELECT 'sample' AS kind,rowid AS id,ts AS age FROM samples
-                    WHERE rowid IN (SELECT rowid FROM samples ORDER BY ts LIMIT 128)
-                UNION ALL
-                SELECT 'context',rowid,at FROM process_context
-                    WHERE rowid IN (SELECT rowid FROM process_context ORDER BY at LIMIT 128)
-                ) ORDER BY age,kind,id LIMIT 128'''))
-            if not victims:
+            # Process evidence must never evict otherwise retainable seven-day statistics.
+            victims = list(db.execute('SELECT rowid FROM process_context ORDER BY at LIMIT 128'))
+            if victims:
+                db.executemany('DELETE FROM process_context WHERE rowid=?', [(row[0],) for row in victims])
+            elif not self._retire_samples(db, 128, now):
                 raise sqlite3.OperationalError('性能历史库没有足够的可复用空间')
-            db.executemany('DELETE FROM samples WHERE rowid=?', [(r['id'],) for r in victims if r['kind'] == 'sample'])
-            db.executemany('DELETE FROM process_context WHERE rowid=?', [(r['id'],) for r in victims if r['kind'] == 'context'])
             db.commit()
+
+    @staticmethod
+    def _retire_samples(db, count, now):
+        rows = list(db.execute('SELECT rowid,last FROM samples ORDER BY ts LIMIT ?', (count,)))
+        if not rows:
+            return False
+        db.executemany('DELETE FROM samples WHERE rowid=?', [(row[0],) for row in rows])
+        db.executemany('INSERT INTO history_state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                       [('capacity_evicted_until', str(max(row[1] for row in rows))), ('capacity_evicted_at', str(now))])
+        return True
 
     def _saved(self, batch, contexts, now):
         with self.lock:
@@ -263,7 +280,7 @@ class History:
                         batch = [json.loads(json.dumps(self.pending[key])) for key in selected if key in self.pending]
                         contexts = [self.contexts[key] for key in selected if key in self.contexts]
                     encoded = [(c['run'], c['ts'], c['at'], c['score'], json.dumps(context_summary(c), ensure_ascii=False),
-                                zlib.compress(json.dumps(c, ensure_ascii=False, allow_nan=False).encode())) for c in contexts]
+                                zlib.compress(json.dumps(c, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode())) for c in contexts]
                     encoded.sort(key=lambda row: row[2], reverse=True)
                     size, keep = 0, []
                     for row in encoded:
@@ -272,8 +289,8 @@ class History:
                             size += len(row[-1])
                     encoded = keep
                     samples = [(b['run'], b['ts'], b['first'], b['last'], b['observations'],
-                                json.dumps({**b['stats'], '_seconds': b['seconds']}, allow_nan=False),
-                                json.dumps(b['metadata'], ensure_ascii=False)) for b in batch]
+                                json.dumps({**b['stats'], '_seconds': b['seconds']}, allow_nan=False, separators=(',', ':')),
+                                json.dumps(b['metadata'], ensure_ascii=False, separators=(',', ':'))) for b in batch]
                     with self.connect() as db:
                         self._prepare_write(db, samples, encoded, now)
                         db.executemany('''INSERT INTO samples VALUES(?,?,?,?,?,?,?) ON CONFLICT(run,ts) DO UPDATE SET
@@ -309,6 +326,7 @@ class History:
         now = time.time() if now is None else now
         since = now - PERIODS[period]
         with self.connect() as db:
+            state = dict(db.execute('SELECT key,value FROM history_state'))
             last_saved = db.execute('SELECT MAX(last) FROM samples').fetchone()[0]
             raw = [dict(row) for row in db.execute('SELECT * FROM samples WHERE ts>=? AND first<=? ORDER BY first,run', (since, now))]
             contexts = [json.loads(row[0]) for row in db.execute(
@@ -351,8 +369,18 @@ class History:
         latest = max((row['last'] for row in raw), default=None)
         coverage_seconds = sum(1 for ts, mask in covered.items() for second in range(INTERVAL)
                                if mask & (1 << second) and since <= ts + second <= now)
+        started = float(state['started_at']) if 'started_at' in state else None
+        start_known = state.get('start_known') == '1'
+        not_started = min(PERIODS[period], max(0, math.ceil(started) - math.ceil(since))) if start_known else None
+        expected = PERIODS[period] - not_started if start_known else None
+        capacity_limited = float(state.get('capacity_evicted_until', '0')) >= since
         return {'period': period, 'since': stamp(since), 'until': stamp(now), 'generated_at': stamp(now),
             'interval_seconds': INTERVAL, 'retention_days': 7, 'sample_seconds': samples,
+            'statistics_count': len(points), 'expected_seconds': expected, 'not_started_seconds': not_started,
+            'collection_coverage_percent': min(100, coverage_seconds / expected * 100) if expected else None,
+            'uncovered_seconds': max(0, PERIODS[period] - coverage_seconds - (not_started or 0)),
+            'sampling_started_at': stamp(started) if started is not None else '', 'sampling_start_known': start_known,
+            'capacity_limited': capacity_limited,
             'coverage_seconds': coverage_seconds,
             'coverage_percent': min(100, coverage_seconds / PERIODS[period] * 100), 'session_count': len(sessions),
             'first_at': stamp(min(row['first'] for row in raw)) if raw else '', 'latest_at': stamp(latest) if latest is not None else '',
@@ -361,7 +389,7 @@ class History:
             'metadata': metadata, 'points': points, 'summary': summary, 'metrics': METRICS,
             'contexts': contexts, 'context_details': details,
             'context_notice': '进程每约 5 秒读取计数差值，每 30 秒保留压力最明显的一次现场；进程速率为计数窗口平均，整机指标为最近的 1 秒采样，窗口不同可能产生差异。CPU 以单逻辑核为 100%，整机占比另列；常驻内存 RSS 可能包含共享页。磁盘 I/O 为内核记账的存储读写字节，不是网络流量；写入记账与设备落盘时刻可能不同。排名只覆盖采样时仍存在且有读取权限的进程，短暂进程和两次采样之间的尖峰可能遗漏。同一时刻占用高是排查线索，不等于已确认因果；不采集命令参数、环境变量或文件内容。现场最多保留 7 天，压缩明细达到 32 MiB 时较早现场会先淘汰，不影响总体统计；两者共同受总库容量限制。',
-            'notice': '每秒采集、每 30 秒持久保存平均值和峰值；无需打开网页。历史最多保留 7 天，总库上限 128 MiB（包含索引和现场摘要），接近容量上限会提前轮换较早记录并预留写入空间。仅分析已保存采样，缺失不补零；峰值为实际 1 秒采样峰值。网络统计沿用所有非回环接口之和，可能包含虚拟接口流量。'}
+            'notice': '每秒采集、每 30 秒持久保存平均值和峰值；无需打开网页。优先保留最近 7 天基础统计，总库上限 256 MiB（包含索引和现场摘要），容量紧张先轮换进程现场；极端容量或超过 22000 组统计时仍会轮换统计并明确提示。采样观测次数、去重采样秒数和统计组数分别计算；缺失不补零，尚未持久化的数据不计入覆盖率。峰值为实际 1 秒采样峰值。网络统计沿用所有非回环接口之和，可能包含虚拟接口流量。'}
 
     def nearby(self, at, radius=300):
         with self.connect() as db:
