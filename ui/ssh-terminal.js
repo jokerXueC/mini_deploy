@@ -1,8 +1,21 @@
 (() => {
   const el = id => document.getElementById(id);
   let token = '', profiles = [], profileId = '', session = '', cursor = 0;
-  let terminal, fit, generation = 0, loading = false, busy = false, allowed = false, available = false;
-  let allowingHttp = false;
+  let terminal, fit, generation = 0, busy = false, allowed = false, available = false;
+  let allowingHttp = false, refreshPromise, suspended = false, loginResolve;
+  const sessionKey = 'mini-deploy-ssh-session';
+  const connections = el('sshForm').closest('.ssh-connections');
+  const login = document.createElement('dialog'); login.id = 'sshLoginDialog'; login.className = 'ssh-login-dialog';
+  login.setAttribute('aria-labelledby', 'sshLoginTitle');
+  login.innerHTML = '<header class="ssh-login-head"><div><h2 id="sshLoginTitle">登录服务器</h2><p>与远程终端共用连接</p></div><button id="sshLoginClose" class="toolbar-icon" type="button" title="关闭" aria-label="关闭服务器登录"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></header><div class="ssh-login-body"></div>';
+  document.body.append(login);
+  // Fingerprint verification must also work while the terminal page is hidden.
+  document.body.append(el('sshFingerprintDialog'));
+  const loginParts = ['sshSecurityNotice', connections, 'sshFeedback', 'sshRelogin'].map(value => {
+    const node = typeof value === 'string' ? el(value) : value;
+    const anchor = document.createComment('ssh-login-home'); node.before(anchor);
+    return {node, anchor};
+  });
   let input = '', inputTimer, sending = false, resizeTimer, lastSize = '', outputController;
   const feedback = (message, kind = 'info') => { el('sshFeedback').textContent = message; el('sshFeedback').dataset.kind = kind; };
   const credentials = () => { ['sshPassword', 'sshPrivateKey', 'sshPassphrase', 'sshKeyFile'].forEach(id => { el(id).value = ''; }); };
@@ -44,7 +57,8 @@
 
   function controls() {
     el('sshFields').disabled = !allowed || !available || busy;
-    el('sshConnect').disabled = !!session || busy;
+    el('sshConnect').disabled = (!!session && !login.open) || busy;
+    el('sshLoginClose').disabled = busy;
     el('sshDisconnect').disabled = !session;
     ['sshCopy', 'sshPaste', 'sshClear'].forEach(id => { el(id).disabled = !terminal; });
     el('sshPaste').disabled = !session;
@@ -52,6 +66,7 @@
     el('sshNew').disabled = busy;
     if (terminal) terminal.options.disableStdin = !session;
     el('sshProfiles').querySelectorAll('button').forEach(button => { button.disabled = busy || !allowed; });
+    el('sshSessions').querySelectorAll('button').forEach(button => { button.disabled = busy || !allowed; });
     window.dispatchEvent(new CustomEvent('ssh-session-change'));
   }
 
@@ -107,29 +122,40 @@
     finally { allowingHttp = false; el('sshAllowHttp').disabled = !el('sshHttpCheck').checked; }
   });
 
-  async function refresh() {
-    if (loading) return;
-    loading = true;
+  function refresh() {
+    if (refreshPromise) return refreshPromise;
+    refreshPromise = refreshStatus().finally(() => { refreshPromise = undefined; });
+    return refreshPromise;
+  }
+  async function refreshStatus() {
     try {
       const data = await api('/ssh');
       el('sshRelogin').hidden = true;
       profiles = data.profiles; available = data.available; updateAccess(data);
       renderProfiles();
+      if (session && !data.sessions.some(item => item.id === session)) finish('连接已结束，请重新登录服务器。');
+      let remembered = '';
+      try { remembered = sessionStorage.getItem(sessionKey) || ''; } catch { /* Storage may be disabled. */ }
+      const existing = data.sessions.find(item => item.id === (session || remembered)) || (!session && data.sessions.length === 1 ? data.sessions[0] : null);
+      if (allowed && existing && (!session || suspended)) attach(existing);
       if (!available) feedback('SSH 组件尚未安装。请重新运行安装脚本，或执行 apt-get install -y python3-paramiko 后重启 mini-deploy-agent。');
       else if (!allowed) feedback('先在上方确认允许本次登录使用 HTTP，再填写连接信息。也可使用 HTTPS 或本地隧道。');
       else if (!session) feedback('填写服务器地址和登录凭据后连接。');
-      const other = data.sessions.filter(item => item.id !== session);
+      const other = data.sessions.filter(item => login.open || item.id !== session);
       el('sshOtherSessions').hidden = !other.length;
+      el('sshOtherSessions').open = login.open;
       el('sshSessions').replaceChildren();
       for (const item of other) {
         const row = document.createElement('div'); row.className = 'ssh-profile';
         const address = document.createElement('span'); address.textContent = `${item.username}@${item.host}:${item.port}`;
+        const use = document.createElement('button'); use.className = 'ghost-button compact-action'; use.type = 'button'; use.textContent = '使用此连接'; use.disabled = !allowed;
+        use.addEventListener('click', () => { attach(item); if (login.open) login.close('connected'); else refresh(); });
         const button = document.createElement('button'); button.className = 'ghost-button compact-action'; button.textContent = '断开'; button.type = 'button'; button.disabled = !allowed;
-        button.addEventListener('click', async () => { try { await api('/ssh/disconnect', {id: item.id}); await refresh(); } catch (error) { feedback(error.message); } });
-        row.append(address, button); el('sshSessions').append(row);
+        button.addEventListener('click', async () => { try { await api('/ssh/disconnect', {id: item.id}); if (session === item.id) finish('连接已断开。'); await refresh(); } catch (error) { feedback(error.message); } });
+        row.append(address, use, button); el('sshSessions').append(row);
       }
     } catch (error) { allowed = false; feedback(error.message); el('sshRelogin').hidden = error.status !== 401; }
-    finally { loading = false; controls(); }
+    finally { controls(); }
   }
 
   function theme() {
@@ -301,6 +327,7 @@
 
   function finish(reason) {
     session = ''; generation++; input = ''; lastSize = ''; clearTimeout(inputTimer); inputTimer = undefined;
+    try { sessionStorage.removeItem(sessionKey); } catch { /* Storage may be disabled. */ }
     outputController?.abort();
     credentials(); state('已断开'); controls(); feedback(reason);
   }
@@ -314,26 +341,53 @@
     }
   }
 
+  function attach(data) {
+    if (session === data.id && !suspended) return;
+    generation++; outputController?.abort(); input = ''; cursor = 0; lastSize = ''; suspended = false;
+    clearTimeout(inputTimer); inputTimer = undefined;
+    ensureTerminal(); session = data.id;
+    try { sessionStorage.setItem(sessionKey, session); } catch { /* Credentials are never stored. */ }
+    el('sshTarget').replaceChildren();
+    for (const [kind, value] of [['user', data.username], ['separator', '@'], ['host', data.host], ['port', `:${data.port}`]]) {
+      const span = document.createElement('span'); span.className = `ssh-target-${kind}`; span.textContent = value; el('sshTarget').append(span);
+    }
+    state('已连接', true); feedback('连接已建立，可在 AI 助手和远程终端中继续使用。', 'success'); controls();
+    poll(session, generation); requestAnimationFrame(resize);
+  }
+
+  async function requestConnection({manage = false} = {}) {
+    if (login.open) return new Promise(resolve => login.addEventListener('close', () => resolve(login.returnValue === 'connected'), {once:true}));
+    await refresh();
+    if (login.open) return new Promise(resolve => login.addEventListener('close', () => resolve(login.returnValue === 'connected'), {once:true}));
+    if (session && !manage) return true;
+    for (const {node} of loginParts) login.querySelector('.ssh-login-body').append(node);
+    credentials(); login.returnValue = 'cancel'; login.showModal(); controls();
+    const completed = new Promise(resolve => { loginResolve = resolve; });
+    refresh(); el('sshHost').focus();
+    return completed;
+  }
+  el('sshLoginClose').onclick = () => { if (!busy) login.close('cancel'); };
+  login.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
+  login.addEventListener('close', () => {
+    credentials(); for (const {node, anchor} of loginParts) anchor.after(node);
+    controls(); loginResolve?.(login.returnValue === 'connected'); loginResolve = undefined;
+    requestAnimationFrame(resize);
+  });
+
   el('sshForm').addEventListener('submit', async event => {
-    event.preventDefault(); if (busy || session || !allowed || !available) return;
+    event.preventDefault(); if (busy || (session && !login.open) || !allowed || !available) return;
     busy = true; controls(); state('检查主机中'); feedback('正在连接 SSH 服务并检查主机指纹…');
     try {
       const probe = await api('/ssh/probe', spec());
-      if (!(await trust(probe))) { state('未连接'); feedback('已取消，未发送登录凭据。'); return; }
-      ensureTerminal();
+      if (!(await trust(probe))) { state(session ? '已连接' : '未连接', !!session); feedback('已取消，未发送登录凭据。'); return; }
       state('认证中'); feedback('正在认证并启动终端…');
       const data = await api('/ssh/connect', {ticket: probe.ticket, accept_host_key: true, auth: el('sshAuth').value,
         password: el('sshPassword').value, private_key: el('sshPrivateKey').value, passphrase: el('sshPassphrase').value,
-        cols: Math.max(20, Math.min(300, terminal.cols)), rows: Math.max(5, Math.min(120, terminal.rows))});
-      session = data.id; cursor = 0; generation++; input = '';
+        cols: Math.max(20, Math.min(300, terminal?.cols || 80)), rows: Math.max(5, Math.min(120, terminal?.rows || 24))});
+      attach(data);
       if (matchMedia('(max-width: 760px)').matches) collapseConnections(true);
-      el('sshTarget').replaceChildren();
-      for (const [kind, value] of [['user', data.username], ['separator', '@'], ['host', data.host], ['port', `:${data.port}`]]) {
-        const span = document.createElement('span'); span.className = `ssh-target-${kind}`; span.textContent = value; el('sshTarget').append(span);
-      }
-      state('已连接', true); feedback('连接已建立。', 'success'); terminal.focus();
-      poll(session, generation);
-    } catch (error) { state('连接失败'); feedback(error.message, 'error'); }
+      if (login.open) login.close('connected'); else terminal.focus();
+    } catch (error) { state(session ? '已连接' : '连接失败', !!session); feedback(error.message, 'error'); }
     finally { busy = false; credentials(); controls(); }
   });
   el('sshTrustCheck').addEventListener('change', () => { el('sshTrustConfirm').disabled = !el('sshTrustCheck').checked; });
@@ -356,18 +410,11 @@
   });
   el('sshNew').addEventListener('click', async () => {
     if (busy) return;
-    busy = true; controls();
-    try {
-      await disconnect({strict: true});
-      collapseConnections(false);
-      profileId = ''; credentials(); el('sshHost').value = el('sshName').value = '';
-      el('sshPort').value = '22'; el('sshUsername').value = 'root';
-      el('sshTarget').textContent = ''; el('sshTerminal').hidden = true; el('sshEmpty').hidden = false;
-      terminal?.reset(); state('未连接'); renderProfiles();
-      feedback('填写新的服务器地址和登录凭据后连接。');
-    } catch (error) { feedback(`无法确认旧连接已断开：${error.message} 请刷新面板查看剩余会话。`); }
-    finally { busy = false; controls(); el('sshHost').focus(); }
+    profileId = ''; credentials(); el('sshHost').value = el('sshName').value = '';
+    el('sshPort').value = '22'; el('sshUsername').value = 'root';
+    await requestConnection({manage:true});
   });
+  el('sshNew').title = '登录其他服务器，保留已有连接';
   el('sshConnectionToggle').addEventListener('click', () => collapseConnections(el('sshConnectionToggle').getAttribute('aria-expanded') === 'true'));
   el('sshDisconnect').addEventListener('click', disconnect);
   el('sshClear').addEventListener('click', () => { terminal?.clear(); terminal?.focus(); });
@@ -382,12 +429,12 @@
   });
   el('terminalViewTab').addEventListener('click', () => setView('terminal'));
   window.addEventListener('pagehide', () => {
-    if (session) api('/ssh/disconnect', {id: session}, {keepalive: true}).catch(() => {});
-    credentials();
+    suspended = true; generation++; outputController?.abort(); input = ''; credentials();
   });
-  window.addEventListener('beforeunload', event => { if (session || busy) { event.preventDefault(); event.returnValue = ''; } });
+  window.addEventListener('pageshow', event => { if (event.persisted) refresh(); });
+  window.addEventListener('beforeunload', event => { if (busy) { event.preventDefault(); event.returnValue = ''; } });
   window.SSHTerminal = {
-    updateAccess,
+    updateAccess, requestConnection,
     context() { return {session_id: session, selection: terminal?.getSelection() || '', cursor,
                        target: session ? el('sshTarget').textContent : ''}; },
     fileRequest(body, options) {
@@ -406,4 +453,5 @@
     if (!document.hidden && activeView === 'terminal') { refresh(); requestAnimationFrame(resize); }
   });
   if (activeView === 'terminal') window.SSHTerminal.viewChanged('terminal');
+  else { try { if (sessionStorage.getItem(sessionKey)) refresh(); } catch { /* Storage may be disabled. */ } }
 })();

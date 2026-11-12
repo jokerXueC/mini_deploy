@@ -11,10 +11,22 @@
     <form id="panelAIForm" class="panel-ai-compose"><textarea id="panelAIQuestion" aria-label="运维诊断问题" placeholder="继续追问，例如：哪个进程占用最多？" maxlength="2000" required></textarea><div class="panel-ai-bottom"><p id="panelAIFeedback" role="status"></p><button id="panelAIStop" class="ghost-button compact-action" type="button" hidden>停止</button><button id="panelAISend" class="ghost-button compact-action" type="submit">发送</button></div></form>`;
   document.body.append(dialog);
   const globalTools = document.createElement('div'); globalTools.className = 'panel-ai-global-tools'; globalTools.hidden = true;
-  globalTools.innerHTML = '<label for="panelAIPermission">操作方式</label><select id="panelAIPermission"><option value="approve">操作前确认</option><option value="auto">自动操作</option></select><button id="panelAINew" type="button" class="toolbar-icon" title="新建对话" aria-label="新建全局对话"><img src="ui/previews/ssh-ai/icons/plus.svg" alt=""></button>';
+  globalTools.innerHTML = '<label for="panelAIPermission">操作方式</label><select id="panelAIPermission"><option value="approve">操作前确认</option><option value="auto">自动操作</option></select><button id="panelAIConnect" type="button" class="ghost-button compact-action" title="登录或切换服务器">登录服务器</button><button id="panelAINew" type="button" class="toolbar-icon" title="新建对话" aria-label="新建全局对话"><img src="ui/previews/ssh-ai/icons/plus.svg" alt=""></button>';
   dialog.querySelector('.panel-ai-toolbar').after(globalTools);
   const grant = document.createElement('dialog'); grant.className = 'ops-dialog panel-ai-grant'; grant.id = 'panelAIGrant';
-  grant.innerHTML = '<header class="ops-head"><h2>授权自动操作</h2></header><p>授权覆盖本次登录当前已连接的 SSH 服务器，有效 30 分钟。AI 可自动检查、备份后编辑文件、启停服务和容器，并执行常见通用查询；变更可能中断业务。使用对应 SSH 账号权限，面板本机工具保持只读。</p><p>明确的删除、清空、格式化和卸载会被阻止；未知命令、新连接的服务器仍需逐条确认。命令检查不能保证识别所有间接删除行为；通用命令没有自动备份或回滚，停止或超时不保证远端进程终止。</p><label><input id="panelAIGrantConsent" type="checkbox">我了解范围，允许自动操作这些已连接的服务器。</label><p id="panelAIGrantFeedback" role="status"></p><footer><button id="panelAIGrantCancel" type="button" class="ghost-button compact-action">取消</button><button id="panelAIGrantConfirm" type="button" class="ghost-button compact-action" disabled>确认授权</button></footer>';
+  grant.setAttribute('aria-labelledby', 'panelAIGrantTitle');
+  grant.setAttribute('aria-describedby', 'panelAIGrantScope');
+  grant.innerHTML = `<header class="ops-head"><div><h2 id="panelAIGrantTitle">授权自动操作</h2><p>本次登录有效 · 30 分钟</p></div><button id="panelAIGrantClose" type="button" class="toolbar-icon" aria-label="关闭自动操作授权" title="关闭"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></header>
+    <div class="panel-ai-grant-body">
+      <p id="panelAIGrantScope">授权当前已连接的 SSH 服务器，使用对应账号权限。面板本机保持只读，服务变更可能中断业务。</p>
+      <dl class="panel-ai-grant-rules">
+        <div><dt>自动执行</dt><dd>状态检查、备份后编辑文件、启停服务和容器、常见查询。</dd></div>
+        <div><dt>仍需确认</dt><dd>未识别的命令与脚本、新连接服务器上的修改。</dd></div>
+        <div><dt>禁止执行</dt><dd>明确的删除、清空、格式化与卸载。</dd></div>
+      </dl>
+      <p class="panel-ai-grant-note">通用命令不自动备份或回滚，命令检查无法识别所有间接删除行为。停止或超时不保证远端进程终止。</p>
+    </div>
+    <footer class="panel-ai-grant-footer"><label class="panel-ai-grant-consent"><input id="panelAIGrantConsent" type="checkbox"><span>我已了解上述范围，允许自动操作这些服务器。</span></label><p id="panelAIGrantFeedback" role="status"></p><div class="panel-ai-grant-actions"><button id="panelAIGrantCancel" type="button" class="ghost-button compact-action">取消</button><button id="panelAIGrantConfirm" type="button" class="ghost-button compact-action panel-ai-primary" disabled>确认授权</button></div></footer>`;
   document.body.append(grant);
   const dock = document.createElement('button');
   dock.id = 'panelAIDock'; dock.className = 'panel-ai-dock'; dock.type = 'button'; dock.hidden = true;
@@ -129,6 +141,10 @@
       const title = document.createElement('summary'); title.textContent = `${event.title} · ${{done:event.write ? '已执行' : '已读取', failed:'执行失败', blocked:'未执行', cancelled:'已停止', awaiting_approval:'等待确认'}[event.status] || '执行中'}`;
       const body = document.createElement('pre'); body.textContent = event.result || event.command || '';
       details.append(title, body); item.progress.append(details);
+      if (globalMode && event.command === 'request_ssh_login' && event.status === 'done') {
+        const connect = document.createElement('button'); connect.type = 'button'; connect.className = 'ghost-button compact-action'; connect.textContent = '登录服务器';
+        connect.onclick = () => connectServer(); details.after(connect);
+      }
     }
     if (!['done', 'failed', 'cancelled', 'awaiting_approval'].includes(result.status)) {
       const loading = document.createElement('div'); loading.className = 'panel-ai-loading';
@@ -288,6 +304,19 @@
     $('panelAIQuestion').focus();
   }
   $('globalAIOpen').onclick = openGlobal;
+  async function connectServer() {
+    try {
+      if (await window.SSHTerminal.requestConnection({manage:true})) {
+        $('panelAIFeedback').textContent = `已连接 ${window.SSHTerminal.context().target}，可继续提问。`;
+      }
+    } catch (error) { $('panelAIFeedback').textContent = error.message; }
+  }
+  $('panelAIConnect').onclick = connectServer;
+  window.addEventListener('ssh-session-change', () => {
+    const current = window.SSHTerminal?.context();
+    $('panelAIConnect').textContent = current?.session_id ? '服务器已连接' : '登录服务器';
+    $('panelAIConnect').title = current?.session_id ? `${current.target} · 管理连接` : '登录或切换服务器';
+  });
   $('panelAINew').onclick = newGlobal;
   async function grantAccess(mode, consent = false) {
     accessBusy = true; controls();
@@ -304,12 +333,17 @@
   };
   $('panelAIGrantConsent').onchange = () => { $('panelAIGrantConfirm').disabled = !$('panelAIGrantConsent').checked; };
   $('panelAIGrantCancel').onclick = () => grant.close();
+  $('panelAIGrantClose').onclick = () => grant.close();
   grant.addEventListener('close', () => { $('panelAIPermission').value = permission; controls(); });
   $('panelAIGrantConfirm').onclick = async () => {
     if (!$('panelAIGrantConsent').checked) return;
     $('panelAIGrantConfirm').disabled = true;
-    try { await grantAccess('auto', true); grant.close(); }
+    try {
+      if (!(await window.SSHTerminal.requestConnection())) return;
+      await grantAccess('auto', true); grant.close();
+    }
     catch (error) { $('panelAIGrantFeedback').textContent = error.message; $('panelAIGrantConfirm').disabled = false; }
+    finally { $('panelAIGrantConfirm').disabled = !$('panelAIGrantConsent').checked; }
   };
   window.PanelAI = {async open(scope, initialQuestion = '') {
     if (dialog.open) return;

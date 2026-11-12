@@ -3408,7 +3408,7 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                 if session_id == panel_assistant.SESSION:
                     sessions = _ssh_manager().status(owner)['sessions']
                     if data.get('mode') == 'auto' and not sessions:
-                        raise terminal_ai.AIError('请先在远程终端连接需要操作的服务器，再授权自动操作。')
+                        raise terminal_ai.AIError('请在 AI 助手中点击“登录服务器”，登录后再授权自动操作。')
                 else:
                     session = _ssh_manager().session(self._ssh_owner(), session_id)
                     if session.closed or time.time() >= session.expires:

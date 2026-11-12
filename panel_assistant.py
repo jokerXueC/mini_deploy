@@ -16,7 +16,7 @@ GUIDANCE = (
     '先用 list_connected_servers/list_database_connections/get_panel_overview 定位目标；'
     '多个同名或不明确目标先询问用户，不能把面板主机的数据当作远程服务器数据。'
     'SSH 目标只能来自 list_connected_servers 的 session_id，不能用模型生成的地址发起登录。'
-    '尚未连接的远程服务器需要用户在远程终端完成登录，绝不要求向对话提供密码。'
+    '尚未连接的远程服务器用 request_ssh_login 展示对话内登录入口，用户在登录面板认证后继续；绝不要求向对话提供密码。'
     '所有未加 ssh_ 前缀的文件、容器、服务及面板历史工具都属于面板主机；'
     'ssh_ 工具属于指定的已登录远程服务器。数据库连接地址相对于面板主机。'
     'SSH 读取、编辑和通用命令使用 ssh_list_directory/ssh_read_text_file/ssh_edit_file/ssh_execute_command 等实际提供的工具名，均须带 session_id；'
@@ -45,6 +45,7 @@ class Backend:
         own = [
             ('get_read_capabilities', '核对本轮全局工具、面板主机与 SSH 权限及数据库可用性', {}, []),
             ('list_connected_servers', '列出本次面板登录已认证且仍有效的 SSH 服务器；不返回密码，不自动登录', {}, []),
+            ('request_ssh_login', '需要登录其他服务器时，在当前对话展示登录入口；不接受凭据，用户登录后继续对话', {}, []),
             ('list_code_projects', '发现面板主机源码项目及路径；也可直接按用户指定绝对路径读取文件', {}, []),
             ('get_incident_evidence', '读取对话指定异常的前后五分钟资源、进程现场和关联事件；id 来自当前告警/事件',
              {'id': {'type': 'string', 'maxLength': 200}}, ['id']),
@@ -70,7 +71,7 @@ class Backend:
             raise terminal_tools.ToolError('请使用 list_connected_servers 返回的 session_id。')
         session = self.resolve(key)
         if session.closed or time.time() >= session.expires:
-            raise terminal_tools.ToolError('该 SSH 连接已结束或过期，请在远程终端重新连接。')
+            raise terminal_tools.ToolError('该 SSH 连接已结束或过期，请使用 request_ssh_login 在当前对话重新登录。')
         return session
 
     def plan(self, name, args):
@@ -94,7 +95,7 @@ class Backend:
                     'title': target + ' · ' + plan['title'],
                     **({'force_approval': True, 'approval_required': True}
                        if plan['write'] and args['session_id'] not in self.auto_sessions else {})}
-        if name in {'get_read_capabilities', 'list_connected_servers', 'list_code_projects', 'get_incident_evidence'}:
+        if name in {'get_read_capabilities', 'list_connected_servers', 'request_ssh_login', 'list_code_projects', 'get_incident_evidence'}:
             if name == 'get_incident_evidence':
                 if set(args) != {'id'} or not isinstance(args['id'], str) or not 0 < len(args['id']) <= 200:
                     raise terminal_tools.ToolError('异常编号无效。')
@@ -141,7 +142,9 @@ class Backend:
                 except ValueError:
                     continue
                 items.append({'session_id': item['id'], **{key: session.spec.get(key) for key in ('host', 'port', 'username', 'name')}})
-            result = {'servers': items, 'notice': '仅当前登录的有效 SSH 会话；未连接的主机需先在远程终端登录。'}
+            result = {'servers': items, 'notice': '仅当前登录的有效 SSH 会话；未连接的主机使用 request_ssh_login 在当前对话登录。'}
+        elif name == 'request_ssh_login':
+            result = {'action': 'ssh_login', 'notice': '请点击本条工具记录旁的“登录服务器”，在登录面板填写凭据后继续提问。不要在对话中发送密码或私钥。'}
         elif name == 'get_read_capabilities':
             result = {'tools': [tool['function']['name'] for tool in self.schemas()],
                       'host': self.panel.target, 'host_read_only': True, 'ssh_permission': self.permission_mode,

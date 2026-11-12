@@ -1,12 +1,35 @@
 .panel-ai-dialog { max-width: 900px; }
 .panel-ai-global-tools { display: flex; align-items: center; gap: 10px; padding: 10px 22px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.panel-ai-global-tools { flex-wrap: wrap; }
+#panelAIConnect { max-width: 100%; }
 .panel-ai-global-tools select { color: var(--fg); background: var(--field-bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px; font: inherit; }
 .panel-ai-global-tools > label { flex-shrink: 0; white-space: nowrap; }
 .panel-ai-global-tools .form-select { flex: 0 1 220px; min-width: 0; }
 #panelAINew { margin-left: auto; }
 .panel-ai-dialog [hidden] { display: none !important; }
-.panel-ai-grant { max-width: 540px; font-size: 13px; line-height: 1.8; }
-.panel-ai-grant footer, .panel-ai-approval > div { display: flex; gap: 10px; justify-content: flex-end; }
+.ops-dialog.panel-ai-grant { --grant-padding: 24px; width: min(520px, calc(100vw - 32px)); height: fit-content; max-height: calc(100dvh - 40px); font-size: 13px; line-height: 1.7; }
+.panel-ai-grant > .ops-head { flex: 0 0 auto; align-items: flex-start; padding: 22px var(--grant-padding) 18px; border-bottom: 1px solid var(--line); }
+.panel-ai-grant .ops-head h2 { font-size: 17px; line-height: 1.5; }
+.panel-ai-grant .ops-head p { margin-top: 5px; }
+.panel-ai-grant-body { flex: 0 1 auto; min-height: 0; overflow-y: auto; padding: 18px var(--grant-padding) 20px; overflow-wrap: anywhere; }
+.panel-ai-grant-body > p { margin: 0; }
+.panel-ai-grant-rules { margin: 16px 0; }
+.panel-ai-grant-rules > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); column-gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.panel-ai-grant-rules > div:first-child { border-top: 1px solid var(--line); }
+.panel-ai-grant-rules dt { font-size: 12px; font-weight: 500; color: var(--muted); }
+.panel-ai-grant-rules dd { margin: 0; }
+.panel-ai-grant-note { color: var(--muted); font-size: 12px; }
+.panel-ai-grant-footer { flex: 0 0 auto; padding: 16px var(--grant-padding) 20px; border-top: 1px solid var(--line); background: var(--surface-soft); }
+.panel-ai-grant-consent { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; font-size: 12px; }
+.panel-ai-grant-consent input { flex: 0 0 15px; width: 15px; height: 15px; margin: 3px 0 0; accent-color: var(--control-accent); }
+#panelAIGrantFeedback { margin: 12px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+#panelAIGrantFeedback:empty { display: none; }
+.panel-ai-grant-actions, .panel-ai-approval > div { display: flex; gap: 10px; justify-content: flex-end; }
+.panel-ai-grant-actions { margin-top: 18px; }
+.panel-ai-grant-actions > button { min-height: 34px; padding: 7px 16px; }
+#panelAIGrantConfirm { background: var(--control-accent); border-color: var(--control-accent); color: #fff; }
+html[data-theme=dark] #panelAIGrantConfirm:not(:disabled) { color: var(--bg); }
+#panelAIGrantConfirm:disabled { background: var(--surface-muted); border-color: var(--line); color: var(--muted); opacity: 1; cursor: not-allowed; }
 .panel-ai-approval { padding: 14px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
 .panel-ai-approval pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 #globalAIOpen { gap: 6px; }
@@ -50,4 +73,9 @@ html[data-theme=light] .panel-ai-loading img { filter: none; }
 .panel-ai-http { padding: 12px 22px; font-size: 12px; }
 .panel-ai-http label { display: block; margin-bottom: 8px; }
 @media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-http, .panel-ai-code { padding-left: 14px; padding-right: 14px; } }
+@media (max-width:600px) {
+  .ops-dialog.panel-ai-grant { --grant-padding: 18px; width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+  .panel-ai-grant > .ops-head { padding-top: 18px; padding-bottom: 16px; }
+  .panel-ai-grant-rules > div { grid-template-columns: 56px minmax(0, 1fr); column-gap: 12px; }
+}
 @media (prefers-reduced-motion:reduce) { .panel-ai-loading img, .panel-ai-dock .panel-ai-dock-indicator { animation: none; } }

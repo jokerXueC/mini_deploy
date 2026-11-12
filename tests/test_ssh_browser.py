@@ -35,6 +35,67 @@ def fill(page, peer):
     page.locator("#sshPassword").fill("safe-password")
 
 
+def test_login_dialog_keeps_http_consent_and_private_key_authentication(page, http_server, manager, peer):
+    page.goto(http_server.origin + '/ui?view=server')
+    page.route('**/ssh', lambda route: route.fulfill(json={'available': True, 'secure': False,
+        'profiles': [], 'sessions': [], 'csrf_token': 'token'}))
+    page.evaluate('void SSHTerminal.requestConnection({manage:true})')
+    playwright.expect(page.locator('#sshLoginDialog')).to_be_visible()
+    playwright.expect(page.locator('#sshSecurityNotice')).to_be_visible()
+    playwright.expect(page.locator('#sshHost')).to_be_disabled()
+    page.locator('#sshLoginClose').click()
+    page.unroute('**/ssh')
+    page.evaluate('void SSHTerminal.requestConnection({manage:true})')
+    playwright.expect(page.locator('#sshHost')).to_be_enabled()
+    fill(page, peer)
+    page.select_option('#sshAuth', 'key', force=True)
+    private = io.StringIO()
+    peer['user_key'].write_private_key(private, password='key-passphrase')
+    page.locator('#sshKeyFile').set_input_files({'name': 'id_rsa', 'mimeType': 'text/plain', 'buffer': private.getvalue().encode()})
+    page.locator('#sshPassphrase').fill('key-passphrase')
+    page.locator('#sshConnect').click()
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(page.locator('#sshLoginDialog')).not_to_be_visible()
+    assert peer['auth'] == [('demo', 'key')]
+    playwright.expect(page.locator('#sshPrivateKey')).to_have_value('')
+    playwright.expect(page.locator('#sshPassphrase')).to_have_value('')
+    page.evaluate("setView('terminal')")
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    page.locator('#sshDisconnect').click()
+
+
+def test_login_dialog_reuses_and_switches_sessions_without_disconnecting_them(page, http_server, manager, peer):
+    from test_ssh_terminal import connect
+    import terminal_ai
+    first = connect(manager, peer, terminal_ai.owner(http_server.cookie))
+    second = connect(manager, peer, terminal_ai.owner(http_server.cookie))
+    page.goto(http_server.origin + '/ui?view=server')
+    page.evaluate('void SSHTerminal.requestConnection({manage:true})')
+    playwright.expect(page.locator('#sshSessions .ssh-profile')).to_have_count(2)
+    page.locator('#sshSessions').get_by_role('button', name='使用此连接').first.click()
+    playwright.expect(page.locator('#sshLoginDialog')).not_to_be_visible()
+    assert page.evaluate('SSHTerminal.context().session_id') == first.id
+    page.evaluate('void SSHTerminal.requestConnection({manage:true})')
+    page.locator('#sshSessions').get_by_role('button', name='使用此连接').last.click()
+    playwright.expect(page.locator('#sshLoginDialog')).not_to_be_visible()
+    assert page.evaluate('SSHTerminal.context().session_id') == second.id
+    assert not first.closed and not second.closed and len(peer['auth']) == 2
+    page.reload()
+    page.wait_for_function('SSHTerminal.context().session_id !== ""')
+    assert page.evaluate('SSHTerminal.context().session_id') == second.id
+    assert not first.closed and not second.closed and len(peer['auth']) == 2
+    page.evaluate('void SSHTerminal.requestConnection({manage:true})')
+    playwright.expect(page.locator('#sshLoginDialog')).to_be_visible()
+    fill(page, peer)
+    page.locator('#sshConnect').click()
+    playwright.expect(page.locator('#sshLoginDialog')).not_to_be_visible()
+    assert page.evaluate('SSHTerminal.context().session_id') not in {first.id, second.id}
+    assert not first.closed and not second.closed and len(peer['auth']) == 3
+    page.goto(http_server.origin + '/logout')
+    assert all(session.closed for session in manager.sessions.values())
+
+
 def test_desktop_connection_sidebar_collapses_and_idle_terminal_still_accepts_input(page, http_server, manager, peer, tmp_path):
     page.goto(http_server.origin + '/ui?view=terminal')
     playwright.expect(page.locator('#sshHost')).to_be_enabled()
@@ -157,7 +218,7 @@ def test_private_key_upload_and_untrusted_http_disable_credentials(page, http_se
     playwright.expect(page.locator("#sshHost")).to_be_disabled()
 
 
-def test_new_connection_closes_current_session_and_allows_reconnect(page, http_server, manager, peer):
+def test_new_connection_uses_shared_login_and_preserves_current_session(page, http_server, manager, peer):
     page.goto(http_server.origin + "/ui?view=terminal")
     playwright.expect(page.locator("#sshHost")).to_be_enabled()
     fill(page, peer)
@@ -167,18 +228,19 @@ def test_new_connection_closes_current_session_and_allows_reconnect(page, http_s
     playwright.expect(page.locator("#sshState")).to_have_text("已连接")
     old_sessions = list(manager.sessions.values())
     page.locator("#sshNew").click()
-    playwright.expect(page.locator("#sshState")).to_have_text("未连接")
+    playwright.expect(page.locator('#sshLoginDialog')).to_be_visible()
+    playwright.expect(page.locator("#sshState")).to_have_text("已连接")
     playwright.expect(page.locator("#sshConnect")).to_be_enabled()
     playwright.expect(page.locator("#sshHost")).to_have_value("")
     playwright.expect(page.locator("#sshPort")).to_have_value("22")
     playwright.expect(page.locator("#sshUsername")).to_have_value("root")
-    playwright.expect(page.locator("#sshTarget")).to_be_empty()
-    playwright.expect(page.locator("#sshEmpty")).to_be_visible()
-    assert old_sessions and all(session.closed for session in old_sessions)
+    assert old_sessions and all(not session.closed for session in old_sessions)
     fill(page, peer)
     page.locator("#sshConnect").click()
+    playwright.expect(page.locator('#sshLoginDialog')).not_to_be_visible()
     playwright.expect(page.locator("#sshState")).to_have_text("已连接")
     playwright.expect(page.locator("#sshTerminal")).to_be_visible()
+    assert len(peer['auth']) == 2 and all(not session.closed for session in old_sessions)
     page.locator("#sshDisconnect").click()
 
 

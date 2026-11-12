@@ -15,6 +15,93 @@ from test_terminal_agent import tool_response, answer
 from test_panel_assistant import ssh_manager as ssh_manager, peer as peer
 
 
+@pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'dark')])
+def test_assistant_login_grants_access_and_terminal_reuses_session_after_reload(
+        page, http_server, manager, model_server, evidence, ssh_manager, peer, monkeypatch, tmp_path, width, theme):
+    manager.save(ai_tests.config(model_server))
+    monkeypatch.setattr(agent, '_ssh_manager', lambda: ssh_manager)
+    page.set_viewport_size({'width': width, 'height': 844})
+    page.goto(http_server.origin + '/ui?view=server')
+    page.evaluate('(theme) => applyTheme(theme)', theme)
+    page.locator('#globalAIOpen').click()
+    page.locator('#panelAIQuestion').fill('保留我的诊断问题')
+    permission = page.get_by_role('combobox', name='操作方式', exact=True)
+    permission.click()
+    page.get_by_role('option', name='自动操作', exact=True).click()
+    page.locator('#panelAIGrantConsent').check()
+    page.locator('#panelAIGrantConfirm').click()
+    login = page.locator('#sshLoginDialog')
+    playwright.expect(login).to_be_visible()
+    assert not manager.permissions and not peer['auth']
+    page.locator('#sshLoginClose').click()
+    playwright.expect(page.locator('#panelAIGrantConfirm')).to_be_enabled()
+    assert not manager.permissions
+    page.locator('#panelAIGrantConfirm').click()
+    playwright.expect(login).to_be_visible()
+    from test_ssh_browser import fill
+    fill(page, peer)
+    page.screenshot(path=str(tmp_path / f'assistant-login-{width}-{theme}.png'))
+    assert login.evaluate('el => el.scrollWidth <= el.clientWidth')
+    page.locator('#sshConnect').click()
+    playwright.expect(page.locator('#sshFingerprintDialog')).to_be_visible()
+    assert not peer['auth']
+    page.locator('#sshTrustCheck').check()
+    page.locator('#sshTrustConfirm').click()
+    playwright.expect(login).not_to_be_visible()
+    playwright.expect(page.locator('#panelAIGrant')).not_to_be_visible()
+    playwright.expect(permission).to_contain_text('自动操作')
+    playwright.expect(page.locator('#panelAIQuestion')).to_have_value('保留我的诊断问题')
+    playwright.expect(page.locator('#panelAIConnect')).to_have_text('服务器已连接')
+    session_id = page.evaluate('SSHTerminal.context().session_id')
+    assert len(peer['auth']) == 1 and len(ssh_manager.sessions) == 1
+    assert next(iter(manager.permissions.values()))['global_sessions'] == [session_id]
+    assert not model_server.calls
+    page.locator('#panelAIMinimize').click()
+    page.evaluate("setView('terminal')")
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    page.locator('.xterm-helper-textarea').focus()
+    page.keyboard.type('shared-session')
+    playwright.expect(page.locator('.xterm-rows')).to_contain_text('shared-session')
+    page.reload()
+    playwright.expect(page.locator('#sshState')).to_have_text('已连接')
+    assert page.evaluate('SSHTerminal.context().session_id') == session_id
+    assert len(peer['auth']) == 1 and not ssh_manager.sessions[session_id].closed
+    page.evaluate("setView('terminal')")
+    playwright.expect(page.locator('#sshTerminal')).to_be_visible()
+    page.locator('.xterm-helper-textarea').focus()
+    page.keyboard.type('after-refresh')
+    playwright.expect(page.locator('.xterm-rows')).to_contain_text('after-refresh', timeout=15000)
+    assert page.evaluate("document.querySelector('#sshPassword').value") == ''
+    assert page.evaluate("JSON.stringify(sessionStorage) + JSON.stringify(localStorage)").find('safe-password') == -1
+    page.locator('#sshDisconnect').click()
+    playwright.expect(page.locator('#sshState')).to_have_text('已断开')
+    page.reload()
+    page.evaluate("setView('terminal')")
+    playwright.expect(page.locator('#sshConnect')).to_be_enabled()
+    assert page.evaluate('SSHTerminal.context().session_id') == ''
+    assert ssh_manager.sessions[session_id].closed and len(peer['auth']) == 1
+
+
+def test_model_can_offer_login_inside_chat_without_receiving_credentials(
+        page, http_server, manager, model_server, evidence, ssh_manager, peer, monkeypatch):
+    manager.save(ai_tests.config(model_server))
+    monkeypatch.setattr(agent, '_ssh_manager', lambda: ssh_manager)
+    model_server.content = lambda body, count: tool_response('openai', 'request_ssh_login', {}) if count == 1 else answer('openai')
+    page.goto(http_server.origin + '/ui?view=server')
+    page.locator('#globalAIOpen').click()
+    page.locator('#panelAIQuestion').fill('请检查另一台服务器')
+    page.locator('#panelAISend').click()
+    playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
+    page.locator('#panelAIMessages').get_by_role('button', name='登录服务器', exact=True).click()
+    playwright.expect(page.locator('#sshLoginDialog')).to_be_visible()
+    page.locator('#sshPassword').fill('temporary-cancelled-secret')
+    page.locator('#sshLoginClose').click()
+    playwright.expect(page.locator('#panelAIDialog')).to_be_visible()
+    assert not peer['auth'] and not ssh_manager.sessions and not manager.permissions
+    assert page.locator('#sshPassword').input_value() == ''
+    assert 'temporary-cancelled-secret' not in json.dumps(model_server.calls)
+
+
 @pytest.mark.parametrize('width', [1440, 390])
 def test_incident_ai_without_ssh_renders_evidence_markdown_and_persisted_history(
         page, http_server, manager, model_server, evidence, tmp_path, width):
@@ -150,6 +237,57 @@ def test_global_ssh_approval_shows_actual_target_and_only_runs_after_consent(
     page.locator('.panel-ai-approval').get_by_role('button', name='同意执行' if decision else '拒绝').click()
     playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
     assert len(peer['exec']) == (2 if decision else 0)
+
+
+@pytest.mark.parametrize('width,height,theme', [
+    (1440, 1000, 'light'), (1440, 1000, 'dark'),
+    (390, 844, 'light'), (390, 844, 'dark'), (360, 568, 'dark'), (844, 390, 'light'),
+])
+def test_global_auto_grant_fits_content_with_padded_body_and_visible_confirmation(
+        page, http_server, manager, model_server, evidence, tmp_path, width, height, theme):
+    manager.save(ai_tests.config(model_server))
+    page.set_viewport_size({'width': width, 'height': height})
+    page.goto(http_server.origin + '/ui?view=server')
+    page.evaluate('(theme) => applyTheme(theme)', theme)
+    page.locator('#globalAIOpen').click()
+    permission = page.get_by_role('combobox', name='操作方式', exact=True)
+    permission.click()
+    page.get_by_role('option', name='自动操作', exact=True).click()
+    grant = page.get_by_role('dialog', name='授权自动操作', exact=True)
+    playwright.expect(grant).to_be_visible()
+    playwright.expect(page.locator('#panelAIGrantConfirm')).to_be_disabled()
+    metrics = grant.evaluate('''el => {
+      const box = el.getBoundingClientRect(), body = el.querySelector('.panel-ai-grant-body');
+      const actions = el.querySelector('.panel-ai-grant-actions').getBoundingClientRect();
+      const footer = el.querySelector('footer').getBoundingClientRect();
+      return {height:box.height, top:box.top, bottom:box.bottom, width:box.width,
+        padding:parseFloat(getComputedStyle(body).paddingLeft), overflow:el.scrollWidth > el.clientWidth,
+        bottomGap:box.bottom-actions.bottom, footerTop:footer.top, footerBottom:footer.bottom};
+    }''')
+    assert metrics['padding'] >= 18 and not metrics['overflow']
+    assert metrics['top'] >= 11 and metrics['bottom'] <= height - 11
+    assert metrics['footerTop'] > metrics['top'] and metrics['footerBottom'] <= metrics['bottom']
+    assert 16 <= metrics['bottomGap'] <= 25
+    if height >= 800:
+        assert metrics['height'] < 650
+    playwright.expect(page.locator('.panel-ai-grant-rules > div')).to_have_count(3)
+    page.locator('.panel-ai-grant-body').evaluate('el => el.scrollTop = el.scrollHeight')
+    playwright.expect(page.locator('.panel-ai-grant-note')).to_be_in_viewport()
+    playwright.expect(page.locator('#panelAIGrantConfirm')).to_be_in_viewport()
+    page.screenshot(path=str(tmp_path / f'global-auto-grant-{width}-{height}-{theme}.png'), animations='disabled')
+    page.locator('#panelAIGrantConsent').check()
+    playwright.expect(page.locator('#panelAIGrantConfirm')).to_be_enabled()
+    grant.screenshot(path=str(tmp_path / f'global-auto-grant-enabled-{width}-{height}-{theme}.png'), animations='disabled')
+    assert page.locator('#panelAIGrantConfirm').evaluate('''el => {
+      const style = getComputedStyle(el), pixel = document.createElement('span');
+      pixel.style.color = style.getPropertyValue('--control-accent'); el.append(pixel);
+      const accent = getComputedStyle(pixel).color; pixel.remove();
+      return style.backgroundColor === accent;
+    }''')
+    page.locator('#panelAIGrantClose').click()
+    playwright.expect(grant).not_to_be_visible()
+    playwright.expect(permission).to_contain_text('操作前确认')
+    assert not manager.permissions and not model_server.calls
 
 
 def test_global_auto_mode_requires_consent_and_unknown_commands_still_wait(
