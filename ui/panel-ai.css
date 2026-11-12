@@ -65,17 +65,38 @@ html[data-theme=light] .panel-ai-dock > img { filter: none; }
 .panel-ai-loading { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
 .panel-ai-loading img { width: 16px; height: 16px; filter: invert(1); animation: tai-spin 1.2s linear infinite; }
 html[data-theme=light] .panel-ai-loading img { filter: none; }
-.panel-ai-history { max-height: 220px; overflow: auto; padding: 12px 22px; border-bottom: 1px solid var(--line); }
+#panelAIHistory { display: inline-flex; align-items: center; gap: 6px; }
+#panelAIHistory img { width: 14px; height: 14px; }
+html[data-theme=dark] #panelAIHistory img { filter: invert(1); }
+#panelAIHistory[aria-expanded=true] { color: var(--control-accent); border-color: var(--control-accent); background: color-mix(in srgb, var(--control-accent) 10%, var(--card)); }
+#panelAIHistory[aria-expanded=true] img { transform: rotate(180deg); }
+.panel-ai-history-panel { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; max-height: min(270px, 36dvh); border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+.panel-ai-history-head { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 22px; border-bottom: 1px solid var(--line); }
+.panel-ai-history-head h3 { margin: 0; font-size: 12px; font-weight: 500; color: var(--muted); }
+.panel-ai-history { min-height: 0; max-height: min(220px, 28dvh); overflow: auto; overscroll-behavior: contain; padding: 8px 22px; font-size: 12px; color: var(--muted); }
+.panel-ai-history .tai-history-row { padding: 10px 12px; border: 0; border-left: 3px solid transparent; border-radius: 4px; margin: 3px 0; }
+.panel-ai-history .tai-history-row:hover { background: var(--surface-muted); }
+.panel-ai-history .tai-history-row[aria-current=true] { border-left-color: var(--control-accent); background: color-mix(in srgb, var(--control-accent) 10%, var(--surface-soft)); }
+.panel-ai-history-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.panel-ai-history-title strong { min-width: 0; }
+.panel-ai-history-current { flex-shrink: 0; font-size: 11px; line-height: 1.7; color: var(--control-accent); }
+.panel-ai-history .tai-history-row:disabled { cursor: wait; }
+.panel-ai-history .tai-history-row:focus-visible { outline: 2px solid var(--control-accent); outline-offset: 1px; }
 .panel-ai-compose { flex-shrink: 0; border-top: 1px solid var(--line); }
 .panel-ai-compose textarea { width: 100%; min-height: 66px; max-height: 180px; resize: vertical; padding: 10px; background: var(--field-bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 13px; }
 .panel-ai-bottom { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
 .panel-ai-bottom p { flex: 1; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .panel-ai-http { padding: 12px 22px; font-size: 12px; }
 .panel-ai-http label { display: block; margin-bottom: 8px; }
-@media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-http, .panel-ai-code { padding-left: 14px; padding-right: 14px; } }
+@media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-history-head, .panel-ai-http, .panel-ai-code { padding-left: 14px; padding-right: 14px; } }
 @media (max-width:600px) {
   .ops-dialog.panel-ai-grant { --grant-padding: 18px; width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
   .panel-ai-grant > .ops-head { padding-top: 18px; padding-bottom: 16px; }
   .panel-ai-grant-rules > div { grid-template-columns: 56px minmax(0, 1fr); column-gap: 12px; }
+}
+@media (max-width:600px), (max-height:700px) {
+  .panel-ai-history-panel { flex: 1; max-height: none; }
+  .panel-ai-history { flex: 1; max-height: none; }
+  .panel-ai-dialog:has(#panelAIHistoryPanel:not([hidden])) :is(.panel-ai-messages, .panel-ai-compose) { display: none; }
 }
 @media (prefers-reduced-motion:reduce) { .panel-ai-loading img, .panel-ai-dock .panel-ai-dock-indicator { animation: none; } }

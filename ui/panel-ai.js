@@ -3,9 +3,9 @@
   const dialog = document.createElement('dialog'); dialog.id = 'panelAIDialog'; dialog.className = 'ops-dialog panel-ai-dialog';
   dialog.setAttribute('aria-labelledby', 'panelAITitle');
   dialog.innerHTML = `<header class="ops-head"><div><h2 id="panelAITitle">AI 运维诊断</h2><p id="panelAITarget">面板所在服务器 · 只读诊断</p></div><div class="panel-ai-window-actions"><button id="panelAIMinimize" type="button" class="toolbar-icon" aria-label="最小化 AI 诊断" title="最小化，诊断继续运行"><img src="ui/previews/ssh-ai/icons/minimize-2.svg" alt=""></button><button id="panelAIClose" type="button" class="toolbar-icon" aria-label="关闭 AI 诊断" title="关闭并停止当前诊断"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></div></header>
-    <div class="panel-ai-toolbar"><p id="panelAIScope"></p><button id="panelAIHistory" class="ghost-button compact-action" type="button">历史记录</button><button id="panelAISettings" class="ghost-button compact-action" type="button">模型设置</button></div>
+    <div class="panel-ai-toolbar"><p id="panelAIScope"></p><button id="panelAIHistory" class="ghost-button compact-action" type="button" aria-expanded="false" aria-controls="panelAIHistoryPanel"><span id="panelAIHistoryLabel">历史记录</span><img src="ui/previews/ssh-ai/icons/chevron-down.svg" alt=""></button><button id="panelAISettings" class="ghost-button compact-action" type="button">模型设置</button></div>
     <div class="panel-ai-code"><label for="panelAICodeProject">代码范围</label><select id="panelAICodeProject"><option value="">服务器文件（只读）</option></select><button id="panelAICodeRefresh" class="toolbar-icon" type="button" title="重新扫描代码项目" aria-label="重新扫描代码项目"><img src="ui/previews/ssh-ai/icons/refresh-cw.svg" alt=""></button><span id="panelAICodeStatus" role="status"></span></div>
-    <div id="panelAIHistoryList" class="panel-ai-history" hidden></div>
+    <section id="panelAIHistoryPanel" class="panel-ai-history-panel" aria-labelledby="panelAIHistoryTitle" hidden><header class="panel-ai-history-head"><h3 id="panelAIHistoryTitle">对话历史</h3><button id="panelAIHistoryClose" class="toolbar-icon" type="button" aria-label="收起历史记录" title="收起历史记录"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></header><div id="panelAIHistoryList" class="panel-ai-history" aria-busy="false"></div></section>
     <div id="panelAIHttp" class="panel-ai-http" hidden><label><input id="panelAIHttpConsent" type="checkbox"> 我了解 HTTP 明文传输风险，允许本次登录使用 AI</label><button id="panelAIHttpAllow" class="ghost-button compact-action" type="button" disabled>允许本次登录</button></div>
     <div id="panelAIMessages" class="panel-ai-messages" aria-live="polite"></div>
     <form id="panelAIForm" class="panel-ai-compose"><textarea id="panelAIQuestion" aria-label="运维诊断问题" placeholder="继续追问，例如：哪个进程占用最多？" maxlength="2000" required></textarea><div class="panel-ai-bottom"><p id="panelAIFeedback" role="status"></p><button id="panelAIStop" class="ghost-button compact-action" type="button" hidden>停止</button><button id="panelAISend" class="ghost-button compact-action" type="submit">发送</button></div></form>`;
@@ -63,12 +63,19 @@
   let globalMode = false, permission = 'approve', accessBusy = false;
   function controls() {
     $('panelAISend').disabled = busy || historyBusy || projectsBusy || scopeUnavailable || accessBusy; $('panelAIStop').hidden = !busy;
-    $('panelAIHistory').disabled = busy || historyBusy || projectsBusy; $('panelAISettings').disabled = busy;
+    $('panelAIHistory').disabled = busy || projectsBusy; $('panelAISettings').disabled = busy;
+    $('panelAIHistoryList').querySelectorAll('button').forEach(button => { button.disabled = busy || historyBusy || projectsBusy; });
     $('panelAICodeProject').disabled = busy || historyBusy || projectsBusy;
     $('panelAICodeRefresh').disabled = busy || historyBusy || projectsBusy;
     $('panelAIPermission').disabled = busy || historyBusy || accessBusy || !settings.configured;
     $('panelAINew').disabled = busy || historyBusy;
     window.AppSelects?.syncAll();
+  }
+  function setHistoryOpen(open, focus = false) {
+    $('panelAIHistoryPanel').hidden = !open;
+    $('panelAIHistory').setAttribute('aria-expanded', String(open));
+    $('panelAIHistoryLabel').textContent = open ? '收起历史' : '历史记录';
+    if (focus) $('panelAIHistory').focus({preventScroll:true});
   }
   async function api(path, data) {
     const response = await fetch(`/terminal-ai/${path}`, {method:data ? 'POST' : 'GET', credentials:'same-origin',
@@ -96,7 +103,7 @@
   }
   function changeProject() {
     conversation = ''; history = ''; currentHistory = ''; scopeUnavailable = false;
-    $('panelAIMessages').replaceChildren(); $('panelAIHistoryList').hidden = true;
+    $('panelAIMessages').replaceChildren(); setHistoryOpen(false);
     $('panelAITarget').textContent = '面板所在服务器 · 只读诊断';
     $('panelAIFeedback').textContent = '已切换代码范围，开始新的对话；原对话保留在历史中。';
     codeStatus(); controls();
@@ -178,6 +185,7 @@
   async function cancel(id) { if (id) { try { await api('cancel', {id}); } catch (error) { $('panelAIFeedback').textContent = error.message; } } }
   async function ask() {
     const question = $('panelAIQuestion').value.trim(); if (busy || historyBusy || projectsBusy || scopeUnavailable || accessBusy || !question) return;
+    setHistoryOpen(false);
     const run = ++generation; busy = true; setPhase('preparing'); controls();
     let item;
     try {
@@ -229,7 +237,7 @@
       $('panelAIMessages').replaceChildren();
       for (const turn of result.turns) { const item = entry(turn.question); renderProgress(item, {status:'done', events:turn.events}); renderAnswer(item, turn.answer || '本轮没有完成'); }
       if (historyBefore !== null) { const older = document.createElement('button'); older.className = 'ghost-button compact-action'; older.textContent = '更早的对话'; older.onclick = () => openHistory(currentHistory, historyBefore); $('panelAIMessages').prepend(older); }
-      $('panelAIHistoryList').hidden = true; $('panelAIFeedback').textContent = '历史已加载，追问会重新检查当前主机；历史证据不会补造。';
+      setHistoryOpen(false, true); $('panelAIFeedback').textContent = '历史已加载，追问会重新检查当前主机；历史证据不会补造。';
       if (scopeUnavailable) $('panelAIFeedback').textContent = '历史代码目录已不可用，可选择其他项目或“服务器文件（只读）”开始新对话。';
       if (globalMode && scopeUnavailable) $('panelAIFeedback').textContent = '这是旧入口或其他主机的历史记录，可查看；新建全局对话后继续提问。';
       setPhase('idle');
@@ -237,22 +245,31 @@
     finally { if (run === generation) { historyBusy = false; controls(); } }
   }
   async function listHistory(offset = 0) {
-    if (busy || historyBusy || projectsBusy) return; historyBusy = true; controls(); const run = generation;
+    if (busy || projectsBusy) return;
+    setHistoryOpen(true);
+    if (historyBusy) return;
+    const list = $('panelAIHistoryList');
+    if (!offset) list.textContent = '正在加载历史记录…';
+    list.setAttribute('aria-busy', 'true');
+    historyBusy = true; controls(); const run = generation;
     try {
       const result = await api(`history?offset=${offset}`); if (run !== generation || !sessionActive) return;
-      const list = $('panelAIHistoryList'); list.hidden = false;
       if (!offset) list.replaceChildren(); else list.querySelector('[data-more]')?.remove();
       for (const record of result.conversations.filter(item => globalMode || item.target?.startsWith('面板主机：'))) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'tai-history-row';
+        button.setAttribute('aria-current', String(record.id === history)); button.title = record.title;
+        const heading = document.createElement('div'); heading.className = 'panel-ai-history-title';
         const title = document.createElement('strong'); title.textContent = record.title;
+        heading.append(title);
+        if (record.id === history) { const current = document.createElement('small'); current.className = 'panel-ai-history-current'; current.textContent = '当前会话'; heading.append(current); }
         const info = document.createElement('span'); info.textContent = `${record.target} · ${new Date(record.updated * 1000).toLocaleString()}`;
-        button.append(title, info); button.onclick = () => openHistory(record.id); list.append(button);
+        button.append(heading, info); button.onclick = () => openHistory(record.id); list.append(button);
       }
       historyOffset = result.next_offset;
       if (historyOffset !== null) { const more = document.createElement('button'); more.type = 'button'; more.dataset.more = ''; more.className = 'ghost-button compact-action'; more.textContent = '更多历史'; more.onclick = () => listHistory(historyOffset); list.append(more); }
       if (!list.children.length) list.textContent = '暂无对话历史';
-    } catch (error) { if (run === generation) $('panelAIFeedback').textContent = error.message; }
-    finally { if (run === generation) { historyBusy = false; controls(); } }
+    } catch (error) { if (run === generation) { if (!offset) list.textContent = `历史加载失败：${error.message}`; $('panelAIFeedback').textContent = error.message; } }
+    finally { if (run === generation) { historyBusy = false; list.setAttribute('aria-busy', 'false'); controls(); } }
   }
   function stop() { const running = busy; generation++; cancel(job); job = ''; busy = false; controls(); dialog.querySelectorAll('.panel-ai-loading').forEach(node => node.remove()); if (running) { setPhase('cancelled'); $('panelAIFeedback').textContent = '诊断已停止，可继续提问。'; } }
   $('panelAIForm').addEventListener('submit', event => { event.preventDefault(); ask(); });
@@ -260,7 +277,8 @@
   dialog.addEventListener('cancel', event => { if (globalMode) { event.preventDefault(); minimize(); } });
   $('panelAIMinimize').onclick = minimize; dock.onclick = resume;
   dialog.addEventListener('close', () => { if (!dialog.open && !minimized) { sessionActive = false; dock.hidden = true; stop(); } });
-  $('panelAIHistory').onclick = () => listHistory();
+  $('panelAIHistory').onclick = () => $('panelAIHistoryPanel').hidden ? listHistory() : setHistoryOpen(false);
+  $('panelAIHistoryClose').onclick = () => setHistoryOpen(false, true);
   $('panelAISettings').onclick = async () => { await window.TerminalAI.openSettings(); };
   $('aiSettingsDialog').addEventListener('close', async () => {
     if (!sessionActive) return;
@@ -289,7 +307,7 @@
     $('panelAIClose').setAttribute('aria-label', '收起 AI 助手'); $('panelAIClose').title = '收起对话，任务继续运行';
     dock.querySelector('strong').textContent = 'AI 助手';
     $('panelAICodeProject').value = ''; dialog.querySelector('.panel-ai-code').hidden = true; globalTools.hidden = false;
-    $('panelAIMessages').replaceChildren(); $('panelAIHistoryList').hidden = true;
+    $('panelAIMessages').replaceChildren(); setHistoryOpen(false);
     $('panelAIQuestion').value = ''; $('panelAIQuestion').placeholder = '例如：检查 aimore 的接口报错，只读取代码和日志';
     $('panelAIFeedback').textContent = '等待提问'; setPhase('idle'); controls();
   }
@@ -353,7 +371,7 @@
     sessionActive = true; setPhase('preparing');
     selection = {...scope}; conversation = ''; history = ''; currentHistory = ''; generation++; historyBusy = false;
     projectsBusy = false; scopeUnavailable = false; $('panelAICodeProject').value = ''; codeStatus();
-    $('panelAIMessages').replaceChildren(); $('panelAIHistoryList').hidden = true;
+    $('panelAIMessages').replaceChildren(); setHistoryOpen(false);
     $('panelAITarget').textContent = '面板所在服务器 · 只读诊断';
     $('panelAIQuestion').value = initialQuestion || (scope.kind === 'incident' ? '请诊断这条异常：检查前后资源、进程现场、相关事件和可用日志，给出证据、可能原因及处理建议。'
       : `请分析最近${{ '1h':'1 小时', '24h':'24 小时', '7d':'7 天'}[scope.period] || '24 小时'}的服务器性能，找出异常峰值、主要进程和同时段事件，说明数据覆盖与缺失，给出优化建议。`);
@@ -366,7 +384,7 @@
     stop();
     sessionActive = true; setPhase('idle');
     generation++; busy = false; historyBusy = false; projectsBusy = false; scopeUnavailable = false;
-    $('panelAIMessages').replaceChildren(); $('panelAIHistoryList').hidden = true; $('panelAIQuestion').value = '';
+    $('panelAIMessages').replaceChildren(); setHistoryOpen(false); $('panelAIQuestion').value = '';
     dialog.showModal(); const run = generation;
     try {
       await refreshSettings(); if (run !== generation) return;

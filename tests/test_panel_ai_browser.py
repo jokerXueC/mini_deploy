@@ -15,6 +15,91 @@ from test_terminal_agent import tool_response, answer
 from test_panel_assistant import ssh_manager as ssh_manager, peer as peer
 
 
+@pytest.mark.parametrize('width,height,theme', [(1440, 950, 'light'), (1440, 950, 'dark'), (390, 844, 'light'), (360, 568, 'dark')])
+def test_history_toggles_closes_and_distinguishes_current_conversation(
+        page, http_server, manager, model_server, evidence, tmp_path, width, height, theme):
+    manager.save(ai_tests.config(model_server))
+    model_server.content = answer('openai')
+    page.set_viewport_size({'width': width, 'height': height})
+    page.goto(http_server.origin + '/ui?view=server')
+    page.evaluate('(theme) => applyTheme(theme)', theme)
+    page.locator('#globalAIOpen').click()
+    for question in ('检查服务器状态', '帮我检查请求失败的原因，只读分析容器日志和关联事件'):
+        page.locator('#panelAIQuestion').fill(question)
+        page.locator('#panelAISend').click()
+        playwright.expect(page.locator('#panelAISend')).to_be_enabled()
+        playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
+        if question == '检查服务器状态':
+            page.locator('#panelAINew').click()
+    page.locator('#panelAIQuestion').fill('保留我的追问草稿')
+    toggle = page.locator('#panelAIHistory')
+    panel = page.locator('#panelAIHistoryPanel')
+    toggle.click()
+    playwright.expect(toggle).to_have_attribute('aria-expanded', 'true')
+    playwright.expect(toggle).to_have_text('收起历史')
+    playwright.expect(panel.locator('.tai-history-row')).to_have_count(2)
+    current = panel.locator('[aria-current=true]')
+    playwright.expect(current).to_contain_text('当前会话')
+    playwright.expect(current).to_contain_text('帮我检查请求失败')
+    assert page.evaluate('''() => {
+      const panel = document.querySelector('#panelAIHistoryPanel'), current = panel.querySelector('[aria-current=true]');
+      return getComputedStyle(panel).backgroundColor !== getComputedStyle(document.querySelector('#panelAIDialog')).backgroundColor
+        && getComputedStyle(current).backgroundColor !== getComputedStyle(panel.querySelector('[aria-current=false]')).backgroundColor;
+    }''')
+    assert panel.evaluate('el => el.scrollWidth <= el.clientWidth')
+    if width <= 600:
+        playwright.expect(page.locator('#panelAIMessages')).not_to_be_visible()
+        playwright.expect(page.locator('#panelAIForm')).not_to_be_visible()
+        assert page.locator('#panelAIHistoryList').evaluate('el => el.clientHeight > 50')
+    else:
+        assert page.locator('#panelAIMessages').bounding_box()['y'] >= panel.bounding_box()['y'] + panel.bounding_box()['height'] - 1
+    page.screenshot(path=str(tmp_path / f'history-{width}-{theme}.png'))
+    toggle.click()
+    playwright.expect(panel).not_to_be_visible()
+    playwright.expect(toggle).to_have_attribute('aria-expanded', 'false')
+    playwright.expect(toggle).to_have_text('历史记录')
+    playwright.expect(page.locator('#panelAIMessages')).to_be_visible()
+    playwright.expect(page.locator('#panelAIForm')).to_be_visible()
+    playwright.expect(page.locator('#panelAIQuestion')).to_have_value('保留我的追问草稿')
+    toggle.click()
+    page.locator('#panelAIHistoryClose').click()
+    playwright.expect(panel).not_to_be_visible()
+    playwright.expect(toggle).to_be_focused()
+    toggle.click()
+    panel.locator('[aria-current=false]').click()
+    playwright.expect(panel).not_to_be_visible()
+    playwright.expect(toggle).to_have_attribute('aria-expanded', 'false')
+    playwright.expect(page.locator('.panel-ai-question')).to_have_text('检查服务器状态')
+    toggle.click()
+    playwright.expect(panel.locator('[aria-current=true]')).to_contain_text('检查服务器状态')
+    assert len(model_server.calls) == 2
+
+
+def test_history_can_collapse_while_loading_and_late_response_does_not_reopen_it(
+        page, http_server, manager, model_server, evidence):
+    manager.save(ai_tests.config(model_server))
+    page.goto(http_server.origin + '/ui?view=server')
+    page.locator('#globalAIOpen').click()
+    page.evaluate('''() => {
+      const original = window.fetch;
+      const gate = new Promise(resolve => window.releaseHistory = resolve);
+      window.fetch = async (...args) => {
+        if (String(args[0]).startsWith('/terminal-ai/history?offset=')) await gate;
+        return original(...args);
+      };
+    }''')
+    page.locator('#panelAIHistory').click()
+    playwright.expect(page.locator('#panelAIHistoryList')).to_have_attribute('aria-busy', 'true')
+    page.locator('#panelAIHistory').click()
+    playwright.expect(page.locator('#panelAIHistoryPanel')).not_to_be_visible()
+    page.evaluate('window.releaseHistory()')
+    playwright.expect(page.locator('#panelAIHistoryList')).to_have_attribute('aria-busy', 'false')
+    playwright.expect(page.locator('#panelAIHistoryPanel')).not_to_be_visible()
+    page.locator('#panelAIHistory').click()
+    playwright.expect(page.locator('#panelAIHistoryList')).to_have_text('暂无对话历史')
+    assert not model_server.calls
+
+
 @pytest.mark.parametrize('width,theme', [(1440, 'light'), (390, 'dark')])
 def test_assistant_login_grants_access_and_terminal_reuses_session_after_reload(
         page, http_server, manager, model_server, evidence, ssh_manager, peer, monkeypatch, tmp_path, width, theme):
@@ -191,6 +276,7 @@ def test_global_entry_keeps_conversation_drafts_and_history_across_pages(
     page.locator('#panelAIQuestion').fill('只读分析 aimore 的代码、日志和业务数据库')
     page.locator('#panelAISend').click()
     playwright.expect(page.locator('.panel-ai-loading')).to_be_visible()
+    playwright.expect(page.locator('#panelAITarget')).to_contain_text('面板主机：')
     page.locator('#panelAIQuestion').fill('保留草稿：接着检查网络')
     page.locator('#panelAIMinimize').click()
     page.locator('#eventsViewTab').click()
