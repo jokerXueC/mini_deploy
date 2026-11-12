@@ -64,6 +64,9 @@ import terminal_ai
 import panel_diagnostics
 import panel_runtime
 import panel_code
+import panel_files
+import panel_database
+import panel_assistant
 import ip_security
 import basic_protection
 import terminal_history
@@ -3143,6 +3146,14 @@ _database_manager_instance = None
 _database_manager_lock = threading.Lock()
 
 
+def _panel_ai_target():
+    try:
+        identity = Path('/etc/machine-id').read_text(encoding='ascii').strip()
+    except (OSError, UnicodeError):
+        identity = str(STATE_FILE.parent.resolve())
+    return f'面板主机：{socket.gethostname()} / {hashlib.sha256(identity.encode()).hexdigest()[:12]}'
+
+
 def _database_manager():
     global _database_manager_instance
     with _database_manager_lock:
@@ -3254,11 +3265,12 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             owner = terminal_ai.owner(self._session_cookie_value())
             manager = _ai_manager()
             if self.command == "GET" and path == "/terminal-ai/settings":
-                self._write_json(200, {**manager.settings(), **self._terminal_access_status()})
+                self._write_json(200, {**manager.settings(), **self._terminal_access_status(),
+                    'global_target': _panel_ai_target() + ' · 全局助手'})
                 return
             if not self._terminal_access_allowed():
                 self.close_connection = True
-                raise terminal_ai.AIError("请先在远程终端确认允许本次登录使用 HTTP，或改用 HTTPS / 本地隧道。", 403)
+                raise terminal_ai.AIError("请先在 AI 助手或远程终端确认允许本次登录使用 HTTP，或改用 HTTPS / 本地隧道。", 403)
             if self.command == 'GET' and path == '/terminal-ai/code-projects':
                 refresh = parse_qs(parsed.query).get('refresh', [''])[0] == '1'
                 projects = _panel_code_catalog().snapshot(refresh=refresh) if panel_code.supported() else []
@@ -3291,9 +3303,10 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                 return
             if self.command == "GET" and path == "/terminal-ai/access":
                 session_id = parse_qs(parsed.query).get("session_id", [""])[0]
-                session = _ssh_manager().session(self._ssh_owner(), session_id)
-                if session.closed or time.time() >= session.expires:
-                    raise terminal_ai.AIError("SSH 连接已结束，请重新连接。", 410)
+                if session_id != panel_assistant.SESSION:
+                    session = _ssh_manager().session(self._ssh_owner(), session_id)
+                    if session.closed or time.time() >= session.expires:
+                        raise terminal_ai.AIError("SSH 连接已结束，请重新连接。", 410)
                 self._write_json(200, manager.access(owner, session_id))
                 return
             if self.command != "POST":
@@ -3307,14 +3320,13 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                 _audit_event("ai_settings_saved", actor=self.client_address[0], success=True)
             elif path == "/terminal-ai/test":
                 result = manager.submit(owner, action="test", data=data)
-            elif path == '/terminal-ai/panel':
-                if data.get('session_id') or data.get('include_terminal') or data.get('permission', 'readonly') != 'readonly':
+            elif path in {'/terminal-ai/panel', '/terminal-ai/global'}:
+                is_global = path == '/terminal-ai/global'
+                if is_global and (data.get('session_id') or data.get('include_terminal') or data.get('code_project')):
+                    raise terminal_ai.AIError('全局助手通过工具发现目标，不接受预先绑定的 SSH 或代码项目。')
+                if not is_global and (data.get('session_id') or data.get('include_terminal') or data.get('permission', 'readonly') != 'readonly'):
                     raise terminal_ai.AIError('面板诊断仅查询本机证据，不使用 SSH 或修改权限')
-                try:
-                    identity = Path('/etc/machine-id').read_text(encoding='ascii').strip()
-                except (OSError, UnicodeError):
-                    identity = str(STATE_FILE.parent.resolve())
-                target = f'面板主机：{socket.gethostname()} / {hashlib.sha256(identity.encode()).hexdigest()[:12]}'
+                target = _panel_ai_target() + (' · 全局助手' if is_global else '')
                 project_id = data.get('code_project', '')
                 code_reader = None
                 if project_id:
@@ -3330,9 +3342,23 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                         code=code_reader, runtime=panel_runtime.Runtime(
                             inventory=_operations_inventory, logs=lambda source, **options: _operations().logs(source, **options),
                             requests=_request_history, discovery=_certificate_discovery,
-                            monitor=lambda: _monitor().snapshot(), audit=lambda: _audit_tail(lines=2000)))
+                            monitor=lambda: _monitor().snapshot(), audit=lambda: _audit_tail(lines=2000),
+                            files=panel_files.Reader(root=code_reader.project['path'] if code_reader else '/',
+                                excluded=(STATE_FILE.parent,)),
+                            databases=panel_database.Reader(_database_manager, database_readonly.owner(self._session_cookie_value()),
+                                allowed=self._ssh_secure() or self._database_http_enabled(), scoped=bool(code_reader))))
                 except ValueError as exc:
                     raise terminal_ai.AIError(str(exc)) from exc
+                if is_global:
+                    access = manager.access(owner, panel_assistant.SESSION)
+                    with manager.lock:
+                        granted = manager.permissions.get((owner, panel_assistant.SESSION), {}).get('global_sessions', ())
+                    backend = panel_assistant.Backend(backend, mode=access['mode'],
+                        commands=access['mode'] in {'approve', 'command'} or access.get('command_policy') == 2,
+                        sessions=lambda: _ssh_manager().status(owner)['sessions'],
+                        resolve=lambda key: _ssh_manager().session(owner, key),
+                        projects=lambda: _panel_code_catalog().snapshot() if panel_code.supported() else [],
+                        auto_sessions=granted)
                 def panel_executor(plan, cancel):
                     success = False
                     try:
@@ -3341,12 +3367,13 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                         return evidence
                     finally:
                         _audit_event('ai_tool_executed', actor=self.client_address[0],
-                                     target=f"{target} / {plan['name']}", success=success)
-                result = manager.submit(owner, action='chat', data=data, session_id='panel-monitoring' + (':' + project_id if project_id else ''),
+                                     target=f"{plan.get('target', target)} / {plan['name']}", success=success)
+                result = manager.submit(owner, action='chat', data=data,
+                    session_id=panel_assistant.SESSION if is_global else 'panel-monitoring' + (':' + project_id if project_id else ''),
                     target=target, executor=panel_executor, evidence_backend=backend)
                 result['target'] = target
                 _audit_event('ai_panel_diagnosis', actor=self.client_address[0], target=target, success=True,
-                             detail={'kind': backend.selection['kind']})
+                             detail={'kind': 'global' if is_global else backend.selection['kind']})
             elif path in {"/terminal-ai/chat", "/terminal-ai/restore", "/terminal-ai/health"}:
                 session_id = str(data.get("session_id") or "")
                 output = ""
@@ -3378,10 +3405,18 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                                         executor=executor, validate=validate, target=target)
             elif path == "/terminal-ai/access":
                 session_id = str(data.get("session_id") or "")
-                session = _ssh_manager().session(self._ssh_owner(), session_id)
-                if session.closed or time.time() >= session.expires:
-                    raise terminal_ai.AIError("SSH 连接已结束或登录已过期。", 410)
+                if session_id == panel_assistant.SESSION:
+                    sessions = _ssh_manager().status(owner)['sessions']
+                    if data.get('mode') == 'auto' and not sessions:
+                        raise terminal_ai.AIError('请先在远程终端连接需要操作的服务器，再授权自动操作。')
+                else:
+                    session = _ssh_manager().session(self._ssh_owner(), session_id)
+                    if session.closed or time.time() >= session.expires:
+                        raise terminal_ai.AIError("SSH 连接已结束或登录已过期。", 410)
                 result = manager.set_access(owner, session_id, data)
+                if session_id == panel_assistant.SESSION:
+                    with manager.lock:
+                        manager.permissions[(owner, session_id)]['global_sessions'] = [item['id'] for item in sessions]
                 _audit_event("ai_access_changed", actor=self.client_address[0], target=result["mode"], success=True)
             elif path == "/terminal-ai/approve":
                 result = manager.approve(owner, data.get("id"), data.get("approval_id"), data.get("approve"))

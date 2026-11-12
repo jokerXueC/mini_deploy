@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+from pathlib import Path
 import tarfile
 import threading
 from types import SimpleNamespace
@@ -206,4 +207,59 @@ def test_discovered_logs_requests_and_events_are_available_without_selected_inci
     assert events['next_offset'] == 2 and events['audit_scanned'] == 1
     page = execute(runtime, 'get_panel_events', {**WINDOW, 'limit': 2, 'offset': 2})
     assert page['events'][0]['id'] == 'rebuild-3'
+
+
+def test_general_files_and_service_definition_are_readonly_and_do_not_need_a_project(runtime_evidence):
+    runtime = runtime_evidence.runtime
+    calls = []
+    runtime.files = SimpleNamespace(path=lambda path: path, execute=lambda name, args, check: calls.append((name, args)) or {'lines': []})
+    names = {tool['function']['name'] for tool in runtime.schemas()}
+    assert {'list_host_directory', 'read_host_file', 'search_host_files', 'search_host_text',
+            'get_service_definition', 'get_container_mounts'} <= names
+    execute(runtime, 'read_host_file', {'path': '/etc/hosts'})
+    assert calls == [('read_host_file', {'path': '/etc/hosts'})]
+    result = execute(runtime, 'get_service_definition', {'service': 'nginx'})
+    assert runtime_evidence.commands[-1][0] == ['systemctl', 'cat', '--no-pager', '--', 'nginx.service']
+    assert 'log-secret' not in result['output']
+    for name, args in [('get_service_definition', {'service': 'nginx;reboot'}),
+                       ('get_container_mounts', {'container': 'x;reboot'}),
+                       ('read_host_file', {'path': '/etc/hosts', 'lines': True}),
+                       ('search_host_files', {'path': '/', 'pattern': '../*'})]:
+        with pytest.raises(terminal_tools.ToolError):
+            execute(runtime, name, args)
+
+
+def test_container_files_use_daemon_pid_without_exec_and_reject_restarts_and_scoped_bypass(runtime_evidence, monkeypatch):
+    runtime = runtime_evidence.runtime
+    readers = []
+    original = panel_runtime.panel_files.Reader
+
+    def reader(**kwargs):
+        readers.append(kwargs)
+        return SimpleNamespace(execute=lambda name, args, check: {'path': args['path'], 'lines': []})
+
+    monkeypatch.setattr(panel_runtime.panel_files, 'Reader', reader)
+    calls = []
+    state = ['123 true 2026-11-11T10:00:00Z']
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return 0, state.pop(0) if len(state) > 1 else state[0], False
+    runtime.runner = runner
+    # Path validation is independent of the container reader factory.
+    monkeypatch.setattr(panel_runtime.panel_files, 'Reader', lambda **kwargs:
+        reader(**kwargs) if kwargs.get('namespace_pid') else original(**kwargs))
+    data = execute(runtime, 'read_container_file', {'container': CONTAINER, 'path': '/app/main.py'})
+    assert data['filesystem'] == 'container' and data['container'] == CONTAINER
+    assert readers == [{'namespace_pid': 123, 'namespace_id': CONTAINER + ':2026-11-11T10:00:00Z'}]
+    assert len(calls) == 2 and all(command[:2] == ['docker', 'inspect'] for command in calls)
+    state[:] = ['123 true first', '456 true second']
+    with pytest.raises(terminal_tools.ToolError, match='重启'):
+        execute(runtime, 'read_container_file', {'container': CONTAINER, 'path': '/app/main.py'})
+    state[:] = ['0 false stopped']
+    with pytest.raises(terminal_tools.ToolError, match='未运行'):
+        execute(runtime, 'read_container_file', {'container': CONTAINER, 'path': '/app/main.py'})
+    runtime.files = original(root='/opt/aimore')
+    assert runtime.files.root == Path('/opt/aimore').absolute()
+    with pytest.raises(terminal_tools.ToolError, match='限定项目'):
+        execute(runtime, 'read_container_file', {'container': CONTAINER, 'path': '/app/main.py'})
 

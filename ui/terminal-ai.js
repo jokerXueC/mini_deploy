@@ -186,7 +186,7 @@
   }
   function settingsFeedback() {
     message(allowed ? (settings.http_enabled && !settings.secure ? 'HTTP 已允许，模型密钥到面板的传输为明文。' : '无需连接 SSH 即可配置和测试模型。')
-      : '先关闭此窗口，在远程终端上方确认允许本次登录使用 HTTP；也可通过 HTTPS 或本地隧道打开面板。', !allowed, 'aiSettingsFeedback');
+      : '先关闭此窗口，在 AI 助手或远程终端确认允许本次登录使用 HTTP；也可通过 HTTPS 或本地隧道打开面板。', !allowed, 'aiSettingsFeedback');
   }
   async function openSettings() {
     // Allow model settings to open from diagnostics while the terminal view is hidden.
@@ -655,10 +655,11 @@
   matchMedia('(max-width:1000px)').addEventListener('change', syncPanel);
   window.addEventListener('pagehide', () => { cancelJob(job); stopAuto(); if (!submitting) controller?.abort(); el('aiKey').value = ''; });
   window.TerminalAI = {renderAnswer, openSettings, prepareAnalysis(text) {
-    panel(true);
-    const question = el('aiQuestion');
-    question.value = question.value.trim() ? `${question.value}\n\n${text}` : text;
-    question.focus();
+    window.PanelAI.openGlobal().then(() => {
+      const question = document.getElementById('panelAIQuestion');
+      question.value = question.value.trim() ? `${question.value}\n\n${text}` : text;
+      question.focus();
+    });
   }, viewChanged(view) {
     if (view === 'terminal') { refresh(); controls(); }
     else { stopAuto(); panel(false); if (working) stopWaiting(); }

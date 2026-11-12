@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -311,6 +312,48 @@ def test_unselected_or_invalid_project_cannot_read_source(http_server, manager, 
     assert not code_projects.reads
 
 
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_model_can_read_host_files_without_selected_project_or_ssh(
+        http_server, manager, model_server, evidence, monkeypatch, protocol):
+    manager.save(ai_tests.config(model_server, protocol))
+    reads = []
+
+    class Files:
+        def __init__(self, **kwargs):
+            self.root = Path(kwargs.get('root', '/')).absolute()
+
+        def path(self, path):
+            return path
+
+        def execute(self, name, args, check):
+            check()
+            reads.append((name, args['path']))
+            return {'path': args['path'], 'lines': [{'line': 1, 'text': 'reverse_proxy app:8080'}], 'next_cursor': None}
+
+    monkeypatch.setattr(panel_runtime.panel_files, 'Reader', Files)
+    def command(self, argv, cancel, **options):
+        assert argv[:2] == ['docker', 'inspect'] and argv[-1] == CONTAINER
+        return '123 true 2026-11-11T10:00:00Z', False
+    monkeypatch.setattr(panel_runtime.Runtime, 'command', command)
+    def responses(body, count):
+        names = {tool.get('name') or tool.get('function', {}).get('name') for tool in body['tools']}
+        assert {'read_host_file', 'list_host_directory', 'get_service_definition', 'read_container_file'} <= names
+        assert not {'write_file', 'execute_command', 'restart_service'} & names
+        if count == 1:
+            return tool_response(protocol, 'read_host_file', {'path': '/etc/caddy/Caddyfile'})
+        if count == 2:
+            return tool_response(protocol, 'read_container_file', {'container': CONTAINER, 'path': '/app/main.py'}, call_id='container_read')
+        return answer(protocol)
+    model_server.content = responses
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', {
+        **ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'overview'},
+        'question': '读取 /etc/caddy/Caddyfile，分析配置，不修改'})
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    assert done['status'] == 'done' and all(event['status'] == 'done' for event in done['events']), done
+    assert reads == [('read_host_file', '/etc/caddy/Caddyfile'), ('read_host_file', '/app/main.py')]
+
+
 def test_panel_route_enforces_auth_origin_csrf_consent_and_scope(http_server, manager, model_server, evidence):
     manager.save(ai_tests.config(model_server))
     data = {**ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'performance', 'period': '24h'}}
@@ -322,6 +365,49 @@ def test_panel_route_enforces_auth_origin_csrf_consent_and_scope(http_server, ma
                     {'selection': {'kind': 'overview', 'command': 'rm /'}}]:
         assert request(http_server, 'POST', '/terminal-ai/panel', {**data, **changes})[0] == 400
     assert model_server.calls == []
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_database_tools_reach_model_and_use_saved_connections(
+        http_server, manager, model_server, evidence, monkeypatch, protocol):
+    manager.save(ai_tests.config(model_server, protocol))
+    calls = []
+    connection = {'id': 'a' * 24, 'name': '业务库', 'engine': 'postgres', 'host': '127.0.0.1',
+                  'port': 5432, 'user': 'postgres', 'database': 'business', 'tls': False,
+                  'password': 'never-send-credential', 'ca_pem': 'private-ca'}
+    def start(owner, data):
+        calls.append((owner, data))
+        result = {'catalog': {'database': 'business', 'databases': ['business'], 'tables': [{'name': 'orders'}]},
+                  'structure': {'fields': {'columns': ['column_name'], 'rows': [['id']]}},
+                  'query': {'columns': ['total', 'api_token'], 'rows': [[123, 'secret-cell']]}}[data['operation']]
+        return {'id': 'job', 'state': 'succeeded', 'elapsed_ms': 2,
+                'result': {**result, 'access': {'account': 'postgres', 'transaction_read_only': True}}}
+    database_manager = SimpleNamespace(snapshot=lambda: {'connections': [connection], 'dependencies': {'sql': True}}, start=start)
+    monkeypatch.setattr(agent, '_database_manager', lambda: database_manager)
+    sequence = [
+        ('get_read_capabilities', {}), ('list_database_connections', {}),
+        ('get_database_catalog', {'connection': connection['id']}),
+        ('get_database_structure', {'connection': connection['id'], 'database': 'business', 'schema': 'public', 'table': 'orders'}),
+        ('query_database', {'connection': connection['id'], 'database': 'business', 'sql': 'SELECT\n COUNT(*) AS total FROM public.orders'})]
+    def responses(body, count):
+        names = {tool.get('name') or tool.get('function', {}).get('name') for tool in body['tools']}
+        assert {name for name, _ in sequence} <= names
+        text = json.dumps(body, ensure_ascii=False)
+        assert 'never-send-credential' not in text and 'secret-cell' not in text and 'private-ca' not in text
+        if count <= len(sequence):
+            name, arguments = sequence[count - 1]
+            return tool_response(protocol, name, arguments, call_id=f'read-{count}')
+        assert '123' in text and 'transaction_read_only' in text and 'business' in text
+        return answer(protocol)
+    model_server.content = responses
+    status, result = request(http_server, 'POST', '/terminal-ai/panel', {
+        **ai_tests.chat_data(manager, permission='readonly'), 'selection': {'kind': 'overview'},
+        'question': '分析已保存业务数据库的订单数量，只读取'})
+    assert status == 200
+    done = ai_tests.finished(manager, terminal_ai.owner(http_server.cookie), result['id'])
+    assert done['status'] == 'done' and all(event['status'] == 'done' for event in done['events']), done
+    assert [call[1]['operation'] for call in calls] == ['catalog', 'structure', 'query']
+    assert all(call[0] == agent.database_readonly.owner(http_server.cookie) for call in calls)
 
 
 def test_history_from_another_host_is_never_sent_to_model(http_server, manager, model_server, evidence):

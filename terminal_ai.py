@@ -493,7 +493,7 @@ class Manager:
             operation_plan = None
             mode = self.access(owner, session_id)["mode"] if action in {"chat", "restore", "health"} and session_id and executor else "chat"
             if evidence_backend is not None:
-                mode = 'readonly'
+                mode = getattr(evidence_backend, 'permission_mode', 'readonly')
             if action == "chat" and data.get("permission", mode) != mode:
                 raise AIError("操作权限已改变，请重新选择后发送。", 409)
             conversation_id, context = "", {}
@@ -596,7 +596,7 @@ class Manager:
             job = self._check_task(key, config, validate)
             job["_decision_event"] = threading.Event()
             job.pop("_decision", None)
-            job["approval"] = {"id": secrets.token_urlsafe(24), "target": job["target"],
+            job["approval"] = {"id": secrets.token_urlsafe(24), "target": plan.get('target', job["target"]),
                                **self._safe_data(config, {k: plan[k] for k in ("title", "arguments", "impact", 'reason')}),
                                'command': self._safe_text(config, plan['command'])}
             if plan.get('preview'):
@@ -627,11 +627,20 @@ class Manager:
                 self.history.checkpoint(key, job['events'])
 
     def _perform(self, key, config, plan, executor, validate, event):
+        backend = self.jobs[key].get('_evidence_backend')
+        check_target = getattr(backend, 'validate_plan', None)
+        if check_target:
+            parent_validate = validate
+            def validate():
+                if parent_validate:
+                    parent_validate()
+                check_target(plan)
         job = self._check_task(key, config, validate)
         if plan['name'] in terminal_tools.FILE_WRITES:
             self._event_update(event, phase='preview')
             preview_plan = {'name': 'preview_file', 'operation': plan['name'], 'arguments': plan['arguments'],
-                            'transport': 'sftp', 'command': '预览文件差异 ' + plan['arguments']['path'], 'write': False}
+                            'transport': 'sftp', 'command': '预览文件差异 ' + plan['arguments']['path'], 'write': False,
+                            **{key: plan[key] for key in ('ssh_session', 'target') if key in plan}}
             preview = executor(preview_plan, job['_cancel'])
             if preview.get('exit_code') != 0 or not isinstance(preview.get('preview'), dict):
                 raise terminal_tools.ToolError('文件差异无法预览，未执行修改。')
@@ -667,6 +676,7 @@ class Manager:
             if status_plan:
                 checks.append((status_plan, expected))
         for check_plan, expected in checks:
+            check_plan = {**check_plan, **{key: plan[key] for key in ('ssh_session', 'target') if key in plan}}
             self._check_task(key, config, validate)
             self._event_update(event, phase='verify')
             evidence = executor(check_plan, job['_cancel'])
@@ -736,7 +746,7 @@ class Manager:
             "修改后应检查结果。"}
         if backend:
             import panel_diagnostics
-            messages[0]['content'] += panel_diagnostics.GUIDANCE
+            messages[0]['content'] += getattr(backend, 'guidance', panel_diagnostics.GUIDANCE)
         initial = backend.initial_call() if backend else None
         while True:
             self._check_task(key, config, validate)
@@ -769,7 +779,7 @@ class Manager:
                         name, json.loads(raw), commands=mode in {'approve', 'command'} or job.get('_commands_auto', False))
                     if plan['name'] == 'execute_command':
                         policy = plan['command_policy']
-                        automatic = job.get('_commands_auto') and policy['action'] == 'auto'
+                        automatic = job.get('_commands_auto') and policy['action'] == 'auto' and not plan.get('force_approval')
                         plan['approval_required'] = not automatic
                         if automatic:
                             plan['command'] = plan['auto_command']
@@ -784,10 +794,10 @@ class Manager:
                     if plan["write"]:
                         if mode not in {"approve", "auto", "command"}:
                             raise terminal_tools.ToolError("本轮仅允许只读检查，未执行修改。")
-                        signature = (name, json.dumps(plan["arguments"], sort_keys=True))
+                        signature = (name, plan.get('ssh_session', ''), json.dumps(plan["arguments"], sort_keys=True))
                         if signature in writes:
                             raise AIError('模型重复请求同一项修改，已停止，未重复执行；请核对已完成的操作。', 409)
-                        if write_failed and name != 'restore_file':
+                        if write_failed and plan['name'] != 'restore_file':
                             raise terminal_tools.ToolError("之前的修改未确认成功，本轮不再修改，请先检查状态。")
                         writes.add(signature)
                     self._check_task(key, config, validate)

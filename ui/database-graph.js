@@ -2,7 +2,7 @@
 (() => {
   const el = id => document.getElementById(id);
   if (!el('dbGraphPane')) return;
-  const WIDTH = 264, HEADER = 54, ROW = 21, SHOWN = 10;
+  const WIDTH = 280, HEADER = 56, ROW = 24, SHOWN = 10;
   let cy = null, model = null, library = null, busy = false, exporting = false, openTable = null, selectedId = '';
   const cards = new Map(), tables = new Map(), edges = new Map();
   const pane = el('dbGraphPane'), modal = el('dbGraphModal'), stage = el('dbGraphStage');
@@ -161,6 +161,22 @@
     el('dbGraphEmpty').textContent = connected ? '当前范围没有已声明外键的表' : '当前账号在此范围内没有可查看的表';
     paint(); return matches;
   }
+  function layoutGroups() {
+    const groups = cy.elements().components().map(component => {
+      component.layout({name: 'dagre', rankDir: stage.clientWidth < 600 ? 'TB' : 'LR',
+        rankSep: 90, nodeSep: 36, edgeSep: 24, animate: false, fit: false}).run();
+      return {nodes: component.nodes(), box: component.boundingBox({includeLabels: false, includeOverlays: false})};
+    }).sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h);
+    // Pack disconnected groups together so fitting the diagram keeps fields readable.
+    const gap = 40, area = groups.reduce((sum, group) => sum + (group.box.w + gap) * (group.box.h + gap), 0);
+    const width = Math.max(0, ...groups.map(group => group.box.w), Math.sqrt(area * stage.clientWidth / Math.max(1, stage.clientHeight)));
+    let x = 0, y = 0, rowHeight = 0;
+    cy.batch(() => groups.forEach(({nodes, box}) => {
+      if (x && x + box.w > width) { x = 0; y += rowHeight + gap; rowHeight = 0; }
+      nodes.shift({x: x - box.x1, y: y - box.y1});
+      x += box.w + gap; rowHeight = Math.max(rowHeight, box.h);
+    }));
+  }
   async function render(data, onOpen) {
     await ensure(); reset(); model = data; openTable = onOpen;
     const elements = [];
@@ -175,11 +191,12 @@
           'line-opacity': .65, 'target-arrow-fill': 'filled', label: '', 'font-size': 11, 'text-rotation': 'autorotate',
           'text-background-opacity': 1, 'text-background-padding': 4, 'text-wrap': 'ellipsis', 'text-max-width': 220}},
         {selector: 'edge.focused', style: {width: 2.5, 'line-opacity': 1, label: 'data(label)'}},
-        {selector: 'edge.loop', style: {'control-point-step-size': 220, 'loop-direction': '-45deg', 'loop-sweep': '75deg'}},
+        {selector: 'edge.loop', style: {'control-point-step-size': 140, 'loop-direction': '-45deg', 'loop-sweep': '75deg'}},
         {selector: '.dim', style: {opacity: .14}},
       ],
-      layout: {name: 'dagre', rankDir: stage.clientWidth < 600 ? 'TB' : 'LR', rankSep: 150, nodeSep: 50, edgeSep: 35, padding: 44, animate: false, fit: false},
+      layout: {name: 'preset', fit: false},
     });
+    layoutGroups();
     cy.on('pan zoom position', paint);
     cy.on('tap', 'node', event => focus(event.target.id(), false));
     cy.on('tap', 'edge', event => edgeDetails(event.target.id()));

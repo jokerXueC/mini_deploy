@@ -1,4 +1,18 @@
 .panel-ai-dialog { max-width: 900px; }
+.panel-ai-global-tools { display: flex; align-items: center; gap: 10px; padding: 10px 22px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.panel-ai-global-tools select { color: var(--fg); background: var(--field-bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px; font: inherit; }
+.panel-ai-global-tools > label { flex-shrink: 0; white-space: nowrap; }
+.panel-ai-global-tools .form-select { flex: 0 1 220px; min-width: 0; }
+#panelAINew { margin-left: auto; }
+.panel-ai-dialog [hidden] { display: none !important; }
+.panel-ai-grant { max-width: 540px; font-size: 13px; line-height: 1.8; }
+.panel-ai-grant footer, .panel-ai-approval > div { display: flex; gap: 10px; justify-content: flex-end; }
+.panel-ai-approval { padding: 14px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.panel-ai-approval pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#globalAIOpen { gap: 6px; }
+#globalAIOpen img { width: 15px; height: 15px; }
+html[data-theme=dark] #globalAIOpen img { filter: invert(1); }
+#dbAI, #aiChatOpen, .tai-page-tools, [data-incident-ai], #opsAnalyze, #serverPerformanceAI { display: none !important; }
 .panel-ai-window-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .panel-ai-dock { position: fixed; z-index: 90; left: 0; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 10px; width: 160px; max-width: calc(100vw - 24px); min-height: 60px; padding: 12px; border: 1px solid var(--line); border-left: 3px solid var(--control-accent); border-radius: 0 6px 6px 0; background: var(--card); color: var(--fg); box-shadow: 0 3px 14px #0002; text-align: left; cursor: pointer; font: inherit; }
 .panel-ai-dock[hidden] { display: none; }

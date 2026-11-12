@@ -135,6 +135,38 @@ def test_database_cancel_running_query(database_page):
     playwright.expect(page.locator('#dbRun')).to_be_enabled()
 
 
+@pytest.mark.parametrize('width,theme', [(1440, 'dark'), (390, 'light')])
+def test_refined_workspace_navigation_and_ai_target(database_page, tmp_path, width, theme):
+    page, state = database_page
+    page.set_viewport_size(dict(width=width, height=950))
+    page.evaluate('(theme) => applyTheme(theme)', theme)
+    page.locator('#dbConnection').select_option('a' * 24)
+    page.locator('#dbConnect').click()
+    page.locator('[data-db-table]').click()
+    playwright.expect(page.locator('#dbConnectionState')).to_have_attribute('data-state', 'connected')
+    playwright.expect(page.locator('#dbTableCount')).to_have_text('1')
+    playwright.expect(page.locator('#dbDataGrid tbody th').first).to_have_text('1')
+    playwright.expect(page.locator('#dbAI')).not_to_be_visible()
+    page.locator('#globalAIOpen').click()
+    playwright.expect(page.locator('#panelAITitle')).to_have_text('AI 助手')
+    playwright.expect(page.locator('#panelAIQuestion')).to_have_value('')
+    playwright.expect(page.locator('.panel-ai-code')).not_to_be_visible()
+    page.locator('#panelAIMinimize').click()
+    page.locator('#dbSidebarToggle').click()
+    playwright.expect(page.locator('#dbTableSidebar')).not_to_be_visible()
+    playwright.expect(page.locator('#dbSidebarToggle')).to_have_attribute('aria-expanded', 'false')
+    page.locator('#dbSidebarToggle').click()
+    playwright.expect(page.locator('#dbTableSidebar')).to_be_visible()
+    page.locator('#dbSqlTab').click()
+    page.locator('#dbSql').fill('SELECT\n  COUNT(*)\nFROM public.orders')
+    playwright.expect(page.locator('#dbSqlLines')).to_have_text('1\n2\n3')
+    page.screenshot(path=str(tmp_path / f'database-sql-{width}-{theme}.png'), full_page=True)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#dbConnection').select_option('')
+    playwright.expect(page.locator('#dbConnectionState')).to_have_attribute('data-state', 'idle')
+    playwright.expect(page.locator('#dbAI')).to_be_disabled()
+
+
 def test_database_http_requires_own_consent(database_page):
     page, state = database_page
     state['secure'] = False

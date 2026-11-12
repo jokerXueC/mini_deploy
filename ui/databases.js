@@ -6,6 +6,13 @@
   let dependencies = {}, csrf = '', allowed = false, busy = false, jobId = '', page = 0, sort = '', direction = 'asc';
   let editing = null, dataResult = null, sqlResult = null, tableLoaded = false, structureLoaded = false;
   let workspaceMode = 'browse', graphLoaded = false, graphSequence = 0;
+  function connectionState(message, state = 'idle') {
+    el('dbConnectionState').textContent = message;
+    el('dbConnectionState').dataset.state = state;
+  }
+  function sqlLines() {
+    el('dbSqlLines').textContent = el('dbSql').value.split('\n').map((_, index) => index + 1).join('\n');
+  }
   function access(result) {
     const info = result?.access;
     el('dbAccess').hidden = !info?.transaction_read_only;
@@ -27,6 +34,7 @@
   }
   function updateControls() {
     const profile = connection(), ready = allowed && !!profile && !!dependencies[profile.engine]?.available;
+    el('dbAI').disabled = busy || !ready || !database();
     ['dbConnection', 'dbNew', 'dbDiscover', 'dbEngine', 'dbTest', 'dbSave'].forEach(id => { el(id).disabled = busy || !allowed; });
     el('dbDatabase').disabled = busy || !ready || !el('dbDatabase').options.length;
     ['dbConnect', 'dbEdit', 'dbRemove', 'dbCatalogRefresh'].forEach(id => { el(id).disabled = busy || !ready; });
@@ -50,6 +58,8 @@
     el('dbFeedback').dataset.running = String(busy);
     root.setAttribute('aria-busy', String(busy));
     el('dbAddress').textContent = profile ? `${profile.host}:${profile.port} · ${profile.user}` : '';
+    el('dbEngineBadge').dataset.engine = profile?.engine || '';
+    el('dbEngineBadge').querySelector('span').textContent = profile ? profile.engine === 'postgres' ? 'PostgreSQL' : 'MySQL / MariaDB' : '选择连接';
     window.AppSelects?.syncAll();
   }
   async function request(path, data) {
@@ -124,6 +134,7 @@
     workspaceMode = mode;
     root.querySelectorAll('[data-db-mode]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.dbMode === mode)));
     el('dbBrowseView').hidden = mode !== 'browse'; el('dbGraphMount').hidden = mode !== 'graph';
+    el('dbSidebarToggle').hidden = mode !== 'browse';
     if (mode === 'graph') requestAnimationFrame(() => window.DatabaseGraph?.resize());
   }
   async function selectTable(item, tab = currentTab) {
@@ -133,6 +144,7 @@
     el('dbObjectMeta').textContent = `${item.schema} · ${item.type === 'VIEW' ? '视图' : '数据表'}`;
     tree(); updateControls();
     if (!el('dbSql').value.trim()) el('dbSql').value = starterSql(item);
+    sqlLines();
     currentTab = tab;
     root.querySelectorAll('[data-db-tab]').forEach(button => button.setAttribute('aria-selected', String(button.dataset.dbTab === tab)));
     ['data', 'structure', 'sql'].forEach(name => { el(`db${name[0].toUpperCase() + name.slice(1)}Pane`).hidden = tab !== name; });
@@ -140,12 +152,15 @@
   }
   function tree() {
     const target = el('dbTree'), filter = el('dbTableSearch').value.toLowerCase();
+    el('dbTableCount').textContent = tables.length;
+    el('dbScopeSummary').textContent = tables.length ? `${new Set(tables.map(item => item.schema)).size} 个 Schema / ${tables.length} 张表` : database() ? `${database()} · 暂无可见表` : '尚未读取库表';
     target.replaceChildren();
     const groups = new Map();
     tables.filter(item => `${item.schema}.${item.name}`.toLowerCase().includes(filter)).forEach((item) => {
       if (!groups.has(item.schema)) {
         const detail = document.createElement('details'); detail.open = true;
         const summary = document.createElement('summary'); summary.textContent = item.schema;
+        const count = document.createElement('span'); count.textContent = tables.filter(table => table.schema === item.schema).length; summary.append(count);
         detail.append(summary); groups.set(item.schema, detail); target.append(detail);
       }
       const button = document.createElement('button'), label = document.createElement('span');
@@ -155,7 +170,7 @@
       button.addEventListener('click', () => safely(() => selectTable(item)));
       groups.get(item.schema).append(button);
     });
-    if (!groups.size) emptyGrid('dbTree', filter ? '没有匹配的数据表' : '暂无可访问的数据表');
+    if (!groups.size) emptyGrid('dbTree', filter ? '没有匹配的数据表' : database() ? `当前库 ${database()} 没有可见表，请切换业务库或检查账号权限` : '连接后选择业务数据库');
   }
   function starterSql(item) {
     const mark = connection()?.engine === 'postgres' ? '"' : '`';
@@ -165,6 +180,7 @@
   function grid(id, result, sortable = false) {
     if (!result?.columns?.length) { emptyGrid(id, '没有返回字段'); return; }
     const table = document.createElement('table'), head = table.createTHead().insertRow(), body = table.createTBody();
+    const rowHead = document.createElement('th'); rowHead.textContent = '#'; rowHead.className = 'db-row-number'; rowHead.scope = 'col'; head.append(rowHead);
     result.columns.forEach((name) => {
       const th = document.createElement('th');
       if (sortable) {
@@ -178,10 +194,13 @@
       } else th.textContent = name;
       head.append(th);
     });
-    result.rows.forEach(row => {
+    result.rows.forEach((row, rowIndex) => {
       const tr = body.insertRow();
+      const number = document.createElement('th'); number.scope = 'row'; number.className = 'db-row-number';
+      number.textContent = (id === 'dbDataGrid' ? page * 50 : 0) + rowIndex + 1; tr.append(number);
       row.forEach((value, index) => {
         const td = tr.insertCell(); td.dataset.null = String(value === null);
+        td.dataset.number = String(typeof value === 'number' || typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value));
         const content = value === null ? 'NULL' : String(value);
         if (content.length > 80 || content.includes('\n')) {
           const button = document.createElement('button'); button.type = 'button'; button.textContent = content;
@@ -195,7 +214,7 @@
     });
     el(id).replaceChildren(table);
     if (!result.rows.length) {
-      const row = body.insertRow(), cell = row.insertCell(); cell.colSpan = result.columns.length;
+      const row = body.insertRow(), cell = row.insertCell(); cell.colSpan = result.columns.length + 1;
       cell.textContent = '没有匹配的记录'; cell.className = 'db-empty';
     }
   }
@@ -224,16 +243,16 @@
     access(null);
     resetGraph();
     clearSelection(); tables = []; emptyGrid('dbTree', '正在读取库表…');
-    el('dbConnectionState').textContent = '正在连接…';
+    connectionState('正在连接…', 'connecting');
     let result;
     try { result = await run('catalog'); }
-    catch (error) { el('dbConnectionState').textContent = '连接失败'; throw error; }
+    catch (error) { connectionState('连接失败', 'failed'); throw error; }
     options(el('dbDatabase'), result.databases, '选择数据库', result.database);
     if (result.database && !result.databases.includes(result.database)) el('dbDatabase').add(new Option(result.database, result.database));
     el('dbDatabase').value = result.database;
     tables = result.tables; tree(); updateControls();
     options(el('dbGraphSchema'), [...new Set(tables.map(item => item.schema))], '全部 Schema');
-    el('dbConnectionState').textContent = '已连接';
+    connectionState('已连接', 'connected');
     access(result);
     if (result.truncated) feedback('目录已截断，请缩小范围；初版最多显示 500 个数据库、1000 张表。');
     if (workspaceMode === 'graph') await graph();
@@ -289,6 +308,21 @@
     link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   el('dbNew').addEventListener('click', () => edit());
+  el('dbSidebarToggle').addEventListener('click', () => {
+    const collapsed = el('dbBrowseView').classList.toggle('sidebar-collapsed');
+    el('dbSidebarToggle').setAttribute('aria-expanded', String(!collapsed));
+    el('dbSidebarToggle').title = collapsed ? '展开库表目录' : '收起库表目录';
+    el('dbSidebarToggle').setAttribute('aria-label', el('dbSidebarToggle').title);
+  });
+  el('dbAI').addEventListener('click', () => {
+    const profile = connection();
+    if (!profile || !database()) return;
+    const target = `${profile.name}（${profile.host}:${profile.port}）中的 ${database()}`;
+    const question = `请只读分析数据库连接 ${target}${selected ? ` 的 ${selected.schema}.${selected.name} 表` : ' 的表结构和关系'}。先核对保存的连接和业务库，读取字段、索引及外键；需要数据证据时自行执行只读查询，说明实际证据和风险，不修改数据。`;
+    window.PanelAI?.open({kind: 'overview'}, question);
+  });
+  el('dbSql').addEventListener('input', sqlLines);
+  el('dbSql').addEventListener('scroll', () => { el('dbSqlLines').scrollTop = el('dbSql').scrollTop; });
   el('dbEdit').addEventListener('click', () => edit(connection()));
   el('dbDialogClose').addEventListener('click', () => el('dbConnectionDialog').close());
   el('dbConnectionDialog').addEventListener('close', () => { el('dbPassword').value = ''; });
@@ -306,7 +340,7 @@
         el('dbConnectionDialog').close(); await loadConnections();
         el('dbConnection').value = result.connection.id;
         options(el('dbDatabase'), result.connection.database ? [result.connection.database] : [], '选择数据库', result.connection.database);
-        clearSelection(); resetGraph(); tables = []; tree(); el('dbConnectionState').textContent = '尚未连接';
+        clearSelection(); resetGraph(); tables = []; tree(); connectionState('尚未连接'); access(null);
         feedback('连接已保存，点击连接读取库表。');
       } catch (error) { el('dbConnectionFeedback').textContent = error.message; throw error; }
       finally { busy = false; updateControls(); }
@@ -315,11 +349,11 @@
   el('dbEngine').addEventListener('change', () => { el('dbPort').value = el('dbEngine').value === 'postgres' ? 5432 : 3306; });
   el('dbConnection').addEventListener('change', () => {
     access(null);
-    clearSelection(); resetGraph(); tables = []; tree();
+    clearSelection(); resetGraph(); tables = [];
     options(el('dbGraphSchema'), [], '全部 Schema');
     const db = connection()?.database || '';
     options(el('dbDatabase'), db ? [db] : [], '选择数据库', db);
-    el('dbConnectionState').textContent = '尚未连接'; updateControls();
+    connectionState('尚未连接'); tree(); updateControls();
   });
   el('dbConnect').addEventListener('click', () => safely(catalog));
   el('dbCatalogRefresh').addEventListener('click', () => safely(catalog));
@@ -358,7 +392,7 @@
     if (!profile || !confirm(`移除连接“${profile.name}”？仅移除面板保存的连接，不修改数据库。`)) return;
     await request('databases', {action: 'remove', id: profile.id, revision: profile.revision});
     await loadConnections(); clearSelection(); resetGraph(); tables = []; tree();
-    options(el('dbDatabase'), [], '选择数据库'); el('dbConnectionState').textContent = '尚未连接'; updateControls();
+    options(el('dbDatabase'), [], '选择数据库'); connectionState('尚未连接'); access(null); tree(); updateControls();
   }));
   el('dbDiscover').addEventListener('click', () => safely(async () => {
     busy = true; updateControls(); feedback('正在发现本机数据库…');

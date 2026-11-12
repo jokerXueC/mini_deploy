@@ -1,4 +1,8 @@
-"""Real panel -> model mock HTTP and optional SSH -> conversational diagnosis."""
+"""Legacy terminal conversation compatibility; production uses the global entry.
+
+The hidden opener is invoked programmatically to retain file recovery, protocol
+and approval regression coverage. Global UI behavior lives in test_panel_ai_browser.
+"""
 import json
 import hashlib
 import threading
@@ -17,13 +21,18 @@ model_server = ai_tests.model_server
 playwright = pytest.importorskip('playwright.sync_api')
 
 
+def open_legacy_chat(page):
+    playwright.expect(page.locator('#aiChatOpen')).not_to_be_visible()
+    page.locator('#aiChatOpen').evaluate('el => el.click()')
+
+
 def test_chat_waiting_animation_and_saved_history_after_refresh(page, http_server, ai_manager, model_server, tmp_path):
     ai_manager.save(ai_tests.config(model_server))
     model_server.gate = threading.Event()
     page.goto(http_server.origin + '/ui?view=terminal')
     page.locator('#sshConnectionToggle').click()
     assert page.locator('#sshLayout').evaluate("el => el.classList.contains('connections-collapsed')")
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiQuestion').fill('检查这台服务器的状态')
     page.locator('#aiAskSend').click()
     playwright.expect(page.locator('.tai-loading')).to_be_visible()
@@ -33,7 +42,7 @@ def test_chat_waiting_animation_and_saved_history_after_refresh(page, http_serve
     playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
     playwright.expect(page.locator('.tai-loading')).not_to_be_visible()
     page.reload()
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiHistoryOpen').click()
     playwright.expect(page.locator('#aiHistoryDialog')).to_be_visible()
     playwright.expect(page.locator('.tai-history-row')).to_contain_text('检查这台服务器的状态')
@@ -59,7 +68,7 @@ def test_chat_waiting_animation_and_saved_history_after_refresh(page, http_serve
 
 def settings_form(page, http_server, model_server, protocol='openai'):
     page.goto(http_server.origin + '/ui?view=terminal')
-    page.get_by_role('button', name='模型设置', exact=True).click()
+    page.evaluate('window.TerminalAI.openSettings()')
     if protocol == 'anthropic':
         page.get_by_role('combobox', name='接口类型', exact=True).click()
         page.get_by_role('option', name='Anthropic / Claude 原生', exact=True).click()
@@ -75,7 +84,7 @@ def test_expanded_chat_preserves_task_draft_focus_and_mobile_layout(
     model_server.content = {'choices': [{'message': {'content': '## 检查结果\n\n**资源正常**。\n\n'
         '| 服务 | 状态 | 建议 |\n| --- | --- | --- |\n| API | 正常 | 保持观察 |\n'}}]}
     page.goto(http_server.origin + '/ui?view=terminal')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiQuestion').fill('检查一下服务器的状态')
     page.locator('#aiAskSend').click()
     playwright.expect(page.locator('.tai-loading')).to_be_visible()
@@ -122,7 +131,7 @@ def test_expanded_chat_preserves_task_draft_focus_and_mobile_layout(
     playwright.expect(dialog).not_to_be_visible()
     playwright.expect(page.locator('#aiPanel')).not_to_be_visible()
     assert not page.locator('body').evaluate("el => el.classList.contains('tai-expanded')")
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     playwright.expect(page.locator('#aiQuestion')).to_have_value('下一轮问题草稿')
     for icon in ('maximize-2', 'minimize-2'):
         assert page.request.get(http_server.origin + '/ui/previews/ssh-ai/icons/' + icon + '.svg').status == 200
@@ -163,7 +172,7 @@ docker ps
     external = []
     page.on('request', lambda request: external.append(request.url) if request.url.startswith('https://example.com') else None)
     page.goto(http_server.origin + '/ui?view=terminal')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiQuestion').fill('整理一下容器状态')
     page.locator('#aiAskSend').click()
     playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问')
@@ -188,7 +197,7 @@ docker ps
     page.locator('#aiMessages').evaluate('el => el.scrollTop = 0')
     page.screenshot(path=str(tmp_path / 'ai-markdown-desktop.png'), full_page=True)
     page.reload()
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiHistoryOpen').click()
     page.locator('.tai-history-row').click()
     playwright.expect(page.locator('.tai-answer table tbody tr')).to_have_count(2)
@@ -213,7 +222,7 @@ def test_ai_splitter_drag_keyboard_persistence_and_terminal_fit(
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
     page.locator('#sshConnectionToggle').click()
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     handle = page.locator('#aiResizeHandle')
     playwright.expect(handle).to_be_visible()
     page.wait_for_function("document.querySelector('#aiResizeHandle').getAttribute('aria-valuenow') !== null")
@@ -234,7 +243,7 @@ def test_ai_splitter_drag_keyboard_persistence_and_terminal_fit(
     assert not page.locator('body').evaluate("el => el.classList.contains('tai-resizing')")
     page.screenshot(path=str(tmp_path / 'ai-splitter-wide-desktop.png'), full_page=True)
     page.reload()
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     playwright.expect(handle).to_have_attribute('aria-valuenow', saved)
     handle.focus()
     handle.press('ArrowLeft')
@@ -283,7 +292,7 @@ def test_file_repair_read_approval_backup_validate_reload_workflow(
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
     enable_sftp(peer, root)
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiQuestion').fill('查找 app.conf，把端口改成 8081，校验后重载 nginx 并检查状态')
     page.locator('#aiAskSend').click()
     playwright.expect(page.locator('.tai-approval')).to_be_visible(timeout=10000)
@@ -320,7 +329,7 @@ def test_claude_configuration_and_connection_test_without_ssh(page, http_server,
     playwright.expect(page.locator('#aiSettingsDialog')).not_to_be_visible()
     playwright.expect(page.locator('#aiModelSummary')).to_contain_text('Claude')
     page.reload()
-    page.get_by_role('button', name='模型设置', exact=True).click()
+    page.evaluate('window.TerminalAI.openSettings()')
     playwright.expect(page.get_by_role('combobox', name='接口类型', exact=True)).to_contain_text('Anthropic')
     playwright.expect(page.locator('#aiKey')).to_have_value('')
     assert ai_manager.settings()['has_key'] and 'test-key-only' not in json.dumps(ai_manager.settings())
@@ -349,7 +358,7 @@ def test_real_file_preview_history_restore_and_health_without_model_calls(
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
     enable_sftp(peer, root)
     page.locator('#sshConnectionToggle').click()
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiResizeHandle').focus()
     for _ in range(6):
         page.locator('#aiResizeHandle').press('ArrowLeft')
@@ -398,7 +407,7 @@ def test_ssh_chat_opens_without_sending_then_followup_and_optional_output(page, 
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
     playwright.expect(page.locator('.xterm-rows')).to_contain_text('本地测试终端')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     playwright.expect(page.locator('#aiPanel')).to_be_visible()
     playwright.expect(page.locator('#aiQuestion')).to_be_focused()
     assert not model_server.calls
@@ -438,7 +447,7 @@ def test_ssh_chat_opens_without_sending_then_followup_and_optional_output(page, 
 
 def test_general_chat_does_not_require_ssh_and_preserves_unsent_question(page, http_server, ai_manager, model_server):
     page.goto(http_server.origin + '/ui?view=terminal')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     playwright.expect(page.locator('#aiEmpty')).to_be_visible()
     page.locator('#aiQuestion').fill('Docker 的网络怎么用？')
     page.locator('#aiAskSend').click()
@@ -474,7 +483,7 @@ def test_agent_permission_dialog_progress_and_actual_operation_approval(page, ht
     page.locator('#sshTrustCheck').check()
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     permission = page.get_by_role('combobox', name='操作方式', exact=True)
     playwright.expect(permission).to_be_enabled()
     permission.click()
@@ -527,7 +536,7 @@ def test_default_generic_command_requires_per_command_approval(
     page.locator('#sshTrustCheck').check()
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     permission = page.get_by_role('combobox', name='操作方式', exact=True)
     playwright.expect(permission).to_be_enabled()
     playwright.expect(page.locator('#aiPermission')).to_have_value('approve')
@@ -575,7 +584,7 @@ def test_auto_generic_query_and_unknown_command_fallback(
     page.locator('#sshTrustCheck').check()
     page.locator('#sshTrustConfirm').click()
     playwright.expect(page.locator('#sshState')).to_have_text('已连接')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     permission = page.get_by_role('combobox', name='操作方式', exact=True)
     playwright.expect(permission).to_be_enabled()
     permission.click()
@@ -638,7 +647,7 @@ def test_real_insecure_http_requires_confirmation_then_supports_claude_and_ssh(p
     playwright.expect(page.locator('#sshHost')).to_be_disabled()
     playwright.expect(page.locator('#sshAllowHttp')).to_be_disabled()
     page.screenshot(path=str(tmp_path / 'http-confirmation.png'), full_page=True)
-    page.get_by_role('button', name='模型设置', exact=True).click()
+    page.evaluate('window.TerminalAI.openSettings()')
     playwright.expect(page.locator('#aiSave')).to_be_disabled()
     page.get_by_role('button', name='关闭模型设置', exact=True).click()
     page.locator('#sshHttpCheck').check()
@@ -650,7 +659,7 @@ def test_real_insecure_http_requires_confirmation_then_supports_claude_and_ssh(p
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=str(tmp_path / 'http-mobile-enabled.png'), full_page=True)
     page.set_viewport_size({'width': 1440, 'height': 1000})
-    page.get_by_role('button', name='模型设置', exact=True).click()
+    page.evaluate('window.TerminalAI.openSettings()')
     page.get_by_role('combobox', name='接口类型', exact=True).click()
     page.get_by_role('option', name='Anthropic / Claude 原生', exact=True).click()
     page.locator('#aiBaseUrl').fill(model_server.origin + '/v1')
@@ -672,7 +681,7 @@ def test_real_insecure_http_requires_confirmation_then_supports_claude_and_ssh(p
     page.locator('.xterm-helper-textarea').focus()
     page.keyboard.type('http-input')
     playwright.expect(page.locator('.xterm-rows')).to_contain_text('http-input')
-    page.locator('#aiChatOpen').click()
+    open_legacy_chat(page)
     page.locator('#aiQuestion').fill('帮我看看终端')
     page.locator('#aiAskSend').click()
     playwright.expect(page.locator('#aiFeedback')).to_have_text('可继续追问', timeout=10000)

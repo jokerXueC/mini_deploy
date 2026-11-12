@@ -5,12 +5,14 @@ import copy
 import hashlib
 import io
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 import tarfile
 
 import nginx_runtime
 import panel_code
+import panel_files
+import panel_database
 import server_operations
 import terminal_tools
 
@@ -18,6 +20,10 @@ TEXT = {'type': 'string', 'maxLength': 200}
 PAGE = {'type': 'integer', 'minimum': 1, 'maximum': 100}
 WINDOW = {'since': terminal_tools.LOG_TIME, 'until': terminal_tools.LOG_TIME}
 DEFINITIONS = [
+    ('get_service_definition', '读取 systemd 服务的单元文件及覆盖配置，只读；常见凭据脱敏',
+     {'service': {'type': 'string', 'maxLength': 220}}, ['service']),
+    ('get_container_mounts', '读取容器工作目录及挂载路径，用于定位宿主机上的源码和数据；不读取环境变量',
+     {'container': {'type': 'string', 'maxLength': 64}}, ['container']),
     ('get_host_inventory', '读取本机进程、监听端口、服务及日志来源，不读取进程命令参数',
      {'sort': {'type': 'string', 'enum': ['cpu', 'memory']}}, []),
     ('list_log_sources', '列出当前可读取的系统服务、容器和常见日志文件来源；先发现再读取', {}, []),
@@ -37,25 +43,39 @@ DEFINITIONS = [
     ('get_panel_events', '读取指定时间的监控生命周期事件和面板操作记录；不覆盖外部部署工具的操作记录',
      {**WINDOW, 'limit': PAGE, 'offset': {'type': 'integer', 'minimum': 0, 'maximum': 100000}}, ['since', 'until']),
 ]
+CONTAINER_FILES = {name.replace('_host_', '_container_'): name for name, *_ in panel_files.DEFINITIONS}
+FILE_DEFINITIONS = panel_files.DEFINITIONS + [
+    (name.replace('_host_', '_container_'), description.replace('服务器', '运行中容器').replace('无需选择代码项目或 SSH', '使用完整容器 ID，无需 SSH'),
+     {**fields, 'container': {'type': 'string', 'maxLength': 64, 'description': 'list_containers 返回的完整容器 ID'}}, [*required, 'container'])
+    for name, description, fields, required in panel_files.DEFINITIONS]
 
 
 class Runtime:
     def __init__(self, *, inventory, logs, requests, discovery, monitor, audit,
-                 runner=server_operations.run, local_docker=nginx_runtime.require_local_docker):
+                 runner=server_operations.run, local_docker=nginx_runtime.require_local_docker,
+                 files=None, databases=None):
         self.inventory, self.logs, self.requests = inventory, logs, requests
         self.discovery, self.monitor, self.audit = discovery, monitor, audit
         self.runner, self.local_docker = runner, local_docker
+        self.files = files if files is not None else panel_files.Reader()
+        self.databases = databases
 
     def schemas(self):
         shared = [s for s in terminal_tools.schemas() if s['function']['name'] in terminal_tools.LOCAL_READ_TOOLS]
         return shared + [{'type': 'function', 'function': {'name': name, 'description': description,
             'parameters': {'type': 'object', 'properties': fields, 'required': required, 'additionalProperties': False}}}
-            for name, description, fields, required in DEFINITIONS]
+            for name, description, fields, required in [*DEFINITIONS, *FILE_DEFINITIONS,
+                ('get_read_capabilities', '确认当前主机的只读工具、文件范围及数据库接入状态；不根据旧对话猜测工具缺失', {}, []),
+                *(panel_database.DEFINITIONS if self.databases else [])]]
 
     def plan(self, name, arguments):
         if name in terminal_tools.LOCAL_READ_TOOLS:
             return terminal_tools.plan(name, arguments)
-        definition = next((d for d in DEFINITIONS if d[0] == name), None)
+        definitions = [*DEFINITIONS, *FILE_DEFINITIONS,
+                       ('get_read_capabilities', '读取当前工具能力与范围', {}, [])]
+        if self.databases:
+            definitions.extend(panel_database.DEFINITIONS)
+        definition = next((d for d in definitions if d[0] == name), None)
         if not definition:
             raise terminal_tools.ToolError('未开放该操作；本机诊断不执行任意命令或修改文件')
         _, title, fields, required = definition
@@ -67,12 +87,29 @@ class Runtime:
                 continue
             spec = fields[key]
             if (spec['type'] == 'string' and (not isinstance(value, str) or len(value) > spec.get('maxLength', 200)
-                                            or any(ord(c) < 32 for c in value))
+                                            or any(ord(c) < 32 and not (key == 'sql' and c in '\n\r\t') for c in value))
                     or spec['type'] == 'integer' and (type(value) is not int or not spec['minimum'] <= value <= spec['maximum'])
                     or spec['type'] == 'object' and not isinstance(value, dict)
                     or 'enum' in spec and value not in spec['enum']):
                 raise terminal_tools.ToolError(f'{key} 参数无效')
         args.update(terminal_tools.log_window(args))
+        if name in {item[0] for item in FILE_DEFINITIONS}:
+            if name in CONTAINER_FILES:
+                if not re.fullmatch('[a-f0-9]{64}', args['container']):
+                    raise terminal_tools.ToolError('请先列出容器，并使用完整容器 ID。')
+                if self.files.root != Path('/').absolute():
+                    raise terminal_tools.ToolError('当前对话已限定项目；请读取挂载在该项目内的文件，或切换到服务器文件范围后查看容器。')
+                panel_files.Reader().path(args['path'])
+            else:
+                self.files.path(args['path'])
+            if name in {'search_host_files', 'search_container_files'} and (not args['pattern'] or '/' in args['pattern'] or '\\' in args['pattern']):
+                raise terminal_tools.ToolError('文件名通配符不能为空或包含路径分隔符。')
+            if name in {'search_host_text', 'search_container_text'} and not args['query']:
+                raise terminal_tools.ToolError('搜索文本不能为空。')
+        if name == 'get_service_definition' and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@:\\-]{0,219}', args['service']):
+            raise terminal_tools.ToolError('systemd 服务名称无效。')
+        if name == 'get_container_mounts' and not re.fullmatch('[a-f0-9]{64}', args['container']):
+            raise terminal_tools.ToolError('请先列出容器，并使用完整容器 ID。')
         return {'name': name, 'arguments': args, 'title': title, 'write': False,
                 'command': name + ' ' + json.dumps(args, ensure_ascii=False), 'reason': '读取当前面板主机的运维证据'}
 
@@ -166,6 +203,40 @@ class Runtime:
         plan = self.plan(plan['name'], plan['arguments'])
         self.check(cancel)
         name, args = plan['name'], plan['arguments']
+        if name == 'get_read_capabilities':
+            return {'read_only': True, 'file_scope': str(self.files.root),
+                    'tools': [tool['function']['name'] for tool in self.schemas()],
+                    'databases': self.databases.status() if self.databases else {'available': False, 'reason': '未接入数据库管理器'},
+                    'notice': '仅查询当前面板主机及已保存数据库连接。权限不足、内容已丢失或缺少连接凭据时须报告具体原因。'}
+        if self.databases and name in {item[0] for item in panel_database.DEFINITIONS}:
+            return self.databases.execute(name, args, cancel)
+        if name in CONTAINER_FILES:
+            argv = ['docker', 'inspect', '--format', '{{.State.Pid}} {{.State.Running}} {{.State.StartedAt}}', args['container']]
+            text, limited = self.command(argv, cancel)
+            match = re.fullmatch(r'([1-9][0-9]*) true (\S+)\s*', text)
+            if limited or not match:
+                raise terminal_tools.ToolError('容器未运行或无法确认其本机进程，不能读取容器文件系统。')
+            reader = panel_files.Reader(namespace_pid=int(match[1]), namespace_id=args['container'] + ':' + match[2])
+            data = reader.execute(CONTAINER_FILES[name], {key: value for key, value in args.items() if key != 'container'},
+                                  lambda: self.check(cancel))
+            current, incomplete = self.command(argv, cancel)
+            if incomplete or current.strip() != text.strip():
+                raise terminal_tools.ToolError('读取期间容器发生重启，请重新读取，不能将不同容器现场拼成同一份证据。')
+            return {**data, 'container': args['container'], 'filesystem': 'container'}
+        if name in {item[0] for item in panel_files.DEFINITIONS}:
+            return self.files.execute(name, args, lambda: self.check(cancel))
+        if name == 'get_service_definition':
+            service = args['service']
+            if not service.endswith('.service'):
+                service += '.service'
+            text, limited = self.command(['systemctl', 'cat', '--no-pager', '--', service], cancel)
+            return {'service': service, 'output': server_operations.redact(text), 'truncated': limited}
+        if name == 'get_container_mounts':
+            text, limited = self.command(['docker', 'inspect', '--format',
+                '{"working_directory":{{json .Config.WorkingDir}},"mounts":{{json .Mounts}}}', args['container']], cancel)
+            if limited:
+                raise terminal_tools.ToolError('容器挂载信息不完整，请缩小目标后重试。')
+            return json.loads(text)
         if name in terminal_tools.LOCAL_READ_TOOLS:
             text, limited = self.command(plan['argv'], cancel)
             lines = text.splitlines()

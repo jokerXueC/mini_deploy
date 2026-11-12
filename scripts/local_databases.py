@@ -1,4 +1,4 @@
-"""Loopback database workspace using real read-only APIs and isolated panel state."""
+"""Loopback database and global AI workspace using isolated panel state."""
 import argparse
 import os
 from pathlib import Path
@@ -20,7 +20,7 @@ class Handler(agent.Handler):
 
     def do_GET(self):  # noqa: N802
         path = agent._normal_path(urlparse(self.path).path)
-        if path.startswith(('/ui/', '/databases')) or path in {'/', '/ui', '/logout', '/health'}:
+        if path.startswith(('/ui/', '/databases', '/terminal-ai/')) or path in {'/', '/ui', '/logout', '/health', '/ssh', '/ssh/output', '/ssh/stream'}:
             super().do_GET()
             return
         if not self._require_auth_json():
@@ -36,11 +36,11 @@ class Handler(agent.Handler):
 
     def do_POST(self):  # noqa: N802
         path = agent._normal_path(urlparse(self.path).path)
-        if path == '/login' or path == '/databases' or path.startswith('/databases/'):
+        if path in {'/login', '/databases'} or path.startswith(('/databases/', '/terminal-ai/', '/ssh/')):
             super().do_POST()
         else:
             self.close_connection = True
-            self._write_json(403, {'detail': '本地入口仅用于数据库只读工作区。'})
+            self._write_json(403, {'detail': '本地入口仅用于数据库工作区和全局 AI / SSH。'})
 
     def log_message(self, *_):
         pass
