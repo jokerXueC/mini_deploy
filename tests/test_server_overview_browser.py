@@ -22,6 +22,68 @@ def preview(page, http_server, payload, *, realtime=True):
     playwright.expect(page.locator('.load-cell')).to_have_count(180)
 
 
+@pytest.mark.parametrize('period', ['1h', '6h', '24h', '7d', 'all'])
+def test_saved_trends_show_loading_until_history_arrives(page, http_server, period, tmp_path):
+    preview(page, http_server, system())
+    pending = []
+    page.route('**/performance/server?*', lambda route: pending.append(route))
+    page.locator(f'[data-trend-range="{period}"]').click()
+    playwright.expect(page.locator('#systemTrendChart')).to_have_attribute('aria-busy', 'true')
+    playwright.expect(page.locator('.trend-card-empty > span')).to_have_text(['加载中…'] * 3)
+    playwright.expect(page.locator('#systemTrendHint')).to_contain_text('加载中')
+    playwright.expect(page.locator('#loadSampleCount')).to_have_text('历史统计加载中…')
+    assert '样本不足' not in page.locator('#systemTrendChart').inner_text()
+    assert len(pending) == 1
+    if period == '1h':
+        page.screenshot(path=str(tmp_path / 'history-loading.png'), full_page=True)
+    now = int(time.time())
+    pending[0].fulfill(json={'interval_seconds': 30, 'points': [
+        {'ts': now - 30, 'cpu_percent': 20, 'memory_percent': 30, 'network_rx_kib_s': 10, 'network_tx_kib_s': 20},
+        {'ts': now, 'cpu_percent': 25, 'memory_percent': 35, 'network_rx_kib_s': 15, 'network_tx_kib_s': 25}]})
+    playwright.expect(page.locator('#systemTrendChart')).to_have_attribute('aria-busy', 'false')
+    playwright.expect(page.locator('.trend-mini-svg')).to_have_count(3)
+    playwright.expect(page.locator('.trend-card-empty')).to_have_count(0)
+
+
+def test_history_empty_and_failure_states_only_follow_completed_requests(page, http_server):
+    preview(page, http_server, system())
+    pending = []
+    page.route('**/performance/server?*', lambda route: pending.append(route))
+    page.locator('[data-trend-range="1h"]').click()
+    playwright.expect(page.locator('.trend-card-empty > span')).to_have_text(['加载中…'] * 3)
+    pending.pop().fulfill(json={'interval_seconds': 30, 'points': []})
+    playwright.expect(page.locator('.trend-card-empty > span')).to_have_text(['样本不足，暂未生成趋势'] * 3)
+    playwright.expect(page.locator('#systemTrendChart')).to_have_attribute('aria-busy', 'false')
+    page.locator('[data-trend-range="24h"]').click()
+    playwright.expect(page.locator('.trend-card-empty > span')).to_have_text(['加载中…'] * 3)
+    pending.pop().fulfill(status=503, json={'detail': '历史服务暂不可用'})
+    playwright.expect(page.locator('.trend-card-empty > span')).to_have_text(['历史读取失败'] * 3)
+    playwright.expect(page.locator('#observationStatus')).to_contain_text('历史服务暂不可用')
+    playwright.expect(page.locator('#systemTrendChart')).to_have_attribute('aria-busy', 'false')
+
+
+def test_history_refresh_keeps_saved_chart_while_waiting(page, http_server):
+    page.clock.install()
+    preview(page, http_server, system())
+    pending = []
+    now = int(time.time())
+    page.route('**/performance/server?*', lambda route: pending.append(route))
+    page.locator('[data-trend-range="1h"]').click()
+    playwright.expect(page.locator('#systemTrendChart')).to_have_attribute('aria-busy', 'true')
+    pending.pop().fulfill(json={'interval_seconds': 30, 'points': [
+        {'ts': now - 30, 'cpu_percent': 20}, {'ts': now, 'cpu_percent': 25}]})
+    playwright.expect(page.locator('.trend-card.cpu .trend-mini-svg')).to_be_visible()
+    page.clock.run_for(31000)
+    page.evaluate("document.dispatchEvent(new Event('server-observation-change'))")
+    page.wait_for_timeout(100)
+    assert len(pending) == 1
+    playwright.expect(page.locator('.trend-card.cpu .trend-mini-svg')).to_be_visible()
+    playwright.expect(page.locator('#systemTrendChart')).to_have_attribute('aria-busy', 'false')
+    pending.pop().fulfill(status=503, json={'detail': '刷新暂时失败'})
+    playwright.expect(page.locator('#observationStatus')).to_contain_text('保留上次结果')
+    playwright.expect(page.locator('.trend-card.cpu .trend-mini-svg')).to_be_visible()
+
+
 @pytest.mark.parametrize('width,theme', [(1440, 'light'), (1920, 'dark'), (390, 'light')])
 def test_history_axis_stays_left_for_sparse_and_scrolled_charts(page, http_server, tmp_path, width, theme):
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -322,6 +384,7 @@ def test_late_container_reply_is_ignored_and_sampling_gaps_stay_empty(page, http
     preview(page, http_server, system())
     page.locator('#observationTarget').select_option('a' * 64, force=True)
     playwright.expect(page.locator('#observationStatus')).to_contain_text('正在读取')
+    playwright.expect(page.locator('.trend-card-empty > span')).to_have_text(['加载中…'] * 2)
     page.locator('#observationTarget').select_option('b' * 64, force=True)
     playwright.expect(page.locator('#loadAverage')).to_have_text('13.3%')
     assert len(pending) == 1

@@ -1047,6 +1047,10 @@ html[data-theme="light"] .theme-toggle-icon {
   font-weight: 850;
 }
 .trend-card-empty small { font-size: 12px; font-weight: 400; line-height: 1.6; }
+.trend-card-empty[data-loading=true] > span { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.trend-loading-spinner { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--control-accent); border-radius: 50%; animation: trend-loading-spin 1s linear infinite; }
+@keyframes trend-loading-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .trend-loading-spinner { animation: none; } }
 .realtime-trend .trend-mini-svg { width: 100%; }
 
 /* Compact host telemetry; the chart grid and topology use the same sampled data. */

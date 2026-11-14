@@ -50,6 +50,7 @@ window.ServerOverview = (() => {
   async function readHistory(key, period) {
     const controller = new AbortController();
     request = controller;
+    derived = null;
     // Bound the read even if the connection remains open without a response.
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
@@ -134,11 +135,14 @@ window.ServerOverview = (() => {
     const rangeLabel = range === 'realtime' ? '最近 30 分钟' : range === '1h' ? '最近 1 小时'
       : range === '6h' ? '最近 6 小时' : range === '24h' ? '最近 24 小时' : '最近 7 天';
     derived = {revision: ++revision, points: filled, intervalSeconds: interval, container: Boolean(target), target,
+      loading: Boolean(request && !history),
+      emptyTitle: historyError ? '历史读取失败' : history?.error ? '历史采样保存失败'
+        : history?.stale || !points.length && history?.last_saved_at ? '所选时段暂无采样' : '',
       windowStart: windowEnd - windowSeconds, windowEnd, rangeLabel,
       emptyMessage: historyError ? '历史暂时无法读取，将自动重试' : history?.error ? '历史采样保存失败，请查看上方原因'
         : history?.stale || !points.length && history?.last_saved_at ? '所选时段没有新的已保存采样' : '',
       contexts: history?.contexts || [],
-      hint: `${select.selectedOptions[0]?.textContent} · ${rangeLabel} · 每 30 秒保存统计 · ${points.length} 组统计${target ? ' · 区间均值' : ''}${points.length ? ` · 最新 ${clock(points.at(-1).ts)}` : ''}`};
+      hint: `${select.selectedOptions[0]?.textContent} · ${rangeLabel} · ${request && !history ? '历史统计加载中…' : `每 30 秒保存统计 · ${points.length} 组统计${target ? ' · 区间均值' : ''}${points.length ? ` · 最新 ${clock(points.at(-1).ts)}` : ''}`}`};
     return derived;
   }
   const number = value => value == null || value === '' || typeof value === 'boolean' || !Number.isFinite(Number(value))
@@ -380,7 +384,7 @@ window.ServerOverview = (() => {
         $('loadLatest').textContent = format(number(points.at(-1)?.[metric.key]), metric.unit);
         $('loadHighCount').textContent = values.length ? threshold ? `${result.high} / ${values.length}` : String(values.length) : '—';
         const observations = points.reduce((count, point) => count + (number(point[metric.key + '_samples']) || 0), 0);
-        $('loadSampleCount').textContent = (values.length ? `${values.length} ${pointUnit}` : `尚无有效 ${metric.name} 样本`)
+        $('loadSampleCount').textContent = (options.loading ? '历史统计加载中…' : values.length ? `${values.length} ${pointUnit}` : `尚无有效 ${metric.name} 样本`)
           + (!realtime && !container && observations ? ` · ${observations} 次 ${metric.name} 观测` : '')
           + (container && rowIndex === 0 ? ' · 100% = 1 个逻辑核' : '');
         $('observationLocate').disabled = !result.count;

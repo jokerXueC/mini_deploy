@@ -970,11 +970,12 @@ function hideTrendTooltip() {
 }
 
 function trendAvailability(points, config, timing = {}) {
+  if (timing.loading) return {ready: false, loading: true, title: '加载中…', message: '正在读取所选时段的历史统计'};
   const valid = points.map(point => trendPointValue(point, config.key, config) != null);
   if (valid.some((value, index) => index > 0 && value && valid[index - 1])) {
     return { ready: true, message: '' };
   }
-  if (timing.emptyMessage) return {ready: false, message: timing.emptyMessage};
+  if (timing.emptyMessage) return {ready: false, title: timing.emptyTitle, message: timing.emptyMessage};
   const configuredInterval = Number(timing.intervalSeconds);
   const interval = Number.isFinite(configuredInterval) && configuredInterval > 0 ? configuredInterval : 1800;
   const now = timing.nowSeconds ?? Date.now() / 1000;
@@ -1003,7 +1004,7 @@ function renderTrendCard(points, config, availability = trendAvailability(points
           <strong>${scale ? escapeHtml(formatter(scale.latest)) : '-'}</strong>
         </div>
         <div class="trend-card-meta"><span>${escapeHtml(subLabel || '')}</span></div>
-        <div class="trend-card-empty"><span>样本不足，暂未生成趋势</span><small>${escapeHtml(availability.message)}</small></div>
+        <div class="trend-card-empty" data-loading="${Boolean(availability.loading)}" role="status"><span>${availability.loading ? '<i class="trend-loading-spinner" aria-hidden="true"></i>' : ''}${escapeHtml(availability.title || '样本不足，暂未生成趋势')}</span><small>${escapeHtml(availability.message)}</small></div>
       </article>
     `;
   }
@@ -1075,7 +1076,8 @@ function renderSystemTrend(system = {}) {
   const filtered = cutoff ? rawHistory.filter(point => Number(point?.ts) >= nowTs - cutoff) : rawHistory;
   const points = observation?.points || filtered.slice().reverse();
   const intervalSeconds = observation?.intervalSeconds || (realtime ? 1 : system.history_interval_seconds);
-  const timing = { intervalSeconds, nowSeconds: nowTs, lastSampleTs: rawHistory[0]?.ts, emptyMessage: observation?.emptyMessage };
+  const timing = { intervalSeconds, nowSeconds: nowTs, lastSampleTs: rawHistory[0]?.ts,
+    loading: observation?.loading, emptyTitle: observation?.emptyTitle, emptyMessage: observation?.emptyMessage };
   if (observation) timing.lastSampleTs = points.at(-1)?.ts;
   const metricKeys = container ? ['cpu_percent', 'memory_percent'] : ['cpu_percent', 'memory_percent', 'network_total_kbps'];
   if (observation && chart.observationSource === observation) return;
@@ -1085,6 +1087,7 @@ function renderSystemTrend(system = {}) {
   const signature = JSON.stringify([observation?.target, observation?.revision, systemTrendRange, intervalSeconds, points, availability]);
   if (chart.dataset.signature === signature) return;
   chart.dataset.signature = signature;
+  chart.setAttribute('aria-busy', String(Boolean(observation?.loading)));
   const viewportKey = JSON.stringify([systemTrendRange, observation?.target || '']);
   window.ServerOverview?.update(points, {realtime, intervalSeconds, container, ...observation, viewportKey});
   const intervalMinutes = Math.round(Number(system.history_interval_seconds || 1800) / 60);
@@ -1141,7 +1144,9 @@ function renderSystemTrend(system = {}) {
           DashboardMotion.reading(card.querySelector('strong'), latest.cpu_percent, formatPercent);
           return;
         }
-        card.querySelector(selector).innerHTML = next.querySelector(selector).innerHTML;
+        const current = card.querySelector(selector), replacement = next.querySelector(selector);
+        current.innerHTML = replacement.innerHTML;
+        if (selector === '.trend-card-empty') current.dataset.loading = replacement.dataset.loading;
       });
       return;
     }
