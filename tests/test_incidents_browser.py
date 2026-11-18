@@ -5,6 +5,8 @@ import time
 
 import pytest
 
+from browser_navigation import open_navigation, select_view
+
 from test_monitoring_browser import dashboard as dashboard_fixture, playwright
 
 dashboard = dashboard_fixture
@@ -105,9 +107,10 @@ def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(inc
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
     badge = page.locator('#eventsTabCount')
     playwright.expect(badge).to_have_text('5')
+    open_navigation(page)
     tabs = page.locator('.view-tab').all()[:3]
     boxes = [tab.bounding_box() for tab in tabs]
-    gaps = [boxes[i + 1]['x'] - boxes[i]['x'] - boxes[i]['width'] for i in range(2)]
+    gaps = [boxes[i + 1]['y'] - boxes[i]['y'] - boxes[i]['height'] for i in range(2)]
     assert abs(gaps[0] - gaps[1]) < 1
     # A hidden badge and the widest count must leave every tab in the same place.
     for hidden, text in ((True, '0'), (False, '99+'), (False, '5')):
@@ -115,8 +118,10 @@ def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(inc
         assert [tab.bounding_box() for tab in tabs] == boxes
         if not hidden:
             badge_box = badge.bounding_box()
-            assert badge_box['x'] + badge_box['width'] < boxes[2]['x']
+            assert badge_box['x'] + badge_box['width'] <= boxes[1]['x'] + boxes[1]['width']
     page.locator('.view-tabs').screenshot(path=str(tmp_path / f'nav-spacing-{width}-{theme}.png'))
+    if page.locator('#navigationBackdrop').is_visible():
+        page.keyboard.press('Escape')
     choose(page, 'incidentSource', 'docker')
     playwright.expect(badge).to_have_text('5')
     page.locator('#acknowledgeAllBtn').click()
@@ -124,7 +129,7 @@ def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(inc
     playwright.expect(page.locator('#acknowledgeAllBtn')).to_be_disabled()
     playwright.expect(badge).to_be_hidden()
     page.clock.install()
-    page.locator('#serverViewTab').click()
+    select_view(page, 'server')
     playwright.expect(page.locator('#eventsViewTab')).to_have_attribute('aria-label', '异常中心，暂无待知晓异常')
     page.clock.run_for(31000)
     playwright.expect(badge).to_be_hidden()
@@ -134,9 +139,10 @@ def test_incident_tab_badge_across_views_filters_recovery_and_failed_refresh(inc
     page.clock.run_for(31000)
     playwright.expect(badge).to_have_text('2')
     assert control['summary_gets'] > 0
+    open_navigation(page)
     tab_box, badge_box = page.locator('#eventsViewTab').bounding_box(), badge.bounding_box()
     assert badge_box['x'] > tab_box['x'] + tab_box['width'] / 2
-    assert badge_box['y'] < tab_box['y'] + tab_box['height'] / 2
+    assert tab_box['y'] <= badge_box['y'] < tab_box['y'] + tab_box['height']
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=str(tmp_path / f'incident-badge-{width}-{theme}.png'))
     control['fail_get'] = True
@@ -202,7 +208,7 @@ def test_filters_expansion_and_polling_stay_stable_on_recovery(incidents):
     playwright.expect(page.locator("#alertList")).to_contain_text("没有符合筛选")
     assert page.locator("#incidentSource").input_value() == "docker"
     assert len([call for call in state["calls"] if call[0] == "/status"]) == 1
-    page.locator("#requestsViewTab").click()
+    select_view(page, 'requests')
     gets = control["gets"]
     page.clock.run_for(31000)
     assert control["gets"] == gets

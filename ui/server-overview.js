@@ -29,6 +29,7 @@ window.ServerOverview = (() => {
     if (sceneRequest) $('observationProcesses').textContent = '读取已暂停，重新选择现场可重试。';
     detailRequest?.abort(); sceneRequest?.abort();
     detailRequest = null; sceneRequest = null;
+    document.dispatchEvent(new Event('observation-analysis-pause'));
   }
   function reset() {
     pause(); history = null; derived = null; historyError = ''; requestKey = ''; selected = -1;
@@ -79,6 +80,7 @@ window.ServerOverview = (() => {
   }
 
   function source(system, range) {
+    window.ObservationAnalysis?.system(system);
     const select = $('observationTarget');
     const containers = system.docker?.containers || [];
     const options = [['', '服务器整体'], ...containers.filter(item => /^[a-f0-9]{64}$/.test(item.id))
@@ -175,6 +177,7 @@ window.ServerOverview = (() => {
     detailRequest?.abort(); sceneRequest?.abort();
     detailRequest = null; sceneRequest = null;
     $('observationEvidence').hidden = true;
+    document.dispatchEvent(new Event('observation-range-closed'));
     cells.forEach(cell => { delete cell.dataset.pinned; cell.setAttribute('aria-pressed', 'false'); });
   }
   $('observationEvidenceClose').addEventListener('click', closeEvidence);
@@ -229,18 +232,22 @@ window.ServerOverview = (() => {
     cells.forEach(item => { item.tabIndex = item === cell ? 0 : -1; });
     cell.focus(); show(cell); openEvidence(column);
   });
-  async function openEvidence(column) {
+  async function openEvidence(column, endColumn = column, explicit = null) {
     detailRequest?.abort(); sceneRequest?.abort();
     detailRequest = null; sceneRequest = null;
-    pinned = {since: windowStart + column * bucketSpan, until: windowStart + (column + 1) * bucketSpan, metric: selectedMetric};
+    const start = explicit?.since ?? windowStart + Math.min(column, endColumn) * bucketSpan;
+    const end = explicit?.until ?? windowStart + (Math.max(column, endColumn) + 1) * bucketSpan;
+    const until = Math.ceil(end / 60) * 60;
+    pinned = {since: Math.max(Math.floor(start / 60) * 60, until - 7 * 86400), until, metric: selectedMetric};
     highlight();
     $('observationEvidence').hidden = false;
     $('observationEvidenceTitle').textContent = target ? targetName : '服务器整体';
     $('observationEvidenceRange').textContent = `${clock(pinned.since, true)} — ${clock(pinned.until, true)}（不含结束时刻）`;
     $('observationEvidenceMetrics').innerHTML = metrics.filter(metric => !target || metric.key !== 'network_total_kbps').map(metric => {
-      const result = stats(buckets[column], metric);
+      const result = stats(latestPoints.filter(point => point.ts >= pinned.since && point.ts < pinned.until), metric);
       return `<div><span>${metric.name}</span><strong>${format(result.average, metric.unit)}</strong><small>${result.count ? `平均 · ${result.peakLabel} ${format(result.peak, metric.unit)} · ${result.count} 个时间点` : '无有效采样'}</small></div>`;
     }).join('');
+    document.dispatchEvent(new CustomEvent('observation-range-selected', {detail: {...pinned, target, targetName}}));
     scenes = (latestOptions.contexts || []).filter(scene => scene.at >= pinned.since && scene.at < pinned.until)
       .slice().sort((a, b) => b.at - a.at);
     const select = $('observationScene');
@@ -299,14 +306,51 @@ window.ServerOverview = (() => {
   };
   grid.addEventListener('pointerover', event => show(event.target.closest('.load-cell')));
   grid.addEventListener('focusin', event => show(event.target.closest('.load-cell')));
+  let dragStart = null, previewColumn = null, suppressClick = false, lastColumn = null;
+  grid.addEventListener('pointerdown', event => {
+    const cell = event.target.closest('.load-cell');
+    if (cell && event.pointerType === 'mouse' && event.button === 0) dragStart = Number(cell.dataset.index) % columns;
+  });
+  grid.addEventListener('pointermove', event => {
+    const cell = event.target.closest('.load-cell');
+    if (dragStart === null || !cell || !(event.buttons & 1)) return;
+    const column = Number(cell.dataset.index) % columns;
+    if (column === previewColumn) return;
+    previewColumn = column;
+    cells.forEach((item,index) => {
+      const at = index % columns;
+      item.dataset.rangePreview = String(at >= Math.min(dragStart,column) && at <= Math.max(dragStart,column));
+    });
+  });
+  function clearRangePreview() {
+    cells.forEach(cell => { delete cell.dataset.rangePreview; });
+    dragStart = null; previewColumn = null;
+  }
+  window.addEventListener('pointerup', event => {
+    const cell = event.target.closest?.('.load-cell');
+    const end = cell ? Number(cell.dataset.index) % columns : null;
+    if (dragStart !== null && end !== null && end !== dragStart) {
+      suppressClick = true;
+      selectedMetric = metrics[Math.floor(Number(cell.dataset.index) / columns)].key;
+      update(latestPoints, latestOptions);
+      openEvidence(dragStart, end);
+      lastColumn = dragStart;
+      setTimeout(() => { suppressClick = false; }, 0);
+    }
+    clearRangePreview();
+  });
+  grid.addEventListener('pointercancel', clearRangePreview);
   grid.addEventListener('click', event => {
+    if (suppressClick) return;
     const cell = event.target.closest('.load-cell');
     if (!cell) return;
     cells.forEach(item => { item.tabIndex = item === cell ? 0 : -1; });
     selectedMetric = metrics[Math.floor(Number(cell.dataset.index) / columns)].key;
     update(latestPoints, latestOptions);
     show(cell);
-    openEvidence(Number(cell.dataset.index) % columns);
+    const column = Number(cell.dataset.index) % columns;
+    openEvidence(event.shiftKey && lastColumn !== null ? lastColumn : column, column);
+    lastColumn = column;
   });
   grid.addEventListener('keydown', event => {
     const cell = event.target.closest('.load-cell');
@@ -403,5 +447,6 @@ window.ServerOverview = (() => {
     highlight();
     DashboardMotion.followLatest(grid.closest('.load-map-scroll'), options.viewportKey);
   }
-  return {update, source, pause};
+  return {update, source, pause, selectRange: (since, until) => openEvidence(0, 0, {since, until}),
+    selection: () => ({target, targetName, metric: selectedMetric})};
 })();

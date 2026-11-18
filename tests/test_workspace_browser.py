@@ -3,6 +3,8 @@ import threading
 from http.server import ThreadingHTTPServer
 
 import pytest
+
+from browser_navigation import select_view, open_global_ai
 import agent
 from scripts.preview_server_overview import Handler, seed_requests
 from test_ssh_browser import page as page, playwright
@@ -32,7 +34,7 @@ def test_all_views_share_workspace_and_fit_mobile_with_populated_data(page, prev
         page.evaluate('(theme) => applyTheme(theme)', theme)
         for view in ('server', 'events', 'notify', 'certificates', 'requests', 'terminal', 'security'):
             page.set_viewport_size({'width': 1440, 'height': 1000})
-            page.locator(f'#{view}ViewTab').click()
+            select_view(page, view)
             playwright.expect(page.locator(f'#{view}View')).to_have_class('dashboard-view active')
             if view == 'security':
                 playwright.expect(page.locator('.security-login-row')).to_have_count(10)
@@ -44,14 +46,16 @@ def test_all_views_share_workspace_and_fit_mobile_with_populated_data(page, prev
             elif view == 'notify':
                 page.locator('#notifyEmailEnabled').check()
             elif view == 'terminal':
-                page.locator('#aiSettingsOpen').click()
+                open_global_ai(page)
+                page.locator('#panelAISettings').click()
                 playwright.expect(page.locator('#aiSettingsDialog')).to_be_visible()
                 page.keyboard.press('Escape')
+                page.locator('#panelAIClose').click()
             for width in (1440, 768, 390, 320):
                 page.set_viewport_size({'width': width, 'height': 1000 if width > 400 else 844})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), (theme, view, width)
                 assert page.locator(f'#{view}View').evaluate('el => el.scrollWidth <= el.clientWidth + 1'), (theme, view, width)
                 assert page.locator('.hero h1').evaluate('el => getComputedStyle(el).fontSize') == ('28px' if width > 760 else '24px')
-                assert page.locator('body').evaluate('el => { const grid = getComputedStyle(el, "::before"); return grid.display !== "none" && grid.backgroundImage.includes("linear-gradient") && Number(grid.opacity) > 0; }')
+                assert page.locator('.navigation-group.is-open').count() == 1
                 if width in (1440, 390):
                     page.screenshot(path=str(tmp_path / f'{view}-{theme}-{width}.png'), full_page=True)

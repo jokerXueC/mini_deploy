@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from browser_navigation import select_view
+
 import request_gateway
 from scripts.preview_security import login_examples, protection_example
 
@@ -149,7 +151,7 @@ def test_request_groups_average_history_and_expansion(browser_page, width, tmp_p
     records += [{**base, 'method': 'POST'}, {**base, 'host': 'other.test'}]
     state['gateway_requests'] = {'records': records}
     page.evaluate("document.querySelector('#requestLayout').value = 'flat'")
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.wait_for_selector('.request-group')
     assert page.locator('.request-group').count() == 4
     group = page.locator('.request-group').first
@@ -201,7 +203,7 @@ def test_nginx_request_view_filters_and_escapes(browser_page, width):
              'path': '/failed', 'status': 500, 'duration_ms': 33, 'upstream_ms': None},
         ],
     }
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#manageRequestGateways').click()
     page.locator('#requestBackend').select_option('nginx', force=True)
     page.wait_for_selector('.request-group')
@@ -225,7 +227,7 @@ def test_caddy_request_view_selects_and_filters(browser_page, width):
                                    {'at': '2026-09-30T06:34:56Z', 'host': 'example.test', 'method': 'GET',
                                     'path': '/ok<script>alert(1)</script>', 'status': 200,
                                     'duration_ms': 12, 'upstream_ms': None}]}
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#manageRequestGateways').click()
     page.locator('#requestBackend').select_option('caddy', force=True)
     page.wait_for_selector('.request-group')
@@ -240,7 +242,7 @@ def test_caddy_request_view_selects_and_filters(browser_page, width):
 def test_gateway_lifecycle_and_responsive_layout(browser_page, width, tmp_path):
     page, state = browser_page
     page.set_viewport_size({'width': width, 'height': 1000})
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     assert page.locator('#requestBackend').input_value() == 'gateway'
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayMaintenance > summary').click()
@@ -296,7 +298,7 @@ def test_editing_auto_gateway_keeps_inherited_proxy_limits(browser_page):
                                            'network': 'app_default', 'max_body_bytes': 0, 'connect_timeout_ms': 10000})
     state['gateway_entries'] = [{**automatic, 'revision': request_gateway.revision(automatic), 'state': 'not_created',
                                 'local_address': '127.0.0.1:18080', 'caddy_upstream': 'mini-gateway-api:10000'}]
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayMaintenance > summary').click()
     page.locator('[data-gateway-action="edit"]').click()
@@ -311,7 +313,7 @@ def test_editing_auto_gateway_keeps_inherited_proxy_limits(browser_page):
 
 def test_gateway_save_error_keeps_form_values(browser_page):
     page, state = browser_page
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayMaintenance > summary').click()
     page.locator('#gatewayAdd').click()
@@ -331,7 +333,7 @@ def test_gateway_save_error_keeps_form_values(browser_page):
 def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp_path):
     page, state = browser_page
     page.set_viewport_size({'width': width, 'height': 950})
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     assert page.locator('#requestBackend').is_hidden()
     assert page.locator('#gatewayAdd').is_hidden()
     page.locator('#gatewayConnectOpen').click()
@@ -388,7 +390,7 @@ def test_connection_wizard_preview_apply_and_disconnect(browser_page, width, tmp
 def test_connection_errors_preserve_inputs_and_show_help(browser_page):
     page, state = browser_page
     state['no_proxy'] = True
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayConnectOpen').click()
     page.wait_for_function("!document.querySelector('#gatewayConnectFields').disabled")

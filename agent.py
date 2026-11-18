@@ -62,6 +62,7 @@ import http_limits
 import ssh_terminal
 import terminal_ai
 import panel_diagnostics
+import incident_diagnosis
 import panel_runtime
 import panel_code
 import panel_files
@@ -74,6 +75,7 @@ import server_operations
 import performance_metrics
 import server_performance
 import server_processes
+import observation_analysis
 import resource_alerts
 import prometheus_metrics
 import panel_maintenance
@@ -2638,8 +2640,8 @@ def _panel_code_catalog():
     return _panel_code_catalog_instance
 
 
-def _incident_diagnostics(key: str, sort="cpu", pid=None) -> dict[str, Any]:
-    snapshot = _monitor().snapshot()
+def _incident_diagnostics(key: str, sort="cpu", pid=None, *, snapshot=None) -> dict[str, Any]:
+    snapshot = _monitor().snapshot() if snapshot is None else snapshot
     item = next((row for row in snapshot["alerts"] + snapshot["events"] if row.get("id") == key), None)
     if item is None:
         raise ValueError("异常已变化或不在保留范围内，请刷新异常列表")
@@ -3040,6 +3042,8 @@ UI_ASSET_TYPES = {
     "certificate-discovery.js": "application/javascript; charset=utf-8",
     "style.css": "text/css; charset=utf-8",
     "app.js": "application/javascript; charset=utf-8",
+    "navigation.js": "application/javascript; charset=utf-8",
+    "navigation.css": "text/css; charset=utf-8",
 }
 UI_ASSET_TYPES.update({'request-export.js': 'application/javascript; charset=utf-8',
                        'request-export.css': 'text/css; charset=utf-8'})
@@ -3053,6 +3057,10 @@ UI_ASSET_TYPES.update({'server-performance.js': 'application/javascript; charset
                        'server-performance-panel.css': 'text/css; charset=utf-8',
                        'server-overview.js': 'application/javascript; charset=utf-8',
                        'server-overview.css': 'text/css; charset=utf-8',
+                       'observation-analysis.js': 'application/javascript; charset=utf-8',
+                       'observation-analysis.css': 'text/css; charset=utf-8',
+                       'incident-diagnosis.js': 'application/javascript; charset=utf-8',
+                       'incident-diagnosis.css': 'text/css; charset=utf-8',
                        'workspace.css': 'text/css; charset=utf-8',
                        'prometheus.js': 'application/javascript; charset=utf-8'})
 UI_ASSET_TYPES.update({
@@ -3144,6 +3152,67 @@ def _ssh_manager():
 
 _database_manager_instance = None
 _database_manager_lock = threading.Lock()
+_diagnosis_store_instance = None
+_diagnosis_worker_instance = None
+_diagnosis_lock = threading.RLock()
+
+
+def _diagnosis_store():
+    global _diagnosis_store_instance
+    with _diagnosis_lock:
+        if (_diagnosis_store_instance is None or
+                _diagnosis_store_instance.path.parent.parent != STATE_FILE.parent):
+            _diagnosis_store_instance = incident_diagnosis.Store(STATE_FILE.parent, maintenance=_maintenance_shared_lock)
+        return _diagnosis_store_instance
+
+
+def _panel_read_backend(selection, target, *, code=None, database_owner='', allow_databases=False, incident=None):
+    return panel_diagnostics.Backend(selection, target,
+        incident=incident or _incident_diagnostics, history=_server_performance, monitor=lambda: _monitor().snapshot(),
+        realtime=lambda: _realtime_metrics_payload()['server'], logs=lambda source, **opts: _operations().logs(source, **opts),
+        code=code, runtime=panel_runtime.Runtime(
+            inventory=_operations_inventory, logs=lambda source, **opts: _operations().logs(source, **opts),
+            requests=_request_history, discovery=_certificate_discovery,
+            monitor=lambda: _monitor().snapshot(), audit=lambda: _audit_tail(lines=2000),
+            files=panel_files.Reader(root=code.project['path'] if code else '/', excluded=(STATE_FILE.parent,)),
+            databases=panel_database.Reader(_database_manager, database_owner, allowed=allow_databases, scoped=bool(code))))
+
+
+def _automatic_diagnosis_backend(incident):
+    def evidence(key):
+        snapshot = _monitor().snapshot()
+        # Use the frozen event identity even after recovery or a new episode of the same condition.
+        snapshot['alerts'] = [incident]
+        snapshot['events'] = [e for e in snapshot.get('events', []) if e.get('id') != key]
+        return _incident_diagnostics(key, snapshot=snapshot)
+    return _panel_read_backend({'kind': 'incident', 'id': incident['id']}, _panel_ai_target(),
+        database_owner=incident_diagnosis.OWNER, allow_databases=True, incident=evidence)
+
+
+def _diagnosis_worker():
+    global _diagnosis_worker_instance
+    with _diagnosis_lock:
+        store = _diagnosis_store()
+        if _diagnosis_worker_instance is None or _diagnosis_worker_instance.store is not store:
+            _diagnosis_worker_instance = incident_diagnosis.Worker(store,
+                monitor=lambda: _monitor().snapshot(), manager=_ai_manager, backend=_automatic_diagnosis_backend,
+                target=_panel_ai_target, config=lambda: _notification_config_payload(include_secret=True),
+                send=lambda channel, config, title, body: {
+                    'wecom': _send_wecom_notification, 'dingtalk': _send_dingtalk_notification,
+                    'email': _send_email_notification}[channel](config, title, body), log=_log)
+        return _diagnosis_worker_instance
+
+
+def _diagnosis_payload(page=0):
+    payload = _diagnosis_store().snapshot(_notification_config_payload(include_secret=True), page)
+    model_error = ''
+    try:
+        configured = _ai_manager().settings()['configured']
+    except (OSError, ValueError):
+        configured, model_error = False, '模型配置暂不可读，请在模型设置中检查；已有报告保留。'
+    payload.update(model_configured=configured, target=_panel_ai_target(),
+        error=(_diagnosis_worker_instance.error if _diagnosis_worker_instance and _diagnosis_worker_instance.store is _diagnosis_store() else '') or model_error)
+    return payload
 
 
 def _panel_ai_target():
@@ -3163,6 +3232,37 @@ def _database_manager():
 
 
 class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
+    def _handle_diagnosis(self, path, parsed):
+        if not self._require_auth_json():
+            return
+        try:
+            query = parse_qs(parsed.query)
+            if self.command == 'POST':
+                data = _read_json_body(self, max_bytes=4096)
+                if data.get('action') == 'configure':
+                    _diagnosis_store().configure(data.get('enabled'))
+                elif data.get('action') == 'retry':
+                    _diagnosis_store().retry(data.get('id'))
+                else:
+                    raise ValueError('不支持的诊断操作。')
+                _audit_event('incident_diagnosis_' + data['action'], actor=self.client_address[0], success=True)
+                self._write_json(200, _diagnosis_payload())
+            elif path == '/incident-diagnosis/report':
+                key = query.get('id', [''])[0]
+                result = _diagnosis_store().detail(key, query.get('revision', [None])[0])
+                if query.get('download') == ['md']:
+                    if not result['report']:
+                        raise ValueError('诊断尚未生成报告。')
+                    self._write_text_download(f'incident-{key}-v{result["report"]["revision"]}.md', result['report']['body'])
+                else:
+                    self._write_json(200, result, compress=True)
+            else:
+                self._write_json(200, _diagnosis_payload(int(query.get('page', ['0'])[0])))
+        except (OSError, ValueError, sqlite3.Error, _MaintenanceLockError) as exc:
+            storage_error = isinstance(exc, (OSError, sqlite3.Error, _MaintenanceLockError))
+            self._write_json(503 if storage_error else 400, {'error': 'diagnosis_unavailable',
+                'detail': '诊断存储暂不可用，请检查数据目录与磁盘；原报告保留。' if storage_error else str(exc)})
+
     def _database_grant(self):
         session = self._session_cookie_value()
         material = f"database-http-v1:{session}:{self.headers.get('Host', '')}"
@@ -3336,17 +3436,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                 elif not isinstance(project_id, str):
                     raise panel_code.CodeError('代码项目编号无效')
                 try:
-                    backend = panel_diagnostics.Backend(data.get('selection', {'kind': 'overview'}), target,
-                        incident=_incident_diagnostics, history=_server_performance, monitor=lambda: _monitor().snapshot(),
-                        realtime=lambda: _realtime_metrics_payload()['server'], logs=lambda source, **options: _operations().logs(source, **options),
-                        code=code_reader, runtime=panel_runtime.Runtime(
-                            inventory=_operations_inventory, logs=lambda source, **options: _operations().logs(source, **options),
-                            requests=_request_history, discovery=_certificate_discovery,
-                            monitor=lambda: _monitor().snapshot(), audit=lambda: _audit_tail(lines=2000),
-                            files=panel_files.Reader(root=code_reader.project['path'] if code_reader else '/',
-                                excluded=(STATE_FILE.parent,)),
-                            databases=panel_database.Reader(_database_manager, database_readonly.owner(self._session_cookie_value()),
-                                allowed=self._ssh_secure() or self._database_http_enabled(), scoped=bool(code_reader))))
+                    backend = _panel_read_backend(data.get('selection', {'kind': 'overview'}), target, code=code_reader,
+                        database_owner=database_readonly.owner(self._session_cookie_value()),
+                        allow_databases=self._ssh_secure() or self._database_http_enabled())
                 except ValueError as exc:
                     raise terminal_ai.AIError(str(exc)) from exc
                 if is_global:
@@ -3933,6 +4025,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             if self._require_auth_json():
                 self._write_json(200, _sites_config_payload())
             return
+        if path in {'/incident-diagnosis', '/incident-diagnosis/report'}:
+            self._handle_diagnosis(path, parsed)
+            return
         if path == "/monitoring":
             if self._require_auth_json():
                 try:
@@ -4008,6 +4103,25 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                     self._write_json(200, payload)
                 except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
                     self._write_json(503, {'error': 'maintenance_unavailable', 'detail': str(exc)})
+            return
+        if path in {'/observations/analyze', '/observations/requests'}:
+            if self._require_auth_json():
+                try:
+                    query = parse_qs(parsed.query)
+                    since, until = observation_analysis.window(query.get('since', [''])[0], query.get('until', [''])[0])
+                    if path == '/observations/requests':
+                        payload = observation_analysis.requests(_request_history(), since, until,
+                            query.get('source', [''])[0], json.loads(query.get('watch', ['[]'])[0]))
+                    else:
+                        payload = observation_analysis.report(_server_performance(), _performance_history(),
+                            _request_history(), _monitor(), since=since, until=until,
+                            compare=query.get('compare', ['previous'])[0], reference=query.get('reference', [None])[0],
+                            target=query.get('target', [''])[0], source=query.get('source', [''])[0])
+                    self._write_json(200, payload, compress=True)
+                except (ValueError, TypeError, OverflowError):
+                    self._write_json(400, {'detail': '观测筛选参数无效，请选择有效时间、来源与对比区间。'})
+                except (OSError, sqlite3.Error, RuntimeError):
+                    self._write_json(503, {'detail': '观测历史暂不可读，请稍后重试；原历史保留。'})
             return
         if path == '/performance/server':
             if self._require_auth_json():
@@ -4316,6 +4430,9 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                     return
                 _audit_event("monitoring_" + str(data.get("action", "")), actor=self.client_address[0], success=True)
                 self._write_json(200, result)
+            return
+        if path == '/incident-diagnosis':
+            self._handle_diagnosis(path, parsed)
             return
         if path in {"/sites/save", "/sites/delete"}:
             if self._require_auth_json():
@@ -4863,11 +4980,17 @@ def main() -> None:
     history_worker = threading.Thread(target=request_history.Collector(_request_history()).run,
         args=(history_stop, _log), name="request-history-sampler", daemon=True)
     history_worker.start()
+    diagnosis_stop = threading.Event()
+    diagnosis_worker = threading.Thread(target=_diagnosis_worker().run, args=(diagnosis_stop,),
+                                       name='incident-auto-diagnosis', daemon=True)
+    diagnosis_worker.start()
     server = http_limits.BoundedHTTPServer((HOST, PORT), Handler)
     _log(f"monitoring agent listening on {HOST}:{PORT}, sites={len(PROJECTS)}")
     try:
         server.serve_forever()
     finally:
+        diagnosis_stop.set()
+        diagnosis_worker.join(timeout=10)
         docker_event_stop.set()
         history_stop.set()
         performance_stop.set()

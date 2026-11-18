@@ -39,6 +39,7 @@
   function setPhase(value) {
     phase = value; dock.dataset.state = value;
     $('globalAIOpen').dataset.state = value;
+    if ($('globalAIStatus')) $('globalAIStatus').textContent = value === 'idle' ? '就绪' : phaseLabels[value];
     $('panelAIDockStatus').textContent = phaseLabels[value];
     const name = globalMode ? 'AI 助手' : 'AI 诊断';
     dock.setAttribute('aria-label', `恢复 ${name}，${phaseLabels[value]}`);

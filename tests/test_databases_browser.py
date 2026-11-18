@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from browser_navigation import select_view, open_global_ai
+
 from test_onboarding_browser import browser_page as browser_page, playwright
 
 
@@ -73,7 +75,7 @@ def database_page(browser_page):
 
     page.route('**/databases', api)
     page.route('**/databases/*', api)
-    page.locator('#databasesViewTab').click()
+    select_view(page, 'databases')
     playwright.expect(page.locator('#dbNew')).to_be_enabled()
     return page, state
 
@@ -147,7 +149,7 @@ def test_refined_workspace_navigation_and_ai_target(database_page, tmp_path, wid
     playwright.expect(page.locator('#dbTableCount')).to_have_text('1')
     playwright.expect(page.locator('#dbDataGrid tbody th').first).to_have_text('1')
     playwright.expect(page.locator('#dbAI')).not_to_be_visible()
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     playwright.expect(page.locator('#panelAITitle')).to_have_text('AI 助手')
     playwright.expect(page.locator('#panelAIQuestion')).to_have_value('')
     playwright.expect(page.locator('.panel-ai-code')).not_to_be_visible()

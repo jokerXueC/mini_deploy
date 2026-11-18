@@ -3,6 +3,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from browser_navigation import select_view, open_global_ai
+
 from scripts.preview_operations import examples
 from test_monitoring_browser import dashboard as dashboard, playwright
 
@@ -69,7 +71,7 @@ def test_incident_drilldown_keeps_modal_open_and_logs_safe(operations, tmp_path,
 
 def test_process_port_links_and_keyboard_tabs(operations):
     page, _, control = operations
-    page.locator("#serverViewTab").click()
+    select_view(page, 'server')
     page.locator('[data-operations-open="processes"]').click()
     playwright.expect(page.locator("#opsProcesses")).to_contain_text("python")
     page.locator('[data-ops-pid-ports="1826"]').click()
@@ -87,7 +89,7 @@ def test_process_port_links_and_keyboard_tabs(operations):
 
 def test_log_filters_pause_download_and_read_errors(operations):
     page, _, control = operations
-    page.locator("#serverViewTab").click()
+    select_view(page, 'server')
     page.locator('[data-operations-open="logs"]').click()
     page.locator("#opsLogSource").select_option("container:" + "a" * 64, force=True)
     playwright.expect(page.locator("#opsLogLines")).to_contain_text("INFO")
@@ -111,14 +113,17 @@ def test_log_filters_pause_download_and_read_errors(operations):
 
 
 def test_ai_entry_opens_panel_scope_without_ssh_or_missing_model_submission(operations):
-    page, _, _ = operations
+    page, state, _ = operations
+    page.route('**/terminal-ai/settings', lambda route: route.fulfill(json={'configured': False, 'secure': True}))
+    page.route('**/terminal-ai/access?*', lambda route: route.fulfill(json={'mode': 'approve'}))
     page.locator("#alertList summary").click()
     page.locator("#alertList [data-incident-diagnose]").click()
-    playwright.expect(page.locator("#opsAnalyze")).to_be_enabled()
-    received = []
-    page.expose_function("captureScope", lambda scope: received.append(scope))
-    page.evaluate("window.PanelAI = {open: captureScope}")
-    page.locator("#opsAnalyze").click()
+    playwright.expect(page.locator("#opsAnalyze")).to_be_hidden()
+    page.locator('#opsClose').click()
+    open_global_ai(page)
+    playwright.expect(page.locator('#panelAIDialog')).to_be_visible()
+    playwright.expect(page.locator('#panelAITitle')).to_have_text('AI 助手')
+    playwright.expect(page.locator('#panelAIQuestion')).to_have_value('')
     playwright.expect(page.locator("#eventsView")).to_have_class("dashboard-view active")
-    page.wait_for_timeout(100)
-    assert received[0]['kind'] == 'incident' and received[0]['id']
+    playwright.expect(page.locator('#panelAIScope')).to_have_text('请先配置模型，再发送诊断问题')
+    assert not [call for call in state['calls'] if call[1] == 'POST']

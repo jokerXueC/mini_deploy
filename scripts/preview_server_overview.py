@@ -1,5 +1,6 @@
 """Loopback-only, read-only preview of the server workspace with synthetic samples."""
 import argparse
+import json
 import math
 import sys
 import time
@@ -97,6 +98,14 @@ class Handler(PerformanceHandler):
         path = agent._normal_path(urlparse(self.path).path)
         if path in {'/', '/ui', '/ui/'}:
             self._write_html(200, agent._render_ui().replace('mini_deploy Monitor', 'mini_deploy · 本地模拟预览'))
+        elif path == '/incident-diagnosis':
+            payload = agent._diagnosis_store().snapshot(DEMO_NOTIFICATIONS)
+            payload.update(target='模拟主机 · 仅供本地预览', model_configured=False, error='')
+            self._write_json(200, payload)
+        elif path == '/incident-diagnosis/report':
+            agent.Handler.do_GET(self)
+        elif path in {'/observations/analyze', '/observations/requests'}:
+            agent.Handler.do_GET(self)
         elif path in {'/security/center', '/security/fail2ban', '/security/logins', '/security/protection'}:
             SecurityHandler.do_GET(self)
         elif path == '/docker/logs':
@@ -142,6 +151,31 @@ class Handler(PerformanceHandler):
         self._write_json(403, {'detail': '本地演示不执行服务器操作。'})
 
 
+DEMO_NOTIFICATIONS = {'wecom': {'enabled': True, 'webhook_url': 'https://example.invalid/synthetic-preview'}}
+
+
+def seed_diagnosis(now):
+    store = agent._diagnosis_store()
+    store.configure(True)
+    incident = {'id': 'synthetic-api-502', 'incident_id': 'd' * 24, 'title': '模拟：API 连续返回 502',
+                'source': 'website', 'at_ts': now - 120, 'last_sample': now, 'detail': '模拟故障，不代表当前电脑状态。'}
+    store.scan({'alerts': [incident]})
+    if not store.detail('d' * 24)['report']:
+        sections = {
+            'confidence': 'suspected', 'symptom': '模拟接口在 14:02 至 14:04 返回 502，共 9 次。影响登录和任务领取。',
+            'timeline': '1. 14:02:03：入口记录第一个 502。\n2. 14:02:04：应用容器出现停止事件。\n3. 14:04:12：健康探测恢复 200。',
+            'investigation': '| 检查来源 | 发现 |\n|---|---|\n| 代理日志（模拟） | 上游连接被拒绝 |\n| 容器事件（模拟） | 同时存在重建记录 |\n\n日志中的连接拒绝支持上游当时不可达；容器重建的触发来源尚缺证据。',
+            'cause': '**可能原因，尚待确认：** 应用重建期间上游不可达。缺少部署发起记录，不能确认谁触发了重建，也不能把正常长轮询耗时当作根因。',
+            'solution': '1. 核对当前容器健康及重启次数。\n2. 对齐部署任务与错误时间。\n3. 若证实部署中断，应增加就绪检查并调整更新顺序。\n\n只读核对示例：\n```sh\ndocker ps --format "table {{.Names}}\\t{{.Status}}"\n```\n\n以上是建议，尚未执行。',
+            'verification': '模拟监测已恢复。需要继续观察 5xx 和健康检查，确认之后无新增错误。恢复信号不代表已确认根因。'}
+        store.running('d' * 24, 'synthetic-only')
+        store.finish('d' * 24, {'status': 'done', 'text': json.dumps(sections, ensure_ascii=False),
+            'events': [{'title': '模拟读取代理日志', 'status': 'done', 'command': 'read_logs', 'started_at': now - 60,
+                        'result': '模拟数据：ERROR upstream connection refused'}]}, '模拟主机')
+        store.queue_notifications(DEMO_NOTIFICATIONS)
+    store.configure(False)
+
+
 def main():
     parser = argparse.ArgumentParser(description='只读服务器界面预览，所有数据为模拟数据')
     parser.add_argument('--port', type=int, default=60696)
@@ -151,6 +185,15 @@ def main():
     Handler.demo_epoch = int(time.time())
     agent._server_performance_instance = seed(args.data_dir.resolve(), Handler.demo_epoch, recent_episode=True)
     agent._history_instance = seed_requests(agent.STATE_FILE.parent, map_locations=True)
+    seed_diagnosis(Handler.demo_epoch)
+    history = agent._performance_history()
+    with history.connect() as db:
+        db.executemany('INSERT OR IGNORE INTO samples VALUES(?,?,?,?,?)', (
+            (key * 64, ts, name, (80 + math.sin(ts / 180) * 58) * scale,
+             35 + scale * 28 + math.sin(ts / 300) * 7)
+            for ts in range(int(Handler.demo_epoch // 30) * 30 - 2 * 86400,
+                            int(Handler.demo_epoch // 30) * 30, 30)
+            for key, name, scale in [('a', 'api-server', 1), ('b', 'postgres', .22), ('c', 'caddy', .06)]))
     print(f'http://127.0.0.1:{args.port}/ui?view=server', flush=True)
     with ThreadingHTTPServer(('127.0.0.1', args.port), Handler) as server:
         server.serve_forever()

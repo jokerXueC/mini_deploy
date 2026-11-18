@@ -1,0 +1,43 @@
+.diagnosis-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.diagnosis-settings > span { color: var(--muted); margin-right: auto; overflow-wrap: anywhere; }
+.diagnosis-row { display: flex; justify-content: space-between; gap: 16px; padding: 15px 0; border-bottom: 1px solid var(--line); }
+.diagnosis-row > div { min-width: 0; }
+.diagnosis-row strong { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.diagnosis-row p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.diagnosis-row button { flex: 0 0 auto; align-self: center; }
+.diagnosis-state { color: var(--control-accent); }
+.diagnosis-state[data-state=failed], .diagnosis-state[data-state=incomplete] { color: #cd8052; }
+#diagnosisDialog { width: min(960px, calc(100vw - 24px)); font-family: inherit; font-weight: 400; letter-spacing: 0; }
+.diagnosis-report-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 8px 24px 16px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.diagnosis-report-tools label { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--muted); }
+.diagnosis-report-tools .form-select { width: 236px; min-width: 0; }
+#diagnosisDialog .diagnosis-report-tools .form-select-button { height: 34px; min-height: 34px; font-size: 12px; font-weight: 400; color: var(--fg); }
+#diagnosisDialog .form-select-menu { font-family: inherit; }
+#diagnosisDialog .form-select-option { font-size: 12px; font-variant-numeric: tabular-nums; }
+.diagnosis-report-tools a { margin-left: auto; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.diagnosis-report-tools a:not([href]) { opacity: .35; pointer-events: none; }
+.diagnosis-report-scroll { overflow: auto; min-height: 0; padding: 12px 24px 24px; }
+.diagnosis-report-scroll article { font: inherit; font-size: 13px; line-height: 1.85; overflow-wrap: anywhere; }
+.diagnosis-report-scroll article :is(h1, h2, h3, h4) { font-family: inherit; font-weight: 500; color: var(--fg); }
+.diagnosis-report-scroll article h1 { font-size: 18px; line-height: 1.6; margin: 8px 0 20px; }
+.diagnosis-report-scroll article h2 { font-size: 15px; line-height: 1.7; margin: 24px 0 10px; }
+.diagnosis-report-scroll article h3, .diagnosis-report-scroll article h4 { font-size: 14px; }
+.diagnosis-report-scroll article p { margin: 10px 0; }
+.diagnosis-report-scroll article :is(ul, ol) { margin: 10px 0; padding-left: 22px; }
+.diagnosis-report-scroll article li + li { margin-top: 4px; }
+.diagnosis-report-scroll article strong { font-weight: 600; }
+.diagnosis-report-scroll article code, #diagnosisTrace pre { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", "PingFang SC", "Microsoft YaHei", monospace; font-size: 12px; font-weight: 400; }
+.diagnosis-report-scroll article :not(pre) > code { padding: 2px 5px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface-muted); }
+.diagnosis-report-scroll article pre, #diagnosisTrace pre { margin: 12px 0 16px; padding: 14px 16px; max-width: 100%; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-muted); color: var(--fg); font-family: inherit; font-size: 12px; line-height: 1.8; overflow: auto; tab-size: 4; }
+.diagnosis-report-scroll article pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.diagnosis-report-scroll article pre code { display: block; margin: 0; padding: 0; border: 0; background: none; color: inherit; line-height: inherit; white-space: inherit; }
+#diagnosisTrace pre { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", "PingFang SC", "Microsoft YaHei", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diagnosis-report-scroll article a { color: var(--control-accent); }
+.diagnosis-report-scroll article table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.diagnosis-report-scroll article th, .diagnosis-report-scroll article td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; }
+.diagnosis-report-scroll article th { font-weight: 500; color: var(--muted); }
+.diagnosis-report-scroll > details { border-top: 1px solid var(--line); padding: 16px 0; font-size: 12px; }
+.diagnosis-report-scroll summary { cursor: pointer; }
+#diagnosisTrace > details { margin: 12px 0; }
+#diagnosisDelivery p { line-height: 1.8; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .diagnosis-row { gap: 10px; } .diagnosis-report-tools { display: grid; grid-template-columns: minmax(0, 1fr) 32px; padding: 8px 16px 12px; gap: 10px; } .diagnosis-report-tools label { grid-column: 1 / -1; min-width: 0; } .diagnosis-report-tools .form-select { flex: 1; width: 0; } #diagnosisRetry { justify-self: start; } .diagnosis-report-tools a { margin-left: 0; } .diagnosis-report-scroll { padding: 12px 16px 20px; } #diagnosisDialog .ops-head { padding: 16px; } }

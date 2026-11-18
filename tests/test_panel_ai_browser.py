@@ -3,6 +3,8 @@ import threading
 
 import pytest
 
+from browser_navigation import select_view, open_global_ai
+
 import agent
 from test_ssh_browser import page as page, playwright
 from test_panel_diagnostics import evidence as evidence, manager as manager, model_server as model_server
@@ -23,7 +25,7 @@ def test_history_toggles_closes_and_distinguishes_current_conversation(
     page.set_viewport_size({'width': width, 'height': height})
     page.goto(http_server.origin + '/ui?view=server')
     page.evaluate('(theme) => applyTheme(theme)', theme)
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     for question in ('检查服务器状态', '帮我检查请求失败的原因，只读分析容器日志和关联事件'):
         page.locator('#panelAIQuestion').fill(question)
         page.locator('#panelAISend').click()
@@ -79,7 +81,7 @@ def test_history_can_collapse_while_loading_and_late_response_does_not_reopen_it
         page, http_server, manager, model_server, evidence):
     manager.save(ai_tests.config(model_server))
     page.goto(http_server.origin + '/ui?view=server')
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     page.evaluate('''() => {
       const original = window.fetch;
       const gate = new Promise(resolve => window.releaseHistory = resolve);
@@ -108,7 +110,7 @@ def test_assistant_login_grants_access_and_terminal_reuses_session_after_reload(
     page.set_viewport_size({'width': width, 'height': 844})
     page.goto(http_server.origin + '/ui?view=server')
     page.evaluate('(theme) => applyTheme(theme)', theme)
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     page.locator('#panelAIQuestion').fill('保留我的诊断问题')
     permission = page.get_by_role('combobox', name='操作方式', exact=True)
     permission.click()
@@ -173,7 +175,7 @@ def test_model_can_offer_login_inside_chat_without_receiving_credentials(
     monkeypatch.setattr(agent, '_ssh_manager', lambda: ssh_manager)
     model_server.content = lambda body, count: tool_response('openai', 'request_ssh_login', {}) if count == 1 else answer('openai')
     page.goto(http_server.origin + '/ui?view=server')
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     page.locator('#panelAIQuestion').fill('请检查另一台服务器')
     page.locator('#panelAISend').click()
     playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('已保存诊断记录')
@@ -269,7 +271,7 @@ def test_global_entry_keeps_conversation_drafts_and_history_across_pages(
     page.set_viewport_size({'width': width, 'height': 950})
     page.goto(http_server.origin + '/ui?view=server')
     page.evaluate('(theme) => applyTheme(theme)', theme)
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     playwright.expect(page.locator('#panelAIQuestion')).to_have_value('')
     playwright.expect(page.locator('.panel-ai-code')).not_to_be_visible()
     assert not model_server.calls
@@ -279,8 +281,8 @@ def test_global_entry_keeps_conversation_drafts_and_history_across_pages(
     playwright.expect(page.locator('#panelAITarget')).to_contain_text('面板主机：')
     page.locator('#panelAIQuestion').fill('保留草稿：接着检查网络')
     page.locator('#panelAIMinimize').click()
-    page.locator('#eventsViewTab').click()
-    page.locator('#globalAIOpen').click()
+    select_view(page, 'events')
+    open_global_ai(page)
     playwright.expect(page.locator('#panelAIQuestion')).to_have_value('保留草稿：接着检查网络')
     assert len(manager.jobs) == 1
     model_server.gate.set()
@@ -289,9 +291,9 @@ def test_global_entry_keeps_conversation_drafts_and_history_across_pages(
     assert page.locator('#panelAIDialog').evaluate('el => el.scrollWidth <= el.clientWidth')
     page.locator('#panelAIClose').click()
     playwright.expect(page.locator('#panelAIDock')).to_be_visible()
-    page.locator('#databasesViewTab').click()
+    select_view(page, 'databases')
     playwright.expect(page.locator('#dbAI')).not_to_be_visible()
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     page.locator('#panelAIHistory').click()
     page.locator('#panelAIHistoryList button.tai-history-row').click()
     playwright.expect(page.locator('#panelAISend')).to_be_enabled()
@@ -314,7 +316,7 @@ def test_global_ssh_approval_shows_actual_target_and_only_runs_after_consent(
     model_server.content = lambda body, count: tool_response('openai', 'ssh_restart_service',
         {'session_id': session.id, 'service': 'nginx'}) if count == 1 else answer('openai')
     page.goto(http_server.origin + '/ui?view=server')
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     page.locator('#panelAIQuestion').fill('重启已连接的服务器上的 nginx')
     page.locator('#panelAISend').click()
     playwright.expect(page.locator('.panel-ai-approval')).to_be_visible(timeout=15000)
@@ -335,7 +337,7 @@ def test_global_auto_grant_fits_content_with_padded_body_and_visible_confirmatio
     page.set_viewport_size({'width': width, 'height': height})
     page.goto(http_server.origin + '/ui?view=server')
     page.evaluate('(theme) => applyTheme(theme)', theme)
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     permission = page.get_by_role('combobox', name='操作方式', exact=True)
     permission.click()
     page.get_by_role('option', name='自动操作', exact=True).click()
@@ -391,7 +393,7 @@ def test_global_auto_mode_requires_consent_and_unknown_commands_still_wait(
         return answer('openai')
     model_server.content = response
     page.goto(http_server.origin + '/ui?view=server')
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     permission = page.get_by_role('combobox', name='操作方式', exact=True)
     permission.click()
     page.get_by_role('option', name='自动操作', exact=True).click()
@@ -424,7 +426,7 @@ def test_global_auto_mode_requires_consent_and_unknown_commands_still_wait(
 def test_unconfigured_model_entry_offers_settings_without_sending_or_ssh(
         page, http_server, manager, evidence):
     page.goto(http_server.origin + '/ui?view=server')
-    page.locator('#globalAIOpen').click()
+    open_global_ai(page)
     page.locator('#panelAIQuestion').fill('检查本机状态')
     page.locator('#panelAISend').click()
     playwright.expect(page.locator('#panelAIFeedback')).to_contain_text('模型设置')
@@ -451,8 +453,12 @@ def test_minimized_diagnosis_continues_across_views_and_restores_draft_and_resul
     playwright.expect(dock).to_be_visible()
     playwright.expect(dock).to_be_focused()
     playwright.expect(page.locator('#panelAIDockStatus')).to_have_text('正在分析')
-    assert dock.bounding_box()['x'] == 0
-    page.locator('#eventsViewTab').click()
+    if width > 760:
+        sidebar_box = page.locator('#panelNavigation').bounding_box()
+        assert dock.bounding_box()['x'] == sidebar_box['x'] + sidebar_box['width'] + 12
+    else:
+        assert dock.bounding_box()['x'] == 0
+    select_view(page, 'events')
     playwright.expect(page.locator('#eventsView')).to_have_class('dashboard-view active')
     # Another AI entry restores the active task instead of cancelling/replacing it.
     page.evaluate("window.PanelAI.open({kind:'incident', id:'another-incident'})")

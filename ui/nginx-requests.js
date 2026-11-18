@@ -289,6 +289,7 @@ window.NginxRequests = (() => {
       records = result.records || [];
       visitors = result.visitors || null;
       historyResult = result.history ? result : null;
+      window.ObservationAnalysis?.requestContext({backend, source: backend === 'gateway' ? $('requestGatewayKey').value : '', period: $('requestPeriod').value});
       window.AppSelects?.syncAll();
       $('requestContainerField').hidden = backend !== 'caddy';
       if (backend === 'caddy') {
@@ -347,6 +348,7 @@ window.NginxRequests = (() => {
   }
 
   function changeSource() {
+    window.ObservationAnalysis?.requestContext({backend: $('requestBackend').value, source: $('requestGatewayKey').value, period: $('requestPeriod').value});
     sourceChosen = true;
     generation++;
     records = []; historyResult = null; historyPage = 0; render();
@@ -371,6 +373,7 @@ window.NginxRequests = (() => {
   $('requestGatewayKey').addEventListener('change', changeSource);
   $('requestLimit').addEventListener('change', changeSource);
   function changeHistory(resetPage = true) {
+    window.ObservationAnalysis?.requestContext({backend: $('requestBackend').value, source: $('requestGatewayKey').value, period: $('requestPeriod').value});
     if ($('requestBackend').value !== 'gateway') { render(); return; }
     if (resetPage) historyPage = 0;
     generation++;

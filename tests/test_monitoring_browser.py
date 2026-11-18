@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from browser_navigation import select_view
+
 playwright = pytest.importorskip("playwright.sync_api")
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,6 +70,9 @@ def dashboard():
                               {"targets": [], "alerts": [], "events": [], "notifications_enabled": False})
                 elif path == "/notifications":
                     result = {"notifications": payload.get("notifications", {})}
+                elif path == '/incident-diagnosis':
+                    result = {'enabled':False, 'model_configured':False, 'notifications_enabled':False,
+                              'target_scope':'面板所在服务器', 'items':[], 'total':0, 'page':0, 'has_more':False}
                 elif path == "/nginx-settings":
                     result = {"configured": True, "profile": {"mode": "local", "container": "", "network": "host"},
                         "upstreams": {}, "projects": [{"key": item["key"], "name": item["name"],
@@ -142,7 +147,7 @@ def test_routes_and_monitoring_only_requests(dashboard, view):
     assert page.locator("#deployView, #projectModal, #redeployBtn, #deployViewTab, #projectSwitcher").count() == 0
     page.clock.install()
     for tab in ["server", "events", "notify", "certificates", "requests"]:
-        page.locator(f"#{tab}ViewTab").click()
+        select_view(page, tab)
         page.wait_for_timeout(100)
         page.clock.run_for(31000)
     assert not state["errors"]
@@ -573,7 +578,7 @@ def test_docker_actions_and_notification_save_do_not_fetch_deployment(dashboard)
     page.locator('[data-container-action="restart"]').click()
     page.locator("#confirmOkBtn").click()
     playwright.expect(page.locator("#dockerFeedback")).to_contain_text("已重启")
-    page.locator("#notifyViewTab").click()
+    select_view(page, 'notify')
     page.locator("#saveNotificationBtn").click()
     playwright.expect(page.locator("#notificationResult")).to_contain_text("已保存")
     assert any(path == "/notifications" and method == "POST" for path, method, _ in state["calls"])

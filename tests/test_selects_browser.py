@@ -1,6 +1,8 @@
 """Shared select menus remain readable in filters, logs and modal dialogs."""
 import pytest
 
+from browser_navigation import select_view, open_global_ai
+
 from test_onboarding_browser import browser_page as browser_page, playwright
 
 
@@ -27,7 +29,7 @@ def test_filter_menus_readable_and_aligned(browser_page, tmp_path, width, theme)
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
     for view, control in [('security', 'securityActivitySource'), ('events', 'incidentStatus'),
                           ('requests', 'requestStatus')]:
-        page.locator(f'#{view}ViewTab').click()
+        select_view(page, view)
         button = page.locator(f'#{control}-button')
         button.click()
         menu = assert_menu_fits(page, single_line=True)
@@ -36,7 +38,7 @@ def test_filter_menus_readable_and_aligned(browser_page, tmp_path, width, theme)
         page.keyboard.press('Escape')
         playwright.expect(menu).to_have_count(0)
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('#securityViewTab').click()
+    select_view(page, 'security')
     page.locator('#securityActivitySource-button').click()
     assert_menu_fits(page, single_line=True)
     page.keyboard.press('End')
@@ -46,7 +48,7 @@ def test_filter_menus_readable_and_aligned(browser_page, tmp_path, width, theme)
 
 
 @pytest.mark.parametrize('width', [1440, 320])
-def test_long_options_and_moving_ai_panel_keep_menu_visible(browser_page, tmp_path, width):
+def test_long_options_and_global_ai_keep_menu_visible(browser_page, tmp_path, width):
     page, _ = browser_page
     page.set_viewport_size({'width': width, 'height': 950})
     page.route('**/terminal-ai/settings', lambda route: route.fulfill(json={
@@ -55,8 +57,9 @@ def test_long_options_and_moving_ai_panel_keep_menu_visible(browser_page, tmp_pa
     page.route('**/terminal-ai/access*', lambda route: route.fulfill(json={
         'mode': route.request.post_data_json['mode'] if route.request.method == 'POST' else 'approve'}))
     page.evaluate("window.SSHTerminal.context = () => ({session_id:'mock-session', target:'test-server', cursor:0})")
-    page.locator('#terminalViewTab').click()
-    page.locator('#aiSettingsOpen').click()
+    select_view(page, 'terminal')
+    open_global_ai(page)
+    page.locator('#panelAISettings').click()
     page.locator('#aiProtocol-button').click()
     assert_menu_fits(page)
     page.get_by_role('option', name='Anthropic / Claude 原生', exact=True).click()
@@ -65,22 +68,20 @@ def test_long_options_and_moving_ai_panel_keep_menu_visible(browser_page, tmp_pa
     page.keyboard.press('Escape')
     assert page.locator('#aiSettingsDialog').evaluate('(dialog) => dialog.open')
     page.locator('#aiSettingsDialog [data-ai-close]').click()
-    page.locator('#aiChatOpen').click()
-    page.locator('#aiPanelExpand').click()
-    # This select was initialized outside the dialog before the panel moved.
-    page.locator('#aiPermission-button').click()
+    page.locator('#panelAIPermission-button').click()
     menu = assert_menu_fits(page, single_line=True)
-    assert menu.evaluate('(node) => node.parentElement.id') == 'aiExpandedDialog'
+    assert menu.evaluate('(node) => node.parentElement.id') == 'panelAIDialog'
     page.get_by_role('option', name='操作前确认', exact=True).click()
-    playwright.expect(page.locator('#aiPermission')).to_have_value('approve')
-    page.locator('#aiPermission-button').click()
+    playwright.expect(page.locator('#panelAIPermission')).to_have_value('approve')
+    page.locator('#panelAIPermission-button').click()
     page.screenshot(path=str(tmp_path / f'ai-expanded-menu-{width}.png'))
     page.keyboard.press('Escape')
-    assert page.locator('#aiExpandedDialog').evaluate('(dialog) => dialog.open')
-    page.locator('#aiPanelExpand').click()
-    page.locator('#aiPermission-button').click()
+    assert page.locator('#panelAIDialog').evaluate('(dialog) => dialog.open')
+    page.locator('#panelAIMinimize').click()
+    open_global_ai(page)
+    page.locator('#panelAIPermission-button').click()
     assert_menu_fits(page)
-    assert page.locator('#aiPermission-menu').evaluate('(node) => node.parentElement.tagName') == 'BODY'
+    assert page.locator('#panelAIPermission-menu').evaluate('(node) => node.parentElement.id') == 'panelAIDialog'
 
 
 @pytest.mark.parametrize('width', [1440, 320])
@@ -135,7 +136,7 @@ def test_long_log_source_wraps_and_menu_avoids_viewport_edges(browser_page, tmp_
 def test_compact_menu_flips_above_and_tracks_resizing(browser_page, width):
     page, _ = browser_page
     page.set_viewport_size({'width': width, 'height': 700})
-    page.locator('#securityViewTab').click()
+    select_view(page, 'security')
     page.locator('#securityActivitySource-button').evaluate('''(button) => {
       Object.assign(button.style, {position:'fixed', right:'12px', bottom:'12px', width:'96px', zIndex:1000});
     }''')

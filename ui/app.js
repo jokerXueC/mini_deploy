@@ -354,13 +354,16 @@ function measuredTrackWidth(el) {
   return Math.max(ownWidth, parentWidth);
 }
 
-function resourceBarCount() {
-  return 60;
+function resourceBarCount(el) {
+  if (!el.classList.contains('meter-track')) return 60;
+  const width = measuredTrackWidth(el);
+  return width > 0 ? Math.max(1, Math.ceil((width + 2) / 4)) : 60;
 }
 
 function updateResourceTrack(el, value) {
   if (!el) return;
-  const count = resourceBarCount();
+  const count = resourceBarCount(el);
+  el.style.setProperty('--resource-bar-count', String(count));
   el.dataset.resourceValue = value ?? '';
   if (el.children.length !== count) {
     DashboardMotion.cancel(el);
@@ -389,7 +392,7 @@ function updateResourceTrack(el, value) {
       bar.style.setProperty('--fill', fill.toFixed(3));
     });
     if (label && !cpu) label.textContent = valid ? formatPercent(current) : '-';
-  }, {initial: 0});
+  }, {initial: Number(el.dataset.displayValue) || 0});
 }
 
 function setResourceBar(id, value) {
@@ -423,10 +426,6 @@ function setView(view) {
     $(`${name}View`)?.classList.toggle('active', activeView === name);
     $(`${name}ViewTab`)?.classList.toggle('active', activeView === name);
   });
-  const selectedTab = $(`${activeView}ViewTab`), tabs = selectedTab?.parentElement;
-  if (tabs && tabs.scrollWidth > tabs.clientWidth) {
-    tabs.scrollLeft = Math.max(0, selectedTab.offsetLeft - tabs.offsetLeft - tabs.clientWidth + selectedTab.offsetWidth + 12);
-  }
   const titles = {
     server: ['服务器健康面板', '查看服务器资源、网络吞吐和 Docker 容器运行状态。'],
     events: ['异常中心', '服务器、容器、网站与接口的异常及恢复'],
@@ -441,6 +440,7 @@ function setView(view) {
   const [title, subtitle] = titles[activeView];
   $('panelTitle').textContent = title;
   $('panelSubtitle').textContent = subtitle;
+  window.PanelNavigation?.viewChanged(activeView);
   $('liveIndicator')?.classList.toggle('terminal-status-hidden', activeView === 'terminal');
   $('updatedAt')?.classList.toggle('terminal-status-hidden', activeView === 'terminal');
   clearServerRefresh();
@@ -460,6 +460,7 @@ function setView(view) {
   window.IPSecurity?.viewChanged(activeView);
   window.SetupChecks?.viewChanged(activeView);
   window.Databases?.viewChanged(activeView);
+  window.IncidentDiagnosis?.viewChanged(activeView);
 }
 
 
@@ -685,6 +686,7 @@ function updateLiveIndicator(online) {
   const el = $('liveIndicator');
   el.className = `live-indicator ${online ? 'live-ok' : 'live-error'}`;
   el.lastChild.textContent = online ? 'Agent 在线' : 'Agent 连接失败';
+  window.PanelNavigation?.updateConnection(online);
 }
 
 function containerStateClass(container) {

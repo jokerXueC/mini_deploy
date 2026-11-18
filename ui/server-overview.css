@@ -147,7 +147,7 @@ html[data-theme="light"] .load-summary-link img { filter: none; }
 #serverView .container-service-grid { gap: 12px; }
 #serverView .container-row { background: none; border: 1px solid var(--line); border-radius: 4px; box-shadow: none; }
 #serverView .container-name { font-weight: 500; }
-#serverView .meter-track { height: 13px; }
+#serverView .meter-track { height: 7px; }
 #serverView .container-actions { gap: 6px; }
 #serverView .container-action { font-weight: 400; }
 @media (max-width: 1100px) {

@@ -3,6 +3,8 @@ import time
 
 import pytest
 
+from browser_navigation import select_view
+
 import setup_checks
 from test_onboarding_browser import browser_page as browser_page, playwright, ROOT
 
@@ -22,7 +24,7 @@ def test_setup_states_instructions_and_navigation(browser_page, tmp_path, width,
     page.route('**/setup/checks', lambda route: route.fulfill(json=data))
     page.set_viewport_size({'width': width, 'height': 950})
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
-    page.locator('#setupViewTab').click()
+    select_view(page, 'setup')
     playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(len(data['items']))
     playwright.expect(page.locator('#setupSummary')).to_contain_text('2 项需处理')
     playwright.expect(page.locator('[data-setup-key=ai]')).to_have_text('配置模型')
@@ -55,7 +57,7 @@ def test_failed_recheck_is_visible_and_recovers_without_losing_instructions(brow
         route.fulfill(status=503 if fail[0] else 200, json={'detail': '暂时不可用'} if fail[0] else data)
 
     page.route('**/setup/checks', respond)
-    page.locator('#setupViewTab').click()
+    select_view(page, 'setup')
     playwright.expect(page.locator('#setupItems .setup-row')).to_have_count(len(data['items']))
     fail[0] = True
     page.locator('#setupRefresh').click()
@@ -87,7 +89,7 @@ def test_opening_model_settings_keeps_existing_transport_confirmation(browser_pa
     page.route('**/terminal-ai/settings', lambda route: route.fulfill(json={
         'configured': False, 'protocol': 'openai', 'base_url': '', 'model': '',
         'secure': False, 'http_enabled': False, 'csrf_token': 'test'}))
-    page.locator('#setupViewTab').click()
+    select_view(page, 'setup')
     page.locator('[data-setup-key=ai]').click()
     playwright.expect(page.locator('#aiSettingsDialog')).to_be_visible()
     playwright.expect(page.locator('#aiTest')).to_be_disabled()
@@ -98,7 +100,7 @@ def test_rechecks_update_evidence_while_preserving_keyboard_focus_and_open_instr
     page, _ = browser_page
     data = payload(tmp_path)
     page.route('**/setup/checks', lambda route: route.fulfill(json=data))
-    page.locator('#setupViewTab').click()
+    select_view(page, 'setup')
     summary = page.locator('[data-setup-detail=history] > summary')
     summary.click()
     summary.focus()

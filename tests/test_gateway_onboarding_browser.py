@@ -1,6 +1,8 @@
 """Check consent, verification settings and collection states in the actual UI."""
 import pytest
 
+from browser_navigation import select_view
+
 from test_onboarding_browser import browser_page as browser_page, playwright
 
 
@@ -21,7 +23,7 @@ def test_existing_rule_is_not_offered_as_new_backend_and_cards_show_scope(browse
             'id': 'api', 'site': 'api.test', 'kind': 'proxy', 'label': 'handle /cloud/*',
             'upstream': 'http://api:8766', 'supported': False, 'existing_key': 'original',
             'reason': '该规则已由入口 original 接入；请使用自动修复'}]}))
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     playwright.expect(page.locator('.gateway-connection-scope')).to_have_text('采集范围：handle /cloud/*')
     page.locator('#gatewayConnectOpen').click()
     playwright.expect(page.locator('#gatewayConnectFeedback')).to_contain_text('无需重复创建')
@@ -43,7 +45,7 @@ def test_new_connection_consent_and_health_expectations_are_reviewed(browser_pag
     page, state = browser_page
     page.set_viewport_size({'width': width, 'height': 950})
     page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#gatewayConnectOpen').click()
     playwright.expect(page.locator('#connectReview')).to_be_visible()
     first = next(payload for _, payload in state['posts'] if payload.get('action') == 'preview')
@@ -71,7 +73,7 @@ def test_waiting_for_traffic_is_not_reported_as_successful_collection(browser_pa
              'collection': {'state': 'waiting', 'detail': '尚未收到真实请求；请通过原域名访问网站或调用接口'}}
     state['gateway_entries'] = [entry]
     state['gateway_requests'] = {'history': True, 'groups': [], 'total_requests': 0}
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     playwright.expect(page.locator('#requestSource')).to_contain_text('等待真实请求')
     playwright.expect(page.locator('#requestNotice')).to_contain_text('请通过原域名访问')
     entry['collection'] = {'state': 'active', 'detail': '已收到真实请求并写入历史'}
@@ -87,7 +89,7 @@ def test_missing_docker_explains_requirement_without_blocking_manual_inspection(
         'sources': [], 'checks': [{'label': '持久采集', 'state': 'action',
                                  'detail': '需要本机 Docker；请在安装向导选择安装，或由管理员启动 Docker 后重新检测。'}],
         'help': [{'title': '查询配置挂载', 'command': 'docker ps', 'fill': '复制一条完整指令执行'}]}))
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#gatewayConnectOpen').click()
     playwright.expect(page.locator('#connectReadiness')).to_contain_text('需要本机 Docker')
     page.locator('#connectSourceAdvanced > summary').click()
@@ -104,7 +106,7 @@ def test_disabling_proxy_trust_clears_saved_trust_without_discarding_other_optio
         'state': 'not_created', 'port': 18080, 'bind': '127.0.0.1', 'image': 'nginx:stable-alpine',
         'trust_proxy': True, 'trusted_proxies': ['172.20.0.5'], 'max_body_bytes': 0,
         'local_address': '127.0.0.1:18080', 'caddy_upstream': 'mini-gateway-api:10000', 'revision': 'old-spec'}]
-    page.locator('#requestsViewTab').click()
+    select_view(page, 'requests')
     page.locator('#manageRequestGateways').click()
     page.locator('#gatewayMaintenance > summary').click()
     page.locator('[data-gateway-action=edit]').click()

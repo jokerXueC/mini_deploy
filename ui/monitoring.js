@@ -28,6 +28,7 @@
     badge.hidden = count === 0;
     tab.setAttribute('aria-label', count ? `异常中心，${count} 项待知晓异常` : '异常中心，暂无待知晓异常');
     tab.title = count ? `${count} 项待知晓异常` : '暂无待知晓异常';
+    window.PanelNavigation?.updateIncidentCount(count);
   }
   const incidentKinds = new Set(['alert', 'recovery', 'recovered', 'resolved', 'disappeared', 'container_missing', 'container_disappeared']);
   const isIncident = item => incidentKinds.has(item.kind) || (!item.kind && ['warning', 'critical'].includes(item.level));

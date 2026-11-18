@@ -23,6 +23,8 @@
   <link rel="stylesheet" href="ui/request-map.css">
   <link rel="stylesheet" href="ui/server-performance-panel.css">
   <link rel="stylesheet" href="ui/server-overview.css">
+  <link rel="stylesheet" href="ui/observation-analysis.css">
+  <link rel="stylesheet" href="ui/incident-diagnosis.css">
   <link rel="stylesheet" href="ui/vendor/xterm.css">
   <link rel="stylesheet" href="ui/panel-ai.css">
   <link rel="stylesheet" href="ui/ip-security.css">
@@ -30,11 +32,49 @@
   <link rel="stylesheet" href="ui/setup-checks.css">
   <link rel="stylesheet" href="ui/user-guide.css">
   <link rel="stylesheet" href="ui/databases.css">
+  <link rel="stylesheet" href="ui/navigation.css">
 </head>
 <body class="panel-workspace">
+  <aside id="panelNavigation" class="panel-navigation" aria-label="面板导航">
+    <div class="navigation-brand"><a href="ui" aria-label="mini_deploy 首页"><img src="ui/previews/ssh-ai/icons/server.svg" alt=""><span>mini_deploy</span></a><button id="navigationCollapse" class="navigation-icon navigation-collapse" type="button" title="收起侧栏" aria-label="收起侧栏" aria-expanded="true" aria-controls="panelNavigation"><img src="ui/previews/ssh-ai/icons/panel-right-close.svg" alt=""></button></div>
+    <div class="navigation-host"><span class="navigation-status-dot" aria-hidden="true"></span><div><strong>当前服务器</strong><span>面板所在主机</span></div></div>
+    <nav class="view-tabs navigation-groups" aria-label="面板视图">
+      <section class="navigation-group is-open" data-navigation-group="observe">
+        <button id="navigationObserve" class="navigation-group-toggle" type="button" aria-expanded="true" aria-controls="navigationObservePages" title="运行观测"><img src="ui/previews/ssh-ai/icons/server.svg" alt=""><span class="navigation-label">运行观测</span><span id="navigationIncidentCount" class="incident-tab-count navigation-group-count" aria-hidden="true" hidden></span><img class="navigation-chevron" src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button>
+        <div id="navigationObservePages" class="navigation-children"><div class="navigation-children-inner"><div class="navigation-page-list">
+          <button id="serverViewTab" class="view-tab active" type="button" data-view="server" aria-current="page">服务器状态</button>
+          <button id="eventsViewTab" class="view-tab incident-tab" type="button" data-view="events">异常中心<span id="eventsTabCount" class="incident-tab-count" aria-hidden="true" hidden></span></button>
+          <button id="requestsViewTab" class="view-tab" type="button" data-view="requests">请求记录</button>
+        </div></div></div>
+      </section>
+      <section class="navigation-group" data-navigation-group="business">
+        <button id="navigationBusiness" class="navigation-group-toggle" type="button" aria-expanded="false" aria-controls="navigationBusinessPages" title="业务管理"><img src="ui/previews/ssh-ai/icons/layers-2.svg" alt=""><span class="navigation-label">业务管理</span><img class="navigation-chevron" src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button>
+        <div id="navigationBusinessPages" class="navigation-children" inert><div class="navigation-children-inner"><div class="navigation-page-list">
+          <button id="certificatesViewTab" class="view-tab" type="button" data-view="certificates">域名与证书</button>
+          <button id="databasesViewTab" class="view-tab" type="button" data-view="databases">数据库</button>
+        </div></div></div>
+      </section>
+      <section class="navigation-group" data-navigation-group="operations">
+        <button id="navigationOperations" class="navigation-group-toggle" type="button" aria-expanded="false" aria-controls="navigationOperationsPages" title="运维安全"><img src="ui/previews/ssh-ai/icons/lock-keyhole.svg" alt=""><span class="navigation-label">运维安全</span><img class="navigation-chevron" src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button>
+        <div id="navigationOperationsPages" class="navigation-children" inert><div class="navigation-children-inner"><div class="navigation-page-list">
+          <button id="terminalViewTab" class="view-tab" type="button" data-view="terminal">远程终端</button>
+          <button id="securityViewTab" class="view-tab" type="button" data-view="security">安全中心</button>
+        </div></div></div>
+      </section>
+      <section class="navigation-group" data-navigation-group="settings">
+        <button id="navigationSettings" class="navigation-group-toggle" type="button" aria-expanded="false" aria-controls="navigationSettingsPages" title="面板设置"><img src="ui/previews/ssh-ai/icons/settings-2.svg" alt=""><span class="navigation-label">面板设置</span><img class="navigation-chevron" src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""></button>
+        <div id="navigationSettingsPages" class="navigation-children" inert><div class="navigation-children-inner"><div class="navigation-page-list">
+          <button id="notifyViewTab" class="view-tab" type="button" data-view="notify">通知配置</button>
+          <button id="setupViewTab" class="view-tab" type="button" data-view="setup">功能检查</button>
+        </div></div></div>
+      </section>
+    </nav>
+    <div class="navigation-bottom"><button id="globalAIOpen" class="navigation-ai" type="button" aria-label="打开全局 AI 助手" title="AI 助手" aria-controls="panelAIDialog" aria-expanded="false"><img src="ui/previews/ssh-ai/icons/sparkles.svg" alt=""><span class="navigation-label">AI 助手</span><span id="globalAIStatus" class="navigation-ai-status">就绪</span></button><div id="navigationConnection" class="navigation-connection" data-state="pending"><span class="navigation-status-dot" aria-hidden="true"></span><span id="navigationConnectionText" class="navigation-label">正在连接面板</span></div></div>
+  </aside>
+  <button id="navigationBackdrop" class="navigation-backdrop" type="button" aria-label="关闭导航" hidden></button>
   <main class="page">
     <div class="top-bar">
-      <a class="back-pill" href="ui">服务器面板</a>
+      <div class="navigation-breadcrumb"><button id="navigationOpen" class="navigation-icon" type="button" aria-label="打开导航" title="打开导航" aria-expanded="false" aria-controls="panelNavigation"><img src="ui/previews/ssh-ai/icons/panel-right-open.svg" alt=""></button><span id="navigationCategory">运行观测</span><img src="ui/previews/ssh-ai/icons/chevron-right.svg" alt=""><span id="navigationCurrent">服务器状态</span></div>
       <button id="themeToggleBtn" class="theme-toggle" type="button" aria-label="切换浅色模式" aria-pressed="false">
         <span class="theme-toggle-icon" aria-hidden="true"></span>
         <span id="themeToggleText">浅色</span>
@@ -52,7 +92,6 @@
           <span id="updatedAt" class="muted">-</span>
         </div>
         <div class="hero-action-row toolbar-controls">
-          <button id="globalAIOpen" class="ghost-button compact-action" type="button" aria-label="打开全局 AI 助手" aria-controls="panelAIDialog" aria-expanded="false"><img src="ui/previews/ssh-ai/icons/sparkles.svg" alt="">AI 助手</button>
           <button id="userGuideOpen" class="toolbar-icon" type="button" title="安装与功能使用指南" aria-label="安装与功能使用指南"><img src="ui/previews/ssh-ai/icons/file.svg" alt=""></button>
           <!-- Lucide icons (ISC); see THIRD_PARTY_NOTICES.md. -->
           <button id="refreshBtn" class="toolbar-icon" type="button" title="刷新当前页面" aria-label="刷新当前页面"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></button>
@@ -65,18 +104,6 @@
         </div>
       </div>
     </header>
-
-    <nav class="view-tabs" aria-label="面板视图">
-      <button id="serverViewTab" class="view-tab active" type="button" data-view="server">服务器状态</button>
-      <button id="eventsViewTab" class="view-tab incident-tab" type="button" data-view="events">异常中心<span id="eventsTabCount" class="incident-tab-count" aria-hidden="true" hidden></span></button>
-      <button id="notifyViewTab" class="view-tab" type="button" data-view="notify">通知配置</button>
-      <button id="certificatesViewTab" class="view-tab" type="button" data-view="certificates">域名与证书</button>
-      <button id="requestsViewTab" class="view-tab" type="button" data-view="requests">请求记录</button>
-      <button id="terminalViewTab" class="view-tab" type="button" data-view="terminal">远程终端</button>
-      <button id="databasesViewTab" class="view-tab" type="button" data-view="databases">数据库</button>
-      <button id="securityViewTab" class="view-tab" type="button" data-view="security">安全中心</button>
-      <button id="setupViewTab" class="view-tab" type="button" data-view="setup">功能检查</button>
-    </nav>
 
     <section id="databasesView" class="dashboard-view database-workspace" aria-labelledby="databaseTitle">
       <div class="db-heading"><div><h2 id="databaseTitle">数据工作区</h2><span class="db-readonly"><img src="ui/previews/ssh-ai/icons/lock-keyhole.svg" alt="">只读</span><span id="dbConnectionState" class="db-connection-state">尚未连接</span></div><div class="db-actions"><button id="dbAI" type="button" class="ghost-button compact-action" aria-label="AI 分析数据库" disabled><img src="ui/previews/ssh-ai/icons/sparkles.svg" alt="">AI 分析</button><button id="dbDiscover" type="button" class="ghost-button compact-action" title="发现本机数据库" aria-label="发现本机数据库"><img src="ui/previews/ssh-ai/icons/search.svg" alt="">发现本机数据库</button><button id="dbNew" type="button" class="ghost-button compact-action"><img src="ui/previews/ssh-ai/icons/plus.svg" alt="">新建连接</button><button type="button" class="toolbar-icon" data-user-guide="databases" title="数据库使用指南" aria-label="数据库使用指南"><img src="ui/previews/ssh-ai/icons/file.svg" alt=""></button></div></div>
@@ -263,6 +290,7 @@
           <p class="request-map-privacy">IP 为采集点记录的地址，位置为近似归属地；公网 IP 单独查询 ipwho.is，不发送请求地址或请求头。</p>
         </section>
         <p id="requestSampleSummary" class="muted"></p>
+        <details id="requestInsights" class="request-insights"><summary>耗时分布与慢接口</summary><div id="requestInsightsBody" aria-live="polite"></div></details>
         <div id="requestRows" class="request-rows" aria-live="polite"></div>
         <div id="requestHistoryPages" class="request-actions" hidden><button id="requestHistoryPrevious" class="ghost-button compact-action" type="button">上一页</button><span id="requestHistoryPage" class="muted"></span><button id="requestHistoryNext" class="ghost-button compact-action" type="button">下一页</button></div>
         </div>
@@ -459,6 +487,17 @@
             <div class="certificate-actions"><label><input id="monitorRecovery" type="checkbox" checked> 恢复后通知</label><button class="ghost-button compact-action" type="submit">保存规则</button></div>
           </form>
         </details>
+      <section class="incident-section" aria-labelledby="diagnosisTitle">
+        <div class="panel-head">
+          <div><h2 id="diagnosisTitle">异常自动诊断</h2><p id="diagnosisScope">面板所在服务器 · 只读排查</p></div>
+          <label class="swap-control" title="开启或关闭异常自动诊断"><input id="diagnosisEnabled" type="checkbox" aria-label="异常自动诊断"><span></span></label>
+        </div>
+        <p class="monitor-feedback">开启后，确认异常时将相关日志、资源、配置与代码证据发送给已配置模型，生成原因分析和解决方案。通知渠道接收完整报告；修复由你决定。</p>
+        <div class="diagnosis-settings"><span id="diagnosisReadiness" role="status">正在读取诊断状态</span><button id="diagnosisModel" class="ghost-button compact-action" type="button">模型设置</button><button id="diagnosisNotify" class="ghost-button compact-action" type="button">通知设置</button></div>
+        <p id="diagnosisFeedback" class="monitor-feedback" role="status" aria-live="polite"></p>
+        <div id="diagnosisList" class="diagnosis-list" aria-label="自动诊断报告"></div>
+        <nav class="incident-pagination" aria-label="诊断报告分页"><span id="diagnosisPageInfo"></span><button id="diagnosisPrev" class="ghost-button incident-page-button" type="button" aria-label="上一页报告" disabled>&#8249;</button><button id="diagnosisNext" class="ghost-button incident-page-button" type="button" aria-label="下一页报告" disabled>&#8250;</button></nav>
+      </section>
       <section class="incident-section" aria-labelledby="incidentHistoryTitle">
         <div class="panel-head">
           <div><h2 id="incidentHistoryTitle">异常历史</h2><p id="incidentHistoryHint">异常与恢复记录</p></div>
@@ -543,6 +582,10 @@
         <div class="cpu-core-legend"><span><i class="core-idle"></i>低于 50%</span><span><i class="core-busy"></i>50–80%</span><span><i class="core-hot"></i>高于 80%</span><span id="cpuTopologyNote"></span></div>
       </section>
 
+      <section id="observationWatchPanel" class="panel observation-watch-panel" hidden aria-labelledby="observationWatchTitle">
+        <div class="panel-head"><h2 id="observationWatchTitle">我的关注</h2><span id="observationWatchStatus" class="muted" role="status"></span></div>
+        <div id="observationWatches" class="observation-watches"></div>
+      </section>
       <section class="panel system-trend-panel">
         <div class="panel-head">
           <div>
@@ -569,7 +612,14 @@
             <button type="button" data-observation-metric="network_total_kbps" aria-pressed="false">网络</button>
           </div>
           <span id="observationStatus" class="muted" role="status"></span>
+          <button id="observationPin" class="toolbar-icon" type="button" title="关注当前对象与指标" aria-label="关注当前对象与指标"><img src="ui/previews/ssh-ai/icons/plus.svg" alt=""></button>
         </div>
+        <form id="observationRangeForm" class="observation-range-form">
+          <label>开始<input id="observationFrom" type="datetime-local" required></label>
+          <label>结束<input id="observationTo" type="datetime-local" required></label>
+          <button class="ghost-button compact-action" type="submit">分析区间</button>
+          <span id="observationRangeError" class="muted" role="status"></span>
+        </form>
         <div class="resource-observation">
           <section class="load-map" aria-labelledby="loadMapTitle">
             <div class="load-map-heading"><h3 id="loadMapTitle">异常定位时间轴</h3><span id="loadMapRange">等待采样</span></div>
@@ -593,6 +643,15 @@
         <section id="observationEvidence" class="observation-evidence" hidden aria-labelledby="observationEvidenceTitle">
           <div class="evidence-heading"><div><h3 id="observationEvidenceTitle">所选时段</h3><p id="observationEvidenceRange"></p></div><button id="observationEvidenceClose" type="button" class="ghost-button compact-action" aria-label="关闭时段详情">收起</button></div>
           <div id="observationEvidenceMetrics" class="evidence-metrics"></div>
+          <section id="observationAnalysis" class="observation-analysis" aria-labelledby="observationAnalysisTitle">
+            <div class="analysis-heading"><h4 id="observationAnalysisTitle">区间对比</h4><label>对比<select id="observationCompare"><option value="previous">前一等长区间</option><option value="yesterday">昨天同时段</option><option value="custom">指定区间结束时间</option></select></label><label id="observationReferenceField" hidden>对比结束<input id="observationReference" type="datetime-local"></label><label>请求来源<select id="observationRequestSource"><option value="">全部已采集来源</option></select></label><button id="observationAnalysisRefresh" type="button" class="toolbar-icon" aria-label="重新读取区间分析" title="重新读取"><img src="ui/previews/ssh-ai/icons/refresh-cw.svg" alt=""></button></div>
+            <p id="observationAnalysisStatus" class="muted" role="status"></p>
+            <div id="observationComparison"></div>
+            <div class="analysis-heading"><h4>增长来源</h4><div class="observation-metrics" role="group" aria-label="增长排行指标"><button type="button" data-growth-metric="cpu" aria-pressed="true">CPU</button><button type="button" data-growth-metric="memory" aria-pressed="false">内存</button></div></div>
+            <div id="observationGrowth" class="analysis-growth"></div>
+            <div class="analysis-heading"><h4>同时段请求</h4><span id="observationTrafficScope" class="muted"></span></div>
+            <div id="observationLatency"></div>
+          </section>
           <div class="evidence-columns"><section><div class="evidence-scene-heading"><h4>已保存的进程现场</h4><select id="observationScene" aria-label="进程现场采样时间" hidden></select></div><div id="observationProcesses" aria-live="polite"></div></section><section><h4>同时段事件</h4><div id="observationEvents" aria-live="polite"></div></section></div>
           <p class="evidence-notice">现场与事件仅表示同时发生，不能据此确认原因。短时进程可能未被采集。</p>
         </section>
@@ -771,9 +830,16 @@
     </section>
   </dialog>
 
+  <dialog id="diagnosisDialog" class="ops-dialog" aria-labelledby="diagnosisReportTitle">
+    <header class="ops-head"><div><h2 id="diagnosisReportTitle">异常诊断报告</h2><p id="diagnosisReportStatus" role="status"></p></div><button id="diagnosisClose" class="toolbar-icon" type="button" title="关闭报告" aria-label="关闭报告"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></header>
+    <div class="diagnosis-report-tools"><label>版本 <select id="diagnosisVersion" aria-label="报告版本"></select></label><button id="diagnosisRetry" class="ghost-button compact-action" type="button">重新诊断</button><a id="diagnosisDownload" class="toolbar-icon" title="下载完整 Markdown 报告" aria-label="下载完整报告"><img src="ui/previews/ssh-ai/icons/download.svg" alt=""></a></div>
+    <div class="diagnosis-report-scroll"><article id="diagnosisReportBody"></article><details id="diagnosisEvidence"><summary>实际工具证据</summary><div id="diagnosisTrace"></div></details><details id="diagnosisReceipts"><summary>通知送达记录</summary><div id="diagnosisDelivery"></div></details></div>
+  </dialog>
   <script src="ui/motion.js"></script>
   <script src="ui/selects.js"></script>
   <script src="ui/server-overview.js"></script>
+  <script src="ui/observation-analysis.js"></script>
+  <script src="ui/navigation.js"></script>
   <script src="ui/app.js"></script>
   <script src="ui/setup-checks.js"></script>
   <script src="ui/database-graph.js"></script>
@@ -802,5 +868,6 @@
   <script src="ui/vendor/purify.js"></script>
   <script src="ui/user-guide.js"></script>
   <script src="ui/terminal-ai.js"></script>
+  <script src="ui/incident-diagnosis.js"></script>
 </body>
 </html>
