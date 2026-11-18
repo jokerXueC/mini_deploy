@@ -63,6 +63,7 @@ import ssh_terminal
 import terminal_ai
 import panel_diagnostics
 import incident_diagnosis
+import notification_digest
 import panel_runtime
 import panel_code
 import panel_files
@@ -634,6 +635,7 @@ def _load_config_file() -> dict[str, Any]:
 
 def _default_notification_config() -> dict[str, Any]:
     return {
+        "digest": {"enabled": False, "interval_minutes": 15},
         "wecom": {"enabled": False, "webhook_url": ""},
         "dingtalk": {"enabled": False, "webhook_url": "", "secret": ""},
         "email": {
@@ -657,6 +659,7 @@ def _notification_config_from_raw(raw: Any, existing: dict[str, Any] | None = No
             if channel in base and isinstance(values, dict):
                 base[channel].update(values)
     src = raw if isinstance(raw, dict) else {}
+    base["digest"] = notification_digest.settings(src.get("digest"), base["digest"])
 
     wecom = src.get("wecom") if isinstance(src.get("wecom"), dict) else {}
     base["wecom"].update({
@@ -696,7 +699,10 @@ def _notification_config_from_raw(raw: Any, existing: dict[str, Any] | None = No
 
 def _load_notifications() -> dict[str, Any]:
     raw = _load_config_file()
-    return _notification_config_from_raw(raw.get("notifications") if isinstance(raw, dict) else {})
+    try:
+        return _notification_config_from_raw(raw.get("notifications") if isinstance(raw, dict) else {})
+    except ValueError as exc:
+        raise RuntimeError(f'通知配置无效：{exc}') from exc
 
 
 if _RUNTIME_CONFIG_ERROR is None:
@@ -3155,6 +3161,39 @@ _database_manager_lock = threading.Lock()
 _diagnosis_store_instance = None
 _diagnosis_worker_instance = None
 _diagnosis_lock = threading.RLock()
+_digest_worker_instance = None
+_digest_lock = threading.RLock()
+
+
+def _collect_notification_digest(now=None):
+    return notification_digest.collect(_server_performance, _performance_history, _request_history,
+                                       _monitor, _panel_ai_target(), now)
+
+
+def _digest_worker():
+    global _digest_worker_instance
+    with _digest_lock:
+        if (_digest_worker_instance is None or
+                _digest_worker_instance.store.path.parent.parent != STATE_FILE.parent):
+            store = notification_digest.Store(STATE_FILE.parent, maintenance=_maintenance_shared_lock)
+            _digest_worker_instance = notification_digest.Worker(store,
+                config=lambda: _notification_config_payload(include_secret=True), collect=_collect_notification_digest,
+                send=lambda channel, config, title, body: {
+                    'wecom': _send_wecom_notification, 'dingtalk': _send_dingtalk_notification,
+                    'email': _send_email_notification}[channel](config, title, body), log=_log)
+        return _digest_worker_instance
+
+
+def _notification_digest_status():
+    try:
+        worker = _digest_worker()
+        config = _notification_config_payload(include_secret=True)
+        worker.store.sync(config)
+        result = worker.store.snapshot(config)
+        result['error'] = worker.error or result['error']
+        return result
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        return {'error': '定时统计状态暂不可读，请检查服务日志和数据目录；通知配置仍可保存。'}
 
 
 def _diagnosis_store():
@@ -4043,7 +4082,12 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             return
         if path == "/notifications":
             if self._require_auth_json():
-                self._write_json(200, {"notifications": _notification_config_payload(include_secret=True)})
+                self._write_json(200, {"notifications": _notification_config_payload(include_secret=True),
+                                       "digest": _notification_digest_status()})
+            return
+        if path == "/notifications/digest/preview":
+            if self._require_auth_json():
+                self._write_json(200, _collect_notification_digest())
             return
         if path == "/health":
             self._write_json(200, {"status": "ok", "release": RUNNING_RELEASE})
@@ -4669,13 +4713,17 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             return
         try:
             _save_and_reload_notifications(raw)
+        except ValueError as exc:
+            self._write_json(400, {"error": "invalid_notifications", "detail": str(exc)})
+            return
         except OSError as exc:
             _log(f"notifications config save failed: {exc}")
             self._write_json(500, {"error": "config_write_failed", "detail": str(exc)})
             return
         _log(f"notifications config saved file={PROJECTS_CONFIG_FILE}")
         _audit_event("notifications_save", actor=self.client_address[0], target=str(PROJECTS_CONFIG_FILE), success=True)
-        self._write_json(200, {"notifications": _notification_config_payload(include_secret=True)})
+        self._write_json(200, {"notifications": _notification_config_payload(include_secret=True),
+                               "digest": _notification_digest_status()})
 
     def _handle_notifications_test(self) -> None:
         try:
@@ -4687,7 +4735,11 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
         if not isinstance(raw, dict):
             self._write_json(400, {"error": "invalid_notifications"})
             return
-        config = _notification_config_from_raw(raw, existing=_notification_config_payload(include_secret=True))
+        try:
+            config = _notification_config_from_raw(raw, existing=_notification_config_payload(include_secret=True))
+        except ValueError as exc:
+            self._write_json(400, {"error": "invalid_notifications", "detail": str(exc)})
+            return
         results = _send_notifications(
             config,
             "mini_deploy test notification",
@@ -4984,11 +5036,17 @@ def main() -> None:
     diagnosis_worker = threading.Thread(target=_diagnosis_worker().run, args=(diagnosis_stop,),
                                        name='incident-auto-diagnosis', daemon=True)
     diagnosis_worker.start()
+    digest_stop = threading.Event()
+    digest_worker = threading.Thread(target=_digest_worker().run, args=(digest_stop,),
+                                    name='notification-digest', daemon=True)
+    digest_worker.start()
     server = http_limits.BoundedHTTPServer((HOST, PORT), Handler)
     _log(f"monitoring agent listening on {HOST}:{PORT}, sites={len(PROJECTS)}")
     try:
         server.serve_forever()
     finally:
+        digest_stop.set()
+        digest_worker.join(timeout=10)
         diagnosis_stop.set()
         diagnosis_worker.join(timeout=10)
         docker_event_stop.set()

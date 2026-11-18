@@ -69,7 +69,11 @@ def dashboard():
                     result = ({"active_count": 0, "unacknowledged_count": 0} if 'summary=1' in route.request.url else
                               {"targets": [], "alerts": [], "events": [], "notifications_enabled": False})
                 elif path == "/notifications":
-                    result = {"notifications": payload.get("notifications", {})}
+                    if route.request.method == 'POST':
+                        state['notifications'] = payload.get('notifications', {})
+                    result = {"notifications": state.get('notifications', {}), 'digest': state.get('digest', {})}
+                elif path == '/notifications/digest/preview':
+                    result = {'body': '最近 15 分钟统计\nCPU 平均 20%\n已采集请求：10', 'since': 100, 'until': 1000}
                 elif path == '/incident-diagnosis':
                     result = {'enabled':False, 'model_configured':False, 'notifications_enabled':False,
                               'target_scope':'面板所在服务器', 'items':[], 'total':0, 'page':0, 'has_more':False}
@@ -583,6 +587,36 @@ def test_docker_actions_and_notification_save_do_not_fetch_deployment(dashboard)
     playwright.expect(page.locator("#notificationResult")).to_contain_text("已保存")
     assert any(path == "/notifications" and method == "POST" for path, method, _ in state["calls"])
     assert not state["errors"]
+
+
+@pytest.mark.parametrize('width,theme', [(390, 'light'), (390, 'dark'), (1440, 'light'), (1440, 'dark')])
+def test_notification_digest_interval_preview_and_unsaved_state(dashboard, tmp_path, width, theme):
+    page, state, origin = dashboard
+    state['notifications'] = {'digest': {'enabled': True, 'interval_minutes': 30},
+                              'email': {'enabled': True, 'smtp_host': 'smtp.example.test'}}
+    state['digest'] = {'next_at': 1800000000, 'channels_ready': True, 'pending_reports': 1,
+                      'last': {'created': 1799999000, 'body': '上一份完整报告'},
+                      'deliveries': [{'channel': 'email', 'status': 'failed', 'parts': 1}]}
+    page.set_viewport_size({'width': width, 'height': 920})
+    page.goto(f'{origin}/ui?view=notify')
+    page.evaluate('(theme) => document.documentElement.dataset.theme = theme', theme)
+    playwright.expect(page.locator('#notifyDigestInterval')).to_have_value('30')
+    playwright.expect(page.locator('#notifyDigestStatus')).to_contain_text('失败，等待重试')
+    page.locator('#notifyDigestInterval').fill('7')
+    page.evaluate('refreshNotificationConfig()')
+    playwright.expect(page.locator('#notifyDigestInterval')).to_have_value('7')
+    playwright.expect(page.locator('#notifyDigestStatus')).to_contain_text('保存通知后生效')
+    page.locator('#notifyDigestPreview').click()
+    playwright.expect(page.locator('#notifyDigestReportBody')).to_contain_text('CPU 平均 20%')
+    playwright.expect(page.locator('#notifyDigestReportTitle')).to_have_text('统计预览（未发送）')
+    page.locator('#notifyDigestReportTitle').click()
+    page.locator('#saveNotificationBtn').click()
+    playwright.expect(page.locator('#notificationResult')).to_contain_text('已保存')
+    saved = [data for path, method, data in state['calls'] if path == '/notifications' and method == 'POST'][-1]
+    assert saved['notifications']['digest'] == {'enabled': True, 'interval_minutes': 7}
+    assert not page.locator('html').evaluate('(el) => el.scrollWidth > innerWidth + 1')
+    page.screenshot(path=str(tmp_path / f'digest-{width}-{theme}.png'), full_page=True)
+    assert not state['errors']
 
 
 

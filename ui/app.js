@@ -545,6 +545,7 @@ async function copyText(value) {
 
 function defaultNotificationConfig() {
   return {
+    digest: { enabled: false, interval_minutes: 15 },
     wecom: { enabled: false, webhook_url: '' },
     dingtalk: { enabled: false, webhook_url: '', secret: '' },
     email: {
@@ -564,6 +565,7 @@ function defaultNotificationConfig() {
 function mergedNotificationConfig(config = {}) {
   const defaults = defaultNotificationConfig();
   return {
+    digest: { ...defaults.digest, ...(config.digest || {}) },
     wecom: { ...defaults.wecom, ...(config.wecom || {}) },
     dingtalk: { ...defaults.dingtalk, ...(config.dingtalk || {}) },
     email: { ...defaults.email, ...(config.email || {}) },
@@ -596,6 +598,8 @@ function syncNotificationBadge(config = collectNotificationConfig()) {
 function renderNotificationConfig(config = {}) {
   if (notificationDirty) return;
   const parsed = mergedNotificationConfig(config);
+  setInputChecked('notifyDigestEnabled', parsed.digest.enabled);
+  setInputValue('notifyDigestInterval', parsed.digest.interval_minutes);
   setInputChecked('notifyWecomEnabled', parsed.wecom.enabled);
   setInputValue('notifyWecomWebhook', parsed.wecom.webhook_url);
   setInputChecked('notifyDingtalkEnabled', parsed.dingtalk.enabled);
@@ -615,6 +619,10 @@ function renderNotificationConfig(config = {}) {
 
 function collectNotificationConfig() {
   return {
+    digest: {
+      enabled: $('notifyDigestEnabled')?.checked || false,
+      interval_minutes: Number($('notifyDigestInterval')?.value || 0),
+    },
     wecom: {
       enabled: $('notifyWecomEnabled')?.checked || false,
       webhook_url: $('notifyWecomWebhook')?.value || '',
@@ -659,16 +667,63 @@ function renderNotificationResults(results = [], fallback = '') {
 }
 
 async function saveNotificationConfig() {
+  if (!$('notifyDigestInterval').reportValidity()) return;
   const target = $('notificationResult');
   if (target) target.textContent = '正在保存通知配置...';
   try {
     lastConfig = await postJsonBody('notifications', { notifications: collectNotificationConfig() });
     notificationDirty = false;
+    delete $('notifyDigestReport').dataset.preview;
     renderNotificationConfig(lastConfig.notifications || {});
+    renderNotificationDigest(lastConfig);
     renderNotificationResults([], '通知配置已保存。');
   } catch (err) {
     renderNotificationResults([], `保存失败: ${err.message}`);
   }
+}
+
+function renderNotificationDigest(payload = {}) {
+  const state = payload.digest || {}, enabled = payload.notifications?.digest?.enabled;
+  const timeText = value => value ? new Date(value * 1000).toLocaleString() : '尚未安排';
+  const lines = [];
+  if (state.error) lines.push(state.error);
+  if (!enabled) lines.push('定时统计未开启。');
+  else if (state.channels_ready === false) lines.push('等待通知渠道：请启用并保存下方至少一个渠道。');
+  else if (state.next_at) lines.push(`下次统计：${timeText(state.next_at)}。`);
+  if (state.last) {
+    const labels = { wecom: '企业微信', dingtalk: '钉钉', email: '邮箱' };
+    const statuses = { sent: '已送达', failed: '失败，等待重试', sending: '正在发送', pending: '等待发送', cancelled: '渠道变更，已停止' };
+    lines.push(`最近统计：${timeText(state.last.created)}。`);
+    (state.deliveries || []).forEach(item => lines.push(`${labels[item.channel] || item.channel}：${statuses[item.status] || item.status} ${item.parts} 条${item.destination_changed ? '（原渠道配置）' : ''}。`));
+    if (!$('notifyDigestReport').dataset.preview) showDigestReport(state.last.body, '最近生成的统计报告');
+  }
+  if (state.pending_reports) lines.push(`待投递 ${state.pending_reports} 份。${enabled ? '' : '重新开启后继续投递。'}`);
+  if (notificationDirty) lines.unshift('设置已修改，保存通知后生效；以下为当前后台状态。');
+  $('notifyDigestStatus').textContent = lines.join('\n');
+}
+
+function showDigestReport(body, title) {
+  $('notifyDigestReport').hidden = false;
+  $('notifyDigestReportTitle').textContent = title;
+  if (window.marked && window.DOMPurify) {
+    $('notifyDigestReportBody').innerHTML = DOMPurify.sanitize(marked.parse(body || ''), {
+      ALLOWED_TAGS: ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'em', 'br', 'code'], ALLOWED_ATTR: [],
+    });
+  } else $('notifyDigestReportBody').textContent = body || '';
+}
+
+async function previewNotificationDigest() {
+  const button = $('notifyDigestPreview');
+  button.disabled = true;
+  showDigestReport('正在统计最近 15 个完整分钟的数据…', '统计预览（未发送）');
+  $('notifyDigestReport').open = true;
+  $('notifyDigestReport').dataset.preview = 'true';
+  try {
+    const result = await fetchJson('notifications/digest/preview');
+    showDigestReport(result.body, '统计预览（未发送）');
+  } catch (err) {
+    showDigestReport(`统计预览失败：${err.message}`, '预览失败');
+  } finally { button.disabled = false; }
 }
 
 async function testNotificationConfig() {
@@ -1600,6 +1655,7 @@ async function refreshNotificationConfig() {
     if (activeView !== 'notify') return;
     lastConfig = config;
     renderNotificationConfig(config.notifications || {});
+    renderNotificationDigest(config);
   } catch (err) {
     if (activeView === 'notify') $('notificationResult').textContent = `通知配置加载失败: ${err.message}`;
   }
@@ -1739,7 +1795,11 @@ document.querySelectorAll('[data-trend-range]').forEach(button => {
 });
 $('saveNotificationBtn')?.addEventListener('click', saveNotificationConfig);
 $('testNotificationBtn')?.addEventListener('click', testNotificationConfig);
+$('notifyDigestPreview')?.addEventListener('click', previewNotificationDigest);
+window.setInterval(() => { if (activeView === 'notify' && !document.hidden) refreshNotificationConfig(); }, 15000);
 [
+  'notifyDigestEnabled',
+  'notifyDigestInterval',
   'notifyWecomEnabled',
   'notifyWecomWebhook',
   'notifyDingtalkEnabled',
@@ -1760,12 +1820,14 @@ $('testNotificationBtn')?.addEventListener('click', testNotificationConfig);
   input.addEventListener('input', () => {
     notificationDirty = true;
     syncNotificationBadge();
+    renderNotificationDigest(lastConfig || {});
   });
   input.addEventListener('change', () => {
     notificationDirty = true;
     if (id === 'notifyEmailSsl' && input.checked) setInputChecked('notifyEmailStarttls', false);
     if (id === 'notifyEmailStarttls' && input.checked) setInputChecked('notifyEmailSsl', false);
     syncNotificationBadge();
+    renderNotificationDigest(lastConfig || {});
   });
 });
 $('closeContainerLogsBtn').addEventListener('click', closeContainerLogsModal);

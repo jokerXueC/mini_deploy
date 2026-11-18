@@ -368,6 +368,19 @@
           <button id="saveNotificationBtn" class="danger-button compact-action" type="button">保存通知</button>
         </div>
       </div>
+      <section class="notification-digest" aria-labelledby="notifyDigestTitle">
+        <div class="digest-heading">
+          <div><h3 id="notifyDigestTitle">定时统计</h3><p>主机资源、容器、请求与异常 · 最近 15 分钟</p></div>
+          <label class="digest-toggle"><input id="notifyDigestEnabled" type="checkbox" role="switch"><span>自动发送</span></label>
+        </div>
+        <div class="digest-controls">
+          <label for="notifyDigestInterval">发送间隔</label>
+          <div class="digest-interval"><span>每</span><input id="notifyDigestInterval" type="number" min="1" max="1440" step="1" value="15"><span>分钟</span></div>
+          <button id="notifyDigestPreview" class="ghost-button compact-action" type="button">预览统计</button>
+        </div>
+        <div id="notifyDigestStatus" class="digest-status" role="status" aria-live="polite">正在读取定时统计状态…</div>
+        <details id="notifyDigestReport" class="digest-report" hidden><summary id="notifyDigestReportTitle">统计报告</summary><article id="notifyDigestReportBody"></article></details>
+      </section>
       <div class="notification-grid">
         <article class="notification-card">
           <label class="notification-toggle">

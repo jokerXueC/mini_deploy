@@ -104,6 +104,11 @@ class Handler(PerformanceHandler):
             self._write_json(200, payload)
         elif path == '/incident-diagnosis/report':
             agent.Handler.do_GET(self)
+        elif path == '/notifications':
+            self._write_json(200, {'notifications': agent._default_notification_config(), 'digest': {
+                'next_at': 0, 'channels_ready': False, 'pending_reports': 0, 'last': None, 'deliveries': [], 'error': ''}})
+        elif path == '/notifications/digest/preview':
+            self._write_json(200, agent._collect_notification_digest())
         elif path in {'/observations/analyze', '/observations/requests'}:
             agent.Handler.do_GET(self)
         elif path in {'/security/center', '/security/fail2ban', '/security/logins', '/security/protection'}:

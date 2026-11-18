@@ -188,7 +188,7 @@ def test_startup_starts_monitoring_and_maintenance_without_deployment(runtime, m
     agent.main()
     assert started == ["_realtime_metric_sampler", "_system_metric_sampler", '_server_performance_sampler',
                        "_docker_log_metric_sampler", "_health_check_sampler", "run", "_docker_image_cleanup_sampler",
-                       "_certificate_discovery_sampler", "_security_sampler", "run"]
+                       "_certificate_discovery_sampler", "_security_sampler", "run", "run", "run"]
     assert agent.STATE_FILE.read_bytes() == original
 
 

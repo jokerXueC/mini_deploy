@@ -31,15 +31,15 @@ def change(current, reference):
             'percent': (current - reference) / abs(reference) * 100 if reference else None}
 
 
-def resources(history, since, until):
-    totals = {key: {'sum': 0, 'weight': 0, 'peak': None} for key in FIELDS}
+def resources(history, since, until, fields=FIELDS):
+    totals = {key: {'sum': 0, 'weight': 0, 'peak': None} for key in fields}
     covered, count = {}, 0
     with history.connect() as db:
         for row in db.execute('SELECT ts,data FROM samples WHERE ts>=? AND ts<? ORDER BY ts', (since, until)):
             count += 1
             data = json.loads(row['data'])
             covered[row['ts']] = covered.get(row['ts'], 0) | data.get('_seconds', 0)
-            for key in FIELDS:
+            for key in fields:
                 value = data.get(key) or {}
                 if not value.get('weight'):
                     continue
