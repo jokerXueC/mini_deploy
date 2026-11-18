@@ -7,6 +7,7 @@
   const date = value => value ? new Date(value * 1000).toLocaleString() : '尚未尝试';
   let page = 0, loading = false, busy = false, timer, selected = '', detailGeneration = 0, selectedRevision = null, enabled = false;
   const dialog = el('diagnosisDialog');
+  let loadedReference = null;
   function render(data) {
     enabled = data.enabled;
     el('diagnosisEnabled').checked = data.enabled;
@@ -48,10 +49,13 @@
   }
   async function report(key, revision = null) {
     const generation = ++detailGeneration;
+    loadedReference = null; el('diagnosisQuote').disabled = true;
     try {
       const data = await fetchJson(`incident-diagnosis/report?id=${encodeURIComponent(key)}${revision ? `&revision=${revision}` : ''}`);
       if (generation !== detailGeneration || !dialog.open) return;
       const r = data.report;
+      loadedReference = r ? {id:key, revision:r.revision, title:data.incident.title || '异常诊断报告'} : null;
+      el('diagnosisQuote').disabled = !loadedReference;
       el('diagnosisReportTitle').textContent = data.incident.title || '异常诊断报告';
       el('diagnosisReportStatus').textContent = `${labels[data.state] || data.state}${r ? ` · ${r.complete ? '六节报告完整' : '部分结果，诊断未完成'} · ${{confirmed:'证据支持根因判断',suspected:'可能原因，尚待确认',unknown:'根因尚未确认'}[r.confidence]}` : ' · 尚未生成报告'}`;
       const versions = data.versions.map(v => `<option value="${v.revision}">v${v.revision} · ${escape(date(v.created))}</option>`).join('');
@@ -85,22 +89,34 @@
   el('diagnosisEnabled').addEventListener('change', () => change({action:'configure', enabled:el('diagnosisEnabled').checked}));
   el('diagnosisModel').addEventListener('click', () => window.TerminalAI.openSettings());
   el('diagnosisNotify').addEventListener('click', () => setView('notify'));
-  el('diagnosisList').addEventListener('click', event => {
-    const button = event.target.closest('[data-diagnosis]'); if (!button) return;
-    selected = button.dataset.diagnosis; selectedRevision = null;
+  function open(key, revision = null) {
+    selected = key; selectedRevision = revision; loadedReference = null;
     el('diagnosisReportBody').textContent = '正在读取报告'; el('diagnosisReportBody').dataset.signature = '';
     el('diagnosisTrace').replaceChildren(); el('diagnosisDelivery').replaceChildren();
     el('diagnosisReportTitle').textContent = '异常诊断报告'; el('diagnosisReportStatus').textContent = '正在读取';
-    el('diagnosisRetry').disabled = true; el('diagnosisDownload').removeAttribute('href');
-    dialog.showModal(); report(selected); schedule();
+    el('diagnosisRetry').disabled = true; el('diagnosisQuote').disabled = true;
+    el('diagnosisVersion').disabled = true; el('diagnosisDownload').removeAttribute('href');
+    if (!dialog.open) dialog.showModal();
+    report(selected, selectedRevision); schedule();
+  }
+  el('diagnosisList').addEventListener('click', event => {
+    const button = event.target.closest('[data-diagnosis]'); if (button) open(button.dataset.diagnosis);
+  });
+  el('diagnosisQuote').addEventListener('click', async () => {
+    if (!loadedReference) return;
+    const reference = {...loadedReference};
+    try {
+      await window.PanelAI.quoteReport(reference);
+      dialog.close();
+    } catch (error) { el('diagnosisReportStatus').textContent = `引用失败：${error.message}`; }
   });
   el('diagnosisClose').addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', () => { selected = ''; detailGeneration++; schedule(); });
+  dialog.addEventListener('close', () => { selected = ''; loadedReference = null; detailGeneration++; schedule(); });
   el('diagnosisVersion').addEventListener('change', () => { selectedRevision = Number(el('diagnosisVersion').value); report(selected, selectedRevision); });
   el('diagnosisRetry').addEventListener('click', () => { selectedRevision = null; change({action:'retry', id:selected}); });
   el('diagnosisPrev').addEventListener('click', () => { page = Math.max(0, page - 1); refresh(); });
   el('diagnosisNext').addEventListener('click', () => { page++; refresh(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && (activeView === 'events' || dialog.open)) refresh(); else schedule(); });
-  window.IncidentDiagnosis = {refresh, viewChanged: () => { if (activeView === 'events') refresh(); else schedule(); }};
+  window.IncidentDiagnosis = {open, refresh, viewChanged: () => { if (activeView === 'events') refresh(); else schedule(); }};
   if (activeView === 'events') refresh();
 })();

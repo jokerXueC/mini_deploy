@@ -50,6 +50,7 @@ import request_gateway
 import gateway_connections
 import monitoring
 import container_monitoring
+import container_resources
 import docker_events
 import request_history
 import request_locations
@@ -1868,6 +1869,8 @@ def _docker_status() -> dict[str, Any]:
             "memory_percent": None,
             "memory_usage": "",
             "net_io": "",
+            "block_io": "",
+            "pids": None,
             "recent_error_count": 0,
             "recent_warn_count": 0,
         }
@@ -1900,6 +1903,9 @@ def _docker_status() -> dict[str, Any]:
             target["memory_percent"] = _percent(str(item.get("MemPerc") or "").replace("%", ""))
             target["memory_usage"] = str(item.get("MemUsage") or "")
             target["net_io"] = str(item.get("NetIO") or "")
+            target["block_io"] = str(item.get("BlockIO") or "")
+            raw_pids = str(item.get("PIDs") or "")
+            target["pids"] = int(raw_pids) if raw_pids.isdigit() else None
 
     log_counts = _docker_log_counts_snapshot()
     for container in containers:
@@ -1918,7 +1924,11 @@ def _inspect_docker_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     containers = snapshot.get("containers") or []
     # Inspect only state and selected identity labels, never environment variables.
     inspect_format = ('{"Id":{{json .Id}},"Name":{{json .Name}},"State":{{json .State}},'
-        '"RestartCount":{{json .RestartCount}},"HostConfig":{"RestartPolicy":{{json .HostConfig.RestartPolicy}}},'
+        '"RestartCount":{{json .RestartCount}},"LogPath":{{json .LogPath}},"HostConfig":{'
+        '"RestartPolicy":{{json .HostConfig.RestartPolicy}},"Memory":{{json .HostConfig.Memory}},'
+        '"CpuQuota":{{json .HostConfig.CpuQuota}},"CpuPeriod":{{json .HostConfig.CpuPeriod}},'
+        '"NanoCpus":{{json .HostConfig.NanoCpus}},"CpusetCpus":{{json .HostConfig.CpusetCpus}},'
+        '"PidsLimit":{{json .HostConfig.PidsLimit}},"LogConfig":{"Type":{{json .HostConfig.LogConfig.Type}}}},'
         '"Config":{"Labels":{'
         '"com.docker.compose.project":{{json (index .Config.Labels "com.docker.compose.project")}},'
         '"com.docker.compose.service":{{json (index .Config.Labels "com.docker.compose.service")}},'
@@ -2212,6 +2222,8 @@ def _docker_image_action(action: str, reference: str) -> str:
 
 
 _disk_sampler = performance_metrics.DiskSampler()
+_container_resource_sampler = container_resources.Sampler()
+_container_local_check = {'at': 0, 'local': False}
 _container_performance = None
 _container_performance_lock = threading.Lock()
 _server_performance_instance = None
@@ -2228,6 +2240,30 @@ def _performance_history():
         if _container_performance is None or _container_performance.path.parent.parent != STATE_FILE.parent:
             _container_performance = performance_metrics.ContainerHistory(STATE_FILE.parent, _maintenance_shared_lock)
         return _container_performance
+
+
+def _container_performance_payload(identifier, period='24h'):
+    payload = _performance_history().query(identifier, period)
+    # The UI and AI read exactly the same cached evidence; neither runs Docker on demand.
+    docker = _system_status_payload().get('docker') or {}
+    current = next((row for row in docker.get('containers', []) if row.get('id') == identifier), None)
+    payload.update(current=current, current_stale=docker.get('stale', True), generated_at=time.time())
+    snapshot = _monitor().snapshot()
+    evidence = (current or {}).get('inspection') or {}
+    identity = container_monitoring.container_identity(evidence) if evidence.get('id') else ''
+    matching = [event for event in snapshot.get('events', [])
+        if payload['since'] <= event.get('at_ts', 0) <= payload['until']
+        and ((event.get('metadata') or {}).get('container_id') == identifier
+             or identity and str(event.get('id', '')).startswith(identity + ':'))]
+    payload['events'] = sorted(matching, key=lambda row: row.get('at_ts', 0), reverse=True)[:100]
+    payload['event_count'] = len(matching)
+    with _server_performance().lock:
+        scene = _server_performance().latest_scene
+        scene = json.loads(json.dumps(scene)) if scene else {}
+    payload['processes'] = [row for row in scene.get('processes', []) if row.get('container_id') == identifier][:20]
+    payload['process_sampled_at'] = scene.get('at')
+    payload['process_notice'] = '当前保留的活跃进程现场，最多 20 项，不代表容器内完整进程列表；历史曲线与当前现场要按时间区分。'
+    return payload
 
 
 def _server_performance():
@@ -2296,7 +2332,15 @@ def _system_status_payload() -> dict[str, Any]:
 
 def _sample_system_status() -> None:
     # All subprocess and disk work happens outside the publication lock.
-    docker = _docker_status()
+    docker = _inspect_docker_snapshot(_docker_status())
+    if os.name == 'posix' and (not _container_local_check['at'] or time.monotonic() - _container_local_check['at'] > 60):
+        try:
+            nginx_runtime.require_local_docker()
+            local = True
+        except (OSError, RuntimeError, ValueError):
+            local = False
+        _container_local_check.update(at=time.monotonic(), local=local)
+    docker = _container_resource_sampler.sample(docker, local=_container_local_check['local'])
     now = time.time()
     realtime = _realtime_metrics_payload()
     payload = {**realtime, 'docker': docker,
@@ -2731,6 +2775,7 @@ def _evaluate_resource_alerts(monitor: monitoring.Monitor, system: dict[str, Any
     monitor.observe("docker:daemon", not docker["available"] if "available" in docker and installed and not docker.get('stale') else None,
                     "Docker 无法连接", "请检查 Docker 服务是否正常运行", "docker")
     container_monitoring.evaluate_containers(monitor, {**docker, 'available': False} if docker.get('stale') else docker)
+    container_resources.evaluate(monitor, docker)
     with _server_performance().lock:
         scene = _server_performance().latest_scene
     if scene and 0 <= monitor.clock() - scene['at'] <= 15:
@@ -3214,7 +3259,8 @@ def _panel_read_backend(selection, target, *, code=None, database_owner='', allo
             requests=_request_history, discovery=_certificate_discovery,
             monitor=lambda: _monitor().snapshot(), audit=lambda: _audit_tail(lines=2000),
             files=panel_files.Reader(root=code.project['path'] if code else '/', excluded=(STATE_FILE.parent,)),
-            databases=panel_database.Reader(_database_manager, database_owner, allowed=allow_databases, scoped=bool(code))))
+            databases=panel_database.Reader(_database_manager, database_owner, allowed=allow_databases, scoped=bool(code)),
+            containers=_container_performance_payload))
 
 
 def _automatic_diagnosis_backend(incident):
@@ -3461,6 +3507,11 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                 result = manager.submit(owner, action="test", data=data)
             elif path in {'/terminal-ai/panel', '/terminal-ai/global'}:
                 is_global = path == '/terminal-ai/global'
+                report_reference = data.get('report_reference')
+                if report_reference is not None:
+                    if not is_global:
+                        raise terminal_ai.AIError('请在全局 AI 助手中引用故障报告。')
+                    report_reference = _diagnosis_store().reference(report_reference)
                 if is_global and (data.get('session_id') or data.get('include_terminal') or data.get('code_project')):
                     raise terminal_ai.AIError('全局助手通过工具发现目标，不接受预先绑定的 SSH 或代码项目。')
                 if not is_global and (data.get('session_id') or data.get('include_terminal') or data.get('permission', 'readonly') != 'readonly'):
@@ -3489,7 +3540,7 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
                         sessions=lambda: _ssh_manager().status(owner)['sessions'],
                         resolve=lambda key: _ssh_manager().session(owner, key),
                         projects=lambda: _panel_code_catalog().snapshot() if panel_code.supported() else [],
-                        auto_sessions=granted)
+                        auto_sessions=granted, diagnoses=_diagnosis_store(), reference=report_reference)
                 def panel_executor(plan, cancel):
                     success = False
                     try:
@@ -4209,7 +4260,7 @@ class Handler(http_limits.RequestDeadlineMixin, BaseHTTPRequestHandler):
             if self._require_auth_json():
                 query = parse_qs(parsed.query)
                 try:
-                    self._write_json(200, _performance_history().query(query.get('id', [''])[0], query.get('period', ['24h'])[0]))
+                    self._write_json(200, _container_performance_payload(query.get('id', [''])[0], query.get('period', ['24h'])[0]))
                 except (ValueError, OSError, sqlite3.Error, _MaintenanceLockError) as exc:
                     self._write_json(400 if isinstance(exc, ValueError) else 503,
                                      {'error': 'performance_unavailable', 'detail': str(exc)})

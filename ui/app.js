@@ -820,16 +820,16 @@ function renderContainerCard(container) {
           <span class="badge ${stateClass}">${escapeHtml(containerStateLabel(container))}</span>
           ${container.service ? `<span class="stat-pill">${escapeHtml(container.service)}</span>` : ''}
           ${container.memory_usage ? `<span class="stat-pill">${escapeHtml(container.memory_usage)}</span>` : ''}
-          ${container.net_io ? `<span class="stat-pill">${escapeHtml(container.net_io)}</span>` : ''}
-          ${showErrorCount ? `<span class="badge failed">异常 ${errorCount}</span>` : ''}
-          ${showWarnCount ? `<span class="badge running">警告 ${warnCount}</span>` : ''}
+          ${container.net_io ? `<span class="stat-pill" title="累计入站 / 累计出站">${escapeHtml(container.net_io)}</span>` : ''}
+          ${showErrorCount ? `<span class="badge failed" title="最近读取的 200 行日志中匹配的错误数，不是每分钟错误率">异常 ${errorCount}</span>` : ''}
+          ${showWarnCount ? `<span class="badge running" title="最近读取的 200 行日志中匹配的警告数，不是每分钟警告率">警告 ${warnCount}</span>` : ''}
         </div>
         <div class="container-ports" title="${escapeHtml(container.ports || '-')}">${escapeHtml(container.ports || '-')}</div>
       </div>
       <div class="container-meters">
         ${renderMeter('CPU', container.cpu_percent)}
         ${renderMeter('MEM', container.memory_percent)}
-        <div class="container-actions">${containerActions(container)}${/^[a-f0-9]{64}$/.test(container.id || '') ? `<button class="ghost-button container-action" type="button" data-performance-container="${escapeHtml(container.id)}" data-performance-name="${escapeHtml(title)}">资源历史</button>` : ''}</div>
+        <div class="container-actions">${containerActions(container)}${/^[a-f0-9]{64}$/.test(container.id || '') ? `<button class="ghost-button container-action" type="button" data-performance-container="${escapeHtml(container.id)}" data-performance-name="${escapeHtml(title)}">运行观测</button>` : ''}</div>
       </div>
     </article>
   `;

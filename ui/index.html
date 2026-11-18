@@ -845,7 +845,7 @@
 
   <dialog id="diagnosisDialog" class="ops-dialog" aria-labelledby="diagnosisReportTitle">
     <header class="ops-head"><div><h2 id="diagnosisReportTitle">异常诊断报告</h2><p id="diagnosisReportStatus" role="status"></p></div><button id="diagnosisClose" class="toolbar-icon" type="button" title="关闭报告" aria-label="关闭报告"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></header>
-    <div class="diagnosis-report-tools"><label>版本 <select id="diagnosisVersion" aria-label="报告版本"></select></label><button id="diagnosisRetry" class="ghost-button compact-action" type="button">重新诊断</button><a id="diagnosisDownload" class="toolbar-icon" title="下载完整 Markdown 报告" aria-label="下载完整报告"><img src="ui/previews/ssh-ai/icons/download.svg" alt=""></a></div>
+    <div class="diagnosis-report-tools"><label>版本 <select id="diagnosisVersion" aria-label="报告版本"></select></label><button id="diagnosisQuote" class="ghost-button compact-action" type="button" disabled><img src="ui/previews/ssh-ai/icons/message-square.svg" alt="">引用到 AI</button><button id="diagnosisRetry" class="ghost-button compact-action" type="button">重新诊断</button><a id="diagnosisDownload" class="toolbar-icon" title="下载完整 Markdown 报告" aria-label="下载完整报告"><img src="ui/previews/ssh-ai/icons/download.svg" alt=""></a></div>
     <div class="diagnosis-report-scroll"><article id="diagnosisReportBody"></article><details id="diagnosisEvidence"><summary>实际工具证据</summary><div id="diagnosisTrace"></div></details><details id="diagnosisReceipts"><summary>通知送达记录</summary><div id="diagnosisDelivery"></div></details></div>
   </dialog>
   <script src="ui/motion.js"></script>

@@ -8,7 +8,7 @@
     <section id="panelAIHistoryPanel" class="panel-ai-history-panel" aria-labelledby="panelAIHistoryTitle" hidden><header class="panel-ai-history-head"><h3 id="panelAIHistoryTitle">对话历史</h3><button id="panelAIHistoryClose" class="toolbar-icon" type="button" aria-label="收起历史记录" title="收起历史记录"><img src="ui/previews/ssh-ai/icons/x.svg" alt=""></button></header><div id="panelAIHistoryList" class="panel-ai-history" aria-busy="false"></div></section>
     <div id="panelAIHttp" class="panel-ai-http" hidden><label><input id="panelAIHttpConsent" type="checkbox"> 我了解 HTTP 明文传输风险，允许本次登录使用 AI</label><button id="panelAIHttpAllow" class="ghost-button compact-action" type="button" disabled>允许本次登录</button></div>
     <div id="panelAIMessages" class="panel-ai-messages" aria-live="polite"></div>
-    <form id="panelAIForm" class="panel-ai-compose"><textarea id="panelAIQuestion" aria-label="运维诊断问题" placeholder="继续追问，例如：哪个进程占用最多？" maxlength="2000" required></textarea><div class="panel-ai-bottom"><p id="panelAIFeedback" role="status"></p><button id="panelAIStop" class="ghost-button compact-action" type="button" hidden>停止</button><button id="panelAISend" class="ghost-button compact-action" type="submit">发送</button></div></form>`;
+    <form id="panelAIForm" class="panel-ai-compose"><div id="panelAIReference" class="panel-ai-reference" hidden></div><textarea id="panelAIQuestion" aria-label="运维诊断问题" placeholder="继续追问，例如：哪个进程占用最多？" maxlength="2000" required></textarea><div class="panel-ai-bottom"><p id="panelAIFeedback" role="status"></p><button id="panelAIStop" class="ghost-button compact-action" type="button" hidden>停止</button><button id="panelAISend" class="ghost-button compact-action" type="submit">发送</button></div></form>`;
   document.body.append(dialog);
   const globalTools = document.createElement('div'); globalTools.className = 'panel-ai-global-tools'; globalTools.hidden = true;
   globalTools.innerHTML = '<label for="panelAIPermission">操作方式</label><select id="panelAIPermission"><option value="approve">操作前确认</option><option value="auto">自动操作</option></select><button id="panelAIConnect" type="button" class="ghost-button compact-action" title="登录或切换服务器">登录服务器</button><button id="panelAINew" type="button" class="toolbar-icon" title="新建对话" aria-label="新建全局对话"><img src="ui/previews/ssh-ai/icons/plus.svg" alt=""></button>';
@@ -62,6 +62,28 @@
   let historyOffset = 0, historyBefore = null, currentHistory = '', historyBusy = false;
   let projects = [], projectsBusy = false, scopeUnavailable = false;
   let globalMode = false, permission = 'approve', accessBusy = false;
+  let reportReference = null;
+  function validReference(value) {
+    return value && /^[a-f0-9]{24}$/.test(value.id) && Number.isInteger(value.revision) && value.revision > 0;
+  }
+  function referenceButton(reference) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'panel-ai-reference-open';
+    button.innerHTML = '<img src="ui/previews/ssh-ai/icons/file.svg" alt=""><span></span><small></small>';
+    button.querySelector('span').textContent = reference.title || '异常诊断报告';
+    button.querySelector('small').textContent = `v${reference.revision}`;
+    button.title = `查看故障报告 v${reference.revision} · ${reference.id}`;
+    button.onclick = () => window.IncidentDiagnosis.open(reference.id, reference.revision);
+    return button;
+  }
+  function setReference(value) {
+    reportReference = validReference(value) ? {...value} : null;
+    const container = $('panelAIReference'); container.replaceChildren(); container.hidden = !reportReference;
+    if (!reportReference) return;
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'toolbar-icon';
+    remove.title = '移除本次报告引用'; remove.setAttribute('aria-label', remove.title);
+    remove.innerHTML = '<img src="ui/previews/ssh-ai/icons/x.svg" alt="">'; remove.onclick = () => setReference(null);
+    container.append(referenceButton(reportReference), remove);
+  }
   function controls() {
     $('panelAISend').disabled = busy || historyBusy || projectsBusy || scopeUnavailable || accessBusy; $('panelAIStop').hidden = !busy;
     $('panelAIHistory').disabled = busy || projectsBusy; $('panelAISettings').disabled = busy;
@@ -133,11 +155,12 @@
       if (run === generation) $('panelAICodeStatus').textContent = `项目扫描失败：${error.message}`;
     } finally { if (run === generation) { projectsBusy = false; controls(); } }
   }
-  function entry(question) {
+  function entry(question, reference = null) {
     const node = document.createElement('section'); node.className = 'panel-ai-entry';
     const title = document.createElement('p'); title.className = 'panel-ai-question'; title.textContent = question;
     const progress = document.createElement('div');
     const answer = document.createElement('div'); answer.className = 'tai-answer';
+    if (validReference(reference)) { const source = document.createElement('div'); source.className = 'panel-ai-reference'; source.append(referenceButton(reference)); node.append(source); }
     node.append(title, progress, answer); $('panelAIMessages').append(node); return {node, progress, answer};
   }
   function renderProgress(item, result) {
@@ -186,6 +209,7 @@
   async function cancel(id) { if (id) { try { await api('cancel', {id}); } catch (error) { $('panelAIFeedback').textContent = error.message; } } }
   async function ask() {
     const question = $('panelAIQuestion').value.trim(); if (busy || historyBusy || projectsBusy || scopeUnavailable || accessBusy || !question) return;
+    const reference = globalMode && reportReference ? {...reportReference} : null;
     setHistoryOpen(false);
     const run = ++generation; busy = true; setPhase('preparing'); controls();
     let item;
@@ -193,10 +217,10 @@
       await refreshSettings(); if (run !== generation || !sessionActive) return;
       if (!settings.configured) { setPhase('idle'); $('panelAIFeedback').textContent = '先点击“模型设置”，保存后再发送。'; return; }
       if (!settings.secure && !settings.http_enabled) { setPhase('idle'); $('panelAIFeedback').textContent = '请确认本次登录的 HTTP 访问，或使用 HTTPS / 本地隧道。'; return; }
-      item = entry(question); renderProgress(item, {status:'running'});
+      item = entry(question, reference); renderProgress(item, {status:'running'});
       $('panelAIFeedback').textContent = globalMode ? '正在处理…' : '自动采集所选范围的证据…';
       const submitted = await api(globalMode ? 'global' : 'panel', {question, conversation_id:conversation, history_id:history,
-        ...(globalMode ? {} : {selection, code_project:$('panelAICodeProject').value}),
+        ...(globalMode ? (reference ? {report_reference:{id:reference.id, revision:reference.revision}} : {}) : {selection, code_project:$('panelAICodeProject').value}),
         consent:true, permission:globalMode ? permission : 'readonly', provider:{base_url:settings.base_url, model:settings.model, protocol:settings.protocol}});
       if (run !== generation || !sessionActive) { await cancel(submitted.id); return; }
       conversation = submitted.conversation_id; history = submitted.history_id; job = submitted.id;
@@ -236,7 +260,8 @@
       codeStatus();
       $('panelAITarget').textContent = result.conversation.target + (globalMode ? '' : ' · 只读诊断');
       $('panelAIMessages').replaceChildren();
-      for (const turn of result.turns) { const item = entry(turn.question); renderProgress(item, {status:'done', events:turn.events}); renderAnswer(item, turn.answer || '本轮没有完成'); }
+      for (const turn of result.turns) { const item = entry(turn.question, turn.reference); renderProgress(item, {status:'done', events:turn.events}); renderAnswer(item, turn.answer || '本轮没有完成'); }
+      if (!before) setReference(globalMode ? result.turns.at(-1)?.reference : null);
       if (historyBefore !== null) { const older = document.createElement('button'); older.className = 'ghost-button compact-action'; older.textContent = '更早的对话'; older.onclick = () => openHistory(currentHistory, historyBefore); $('panelAIMessages').prepend(older); }
       setHistoryOpen(false, true); $('panelAIFeedback').textContent = '历史已加载，追问会重新检查当前主机；历史证据不会补造。';
       if (scopeUnavailable) $('panelAIFeedback').textContent = '历史代码目录已不可用，可选择其他项目或“服务器文件（只读）”开始新对话。';
@@ -300,6 +325,7 @@
   };
   window.addEventListener('pagehide', () => { sessionActive = false; minimized = false; dock.hidden = true; stop(); });
   function newGlobal() {
+    setReference(null);
     globalMode = true; scopeUnavailable = false; projectsBusy = false;
     selection = {kind:'overview'}; conversation = ''; history = ''; currentHistory = '';
     $('panelAITitle').textContent = 'AI 助手'; $('panelAITarget').textContent = settings.global_target || '全局会话';
@@ -321,6 +347,21 @@
     $('globalAIOpen').setAttribute('aria-expanded', 'true');
     try { await refreshSettings(); controls(); } catch (error) { $('panelAIFeedback').textContent = error.message; }
     $('panelAIQuestion').focus();
+  }
+  async function quoteReport(reference) {
+    if (!validReference(reference)) throw new Error('报告引用无效，请重新打开报告。');
+    if (historyBusy || accessBusy) throw new Error('正在加载对话或授权，请稍后再引用。');
+    if (busy && !globalMode) throw new Error('当前诊断仍在运行，请完成或停止后再引用。');
+    if (!globalMode && minimized) { minimized = false; dock.hidden = true; }
+    if (!globalMode || !sessionActive) await openGlobal();
+    if (!globalMode) throw new Error('请先结束当前诊断，再打开全局 AI 助手。');
+    if (scopeUnavailable) throw new Error('当前历史属于其他主机，请新建全局对话后引用。');
+    if (minimized) resume();
+    if (!dialog.open) dialog.showModal();
+    setHistoryOpen(false); setReference(reference);
+    if (!$('panelAIQuestion').value.trim()) $('panelAIQuestion').value = '请结合这份故障报告继续排查，先复核原因与处理建议。';
+    $('panelAIFeedback').textContent = busy ? '报告已引用，当前任务完成后可继续追问。' : '报告已引用，请输入问题后发送。';
+    $('panelAIQuestion').focus({preventScroll:true});
   }
   $('globalAIOpen').onclick = openGlobal;
   async function connectServer() {
@@ -368,6 +409,7 @@
     if (dialog.open) return;
     if (minimized) { resume(); return; }
     stop();
+    setReference(null);
     globalMode = false; globalTools.hidden = true; dialog.querySelector('.panel-ai-code').hidden = false;
     sessionActive = true; setPhase('preparing');
     selection = {...scope}; conversation = ''; history = ''; currentHistory = ''; generation++; historyBusy = false;
@@ -379,7 +421,7 @@
     dialog.showModal(); const run = generation;
     try { await refreshSettings(); if (run !== generation) return; await loadProjects(); if (run === generation && sessionActive) ask(); }
     catch (error) { if (run === generation) { setPhase('failed'); $('panelAIFeedback').textContent = error.message; } }
-  }, openGlobal, async restore(id) {
+  }, openGlobal, quoteReport, async restore(id) {
     if (dialog.open) return;
     if (minimized) { resume(); return; }
     stop();

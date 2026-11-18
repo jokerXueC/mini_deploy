@@ -83,6 +83,15 @@ html[data-theme=dark] #panelAIHistory img { filter: invert(1); }
 .panel-ai-history .tai-history-row:disabled { cursor: wait; }
 .panel-ai-history .tai-history-row:focus-visible { outline: 2px solid var(--control-accent); outline-offset: 1px; }
 .panel-ai-compose { flex-shrink: 0; border-top: 1px solid var(--line); }
+.panel-ai-reference { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 10px; border-left: 2px solid var(--control-accent); padding-left: 8px; }
+.panel-ai-reference-open { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; padding: 5px 0; border: 0; background: transparent; color: var(--fg); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.panel-ai-reference-open > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-ai-reference-open > small { flex-shrink: 0; color: var(--muted); font-size: 11px; }
+.panel-ai-reference-open > img { flex: 0 0 15px; width: 15px; height: 15px; }
+html[data-theme=dark] .panel-ai-reference-open > img { filter: invert(1); }
+.panel-ai-reference-open:hover { color: var(--control-accent); }
+.panel-ai-reference-open:focus-visible { outline: 2px solid var(--control-accent); outline-offset: 2px; }
+.panel-ai-reference > .toolbar-icon { flex: 0 0 28px; width: 28px; height: 28px; }
 .panel-ai-compose textarea { width: 100%; min-height: 66px; max-height: 180px; resize: vertical; padding: 10px; background: var(--field-bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 13px; }
 .panel-ai-bottom { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
 .panel-ai-bottom p { flex: 1; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -90,9 +99,15 @@ html[data-theme=dark] #panelAIHistory img { filter: invert(1); }
 .panel-ai-http label { display: block; margin-bottom: 8px; }
 @media (max-width:700px) { .panel-ai-toolbar, .panel-ai-compose, .panel-ai-messages, .panel-ai-history, .panel-ai-history-head, .panel-ai-http, .panel-ai-code { padding-left: 14px; padding-right: 14px; } }
 @media (max-width:600px) {
+  .panel-ai-global-tools { padding: 8px 14px; gap: 8px; }
+  .panel-ai-global-tools .form-select { flex: 1 1 140px; margin-top: 0; }
   .ops-dialog.panel-ai-grant { --grant-padding: 18px; width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
   .panel-ai-grant > .ops-head { padding-top: 18px; padding-bottom: 16px; }
   .panel-ai-grant-rules > div { grid-template-columns: 56px minmax(0, 1fr); column-gap: 12px; }
+}
+@media (max-height:700px) {
+  .panel-ai-messages { min-height: 48px; }
+  .panel-ai-dialog > .ops-head, .panel-ai-toolbar, .panel-ai-global-tools { flex-shrink: 0; }
 }
 @media (max-width:600px), (max-height:700px) {
   .panel-ai-history-panel { flex: 1; max-height: none; }

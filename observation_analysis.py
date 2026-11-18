@@ -57,20 +57,8 @@ def resources(history, since, until, fields=FIELDS):
 
 def containers(history, since, until, ref_since, ref_until, target=''):
     edge = min(300, max(30, (until - since) / 4))
-    with history.connect() as db:
-        selected = [dict(row) for row in db.execute('''SELECT container,MAX(name) AS name,COUNT(*) AS samples,
-            AVG(cpu) AS cpu,AVG(memory) AS memory,
-            AVG(CASE WHEN ts<? THEN cpu END) AS start_cpu,
-            AVG(CASE WHEN ts>=? THEN cpu END) AS end_cpu,
-            AVG(CASE WHEN ts<? THEN memory END) AS start_memory,
-            AVG(CASE WHEN ts>=? THEN memory END) AS end_memory,
-            COUNT(CASE WHEN cpu IS NOT NULL THEN 1 END) AS cpu_samples,
-            COUNT(CASE WHEN memory IS NOT NULL THEN 1 END) AS memory_samples
-            FROM samples WHERE ts>=? AND ts<? AND (?='' OR container=?) GROUP BY container''',
-            (since + edge, until - edge, since + edge, until - edge, since, until, target, target))]
-        reference = {row['container']: dict(row) for row in db.execute('''SELECT container,AVG(cpu) AS cpu,
-            AVG(memory) AS memory,COUNT(*) AS samples FROM samples WHERE ts>=? AND ts<?
-            AND (?='' OR container=?) GROUP BY container''', (ref_since, ref_until, target, target))}
+    selected = history.aggregate(since, until, target)
+    reference = {row['container']: row for row in history.aggregate(ref_since, ref_until, target)}
     for item in selected:
         baseline = reference.get(item['container'], {})
         item['reference'] = baseline

@@ -24,6 +24,8 @@ DEFINITIONS = [
      {'service': {'type': 'string', 'maxLength': 220}}, ['service']),
     ('get_container_mounts', '读取容器工作目录及挂载路径，用于定位宿主机上的源码和数据；不读取环境变量',
      {'container': {'type': 'string', 'maxLength': 64}}, ['container']),
+    ('get_container_resources', '读取指定容器已采集的资源上限、CPU 限流、内存余量、网络/磁盘速率、历史峰值、进程现场和事件；不执行命令',
+     {'container': {'type': 'string', 'maxLength': 64}, 'period': {'type': 'string', 'enum': ['1h', '24h', '7d']}}, ['container']),
     ('get_host_inventory', '读取本机进程、监听端口、服务及日志来源，不读取进程命令参数',
      {'sort': {'type': 'string', 'enum': ['cpu', 'memory']}}, []),
     ('list_log_sources', '列出当前可读取的系统服务、容器和常见日志文件来源；先发现再读取', {}, []),
@@ -53,12 +55,13 @@ FILE_DEFINITIONS = panel_files.DEFINITIONS + [
 class Runtime:
     def __init__(self, *, inventory, logs, requests, discovery, monitor, audit,
                  runner=server_operations.run, local_docker=nginx_runtime.require_local_docker,
-                 files=None, databases=None):
+                 files=None, databases=None, containers=None):
         self.inventory, self.logs, self.requests = inventory, logs, requests
         self.discovery, self.monitor, self.audit = discovery, monitor, audit
         self.runner, self.local_docker = runner, local_docker
         self.files = files if files is not None else panel_files.Reader()
         self.databases = databases
+        self.containers = containers
 
     def schemas(self):
         shared = [s for s in terminal_tools.schemas() if s['function']['name'] in terminal_tools.LOCAL_READ_TOOLS]
@@ -108,7 +111,7 @@ class Runtime:
                 raise terminal_tools.ToolError('搜索文本不能为空。')
         if name == 'get_service_definition' and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.@:\\-]{0,219}', args['service']):
             raise terminal_tools.ToolError('systemd 服务名称无效。')
-        if name == 'get_container_mounts' and not re.fullmatch('[a-f0-9]{64}', args['container']):
+        if name in {'get_container_mounts', 'get_container_resources'} and not re.fullmatch('[a-f0-9]{64}', args['container']):
             raise terminal_tools.ToolError('请先列出容器，并使用完整容器 ID。')
         return {'name': name, 'arguments': args, 'title': title, 'write': False,
                 'command': name + ' ' + json.dumps(args, ensure_ascii=False), 'reason': '读取当前面板主机的运维证据'}
@@ -210,6 +213,20 @@ class Runtime:
                     'notice': '仅查询当前面板主机及已保存数据库连接。权限不足、内容已丢失或缺少连接凭据时须报告具体原因。'}
         if self.databases and name in {item[0] for item in panel_database.DEFINITIONS}:
             return self.databases.execute(name, args, cancel)
+        if name == 'get_container_resources':
+            if self.containers is None:
+                raise terminal_tools.ToolError('当前运行环境未接入容器资源采样，请检查面板采集状态。')
+            data = self.containers(args['container'], args.get('period', '1h'))
+            points = data.get('points', [])
+            data['point_count'] = len(points)
+            peaks = {key: max((p for p in points if p.get(key + '_peak') is not None),
+                             key=lambda p: p[key + '_peak'], default=None) for key in data.get('summary', {})}
+            data['peak_samples'] = {key: {'bucket_at': point['ts'], 'value': point[key + '_peak'],
+                                        'bucket_seconds': data.get('interval_seconds')}
+                                    for key, point in peaks.items() if point}
+            data['points'] = [points[i] for i in sorted({round(n * (len(points) - 1) / 59) for n in range(60)})] if points else []
+            data['trend_notice'] = '趋势最多均匀抽取 60 个时间点；完整窗口平均值、采样峰值和覆盖率见 summary，峰值所在统计桶见 peak_samples，不是精确发生时刻。不能将当前配置当成历史配置。'
+            return data
         if name in CONTAINER_FILES:
             argv = ['docker', 'inspect', '--format', '{{.State.Pid}} {{.State.Running}} {{.State.StartedAt}}', args['container']]
             text, limited = self.command(argv, cancel)

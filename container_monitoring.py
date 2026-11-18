@@ -18,6 +18,7 @@ import json
 import re
 from datetime import datetime
 from fractions import Fraction
+import container_resources
 
 
 RESTART_WINDOW_SECONDS = 300
@@ -80,6 +81,13 @@ def parse_inspect(payload):
             if isinstance(log, list) and log and isinstance(log[-1], dict):
                 last_check = {"exit_code": _count(log[-1].get("ExitCode")),
                               "end": _text(log[-1].get("End"), 64)}
+                try:
+                    start, end = [datetime.fromisoformat(re.sub(r'(\.\d{6})\d+', r'\1', str(log[-1][key])).replace('Z', '+00:00'))
+                                  for key in ('Start', 'End')]
+                    if end >= start:
+                        last_check.update(start=_text(log[-1]['Start'], 64), duration_ms=(end - start).total_seconds() * 1000)
+                except (KeyError, TypeError, ValueError):
+                    pass
         evidence = {
             "id": container_id, "name": _text(item.get("Name")).lstrip("/"),
             "state": state["Status"], "exit_code": _count(state.get("ExitCode")),
@@ -96,6 +104,11 @@ def parse_inspect(payload):
             "compose_replica": _text(labels.get("com.docker.compose.container-number"), 32),
             "compose_oneoff": str(labels.get("com.docker.compose.oneoff", "")).lower() == "true",
         }
+        resource_config = container_resources.inspection(item)
+        if resource_config:
+            evidence['resource_config'] = resource_config
+        if isinstance(health, dict) and _count(health.get('FailingStreak')) is not None:
+            evidence['health_failing_streak'] = health['FailingStreak']
         if container_id in result:
             duplicates.add(container_id)
         result[container_id] = evidence

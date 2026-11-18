@@ -16,6 +16,10 @@
 #diagnosisDialog .form-select-option { font-size: 12px; font-variant-numeric: tabular-nums; }
 .diagnosis-report-tools a { margin-left: auto; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .diagnosis-report-tools a:not([href]) { opacity: .35; pointer-events: none; }
+#diagnosisQuote { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+#diagnosisQuote img { width: 14px; height: 14px; }
+html[data-theme=dark] #diagnosisQuote img { filter: invert(1); }
+@media (max-width:600px) { #diagnosisQuote { grid-column: 1; justify-self: start; } #diagnosisDownload { grid-column: 2; grid-row: 2; } }
 .diagnosis-report-scroll { overflow: auto; min-height: 0; padding: 12px 24px 24px; }
 .diagnosis-report-scroll article { font: inherit; font-size: 13px; line-height: 1.85; overflow-wrap: anywhere; }
 .diagnosis-report-scroll article :is(h1, h2, h3, h4) { font-family: inherit; font-weight: 500; color: var(--fg); }

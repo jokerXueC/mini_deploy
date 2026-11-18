@@ -51,6 +51,12 @@ class Store:
                 CREATE INDEX IF NOT EXISTS history_turns ON turns(conversation, id);
                 CREATE INDEX IF NOT EXISTS history_recent ON conversations(updated DESC, id DESC);
             """)
+            if 'reference' not in {row['name'] for row in connection.execute('PRAGMA table_info(turns)')}:
+                try:
+                    connection.execute("ALTER TABLE turns ADD COLUMN reference TEXT NOT NULL DEFAULT '{}'")
+                except sqlite3.OperationalError:
+                    if 'reference' not in {row['name'] for row in connection.execute('PRAGMA table_info(turns)')}:
+                        raise
             with connection:
                 yield connection
         except (OSError, sqlite3.Error, ValueError) as exc:
@@ -61,7 +67,7 @@ class Store:
             if connection is not None:
                 connection.close()
 
-    def begin(self, key, job, question, target, model, context):
+    def begin(self, key, job, question, target, model, context, *, reference=None):
         now = time.time()
         with self._db() as db:
             current = db.execute("SELECT target FROM conversations WHERE id=?", (key,)).fetchone()
@@ -69,8 +75,9 @@ class Store:
                 raise HistoryError("请先连接历史对话对应的服务器，或新建对话。")
             db.execute("INSERT OR IGNORE INTO conversations VALUES (?, ?, ?, ?, ?, ?)",
                        (key, question[:80], target, model, now, now))
-            db.execute("INSERT INTO turns(job, conversation, question, answer, context, events, status, created) "
-                       "VALUES (?, ?, ?, '', ?, '[]', 'running', ?)", (job, key, question, context, now))
+            db.execute("INSERT INTO turns(job, conversation, question, answer, context, events, status, created, reference) "
+                       "VALUES (?, ?, ?, '', ?, '[]', 'running', ?, ?)",
+                       (job, key, question, context, now, json.dumps(reference or {}, ensure_ascii=False)))
             db.execute("UPDATE conversations SET updated=?, model=?, target=CASE WHEN target='' THEN ? ELSE target END "
                        "WHERE id=?", (now, model, target, key))
 
@@ -116,7 +123,7 @@ class Store:
             rows = db.execute("SELECT * FROM turns WHERE conversation=? AND (? IS NULL OR id<?) "
                               "ORDER BY id DESC LIMIT 51", (key, before, before)).fetchall()
             turns = [{k: row[k] for k in ("id", "question", "answer", "status", "created")} |
-                     {"events": json.loads(row["events"])} for row in reversed(rows[:50])]
+                     {"events": json.loads(row["events"]), "reference": json.loads(row['reference'])} for row in reversed(rows[:50])]
             return {"conversation": dict(conversation), "turns": turns,
                     "next_before": rows[49]["id"] if len(rows) > 50 else None}
 

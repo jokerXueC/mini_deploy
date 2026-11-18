@@ -341,6 +341,16 @@ class Store:
             result['report']['trace'] = json.loads(result['report']['trace'])
         return result
 
+    def reference(self, value):
+        if (not isinstance(value, dict) or set(value) != {'id', 'revision'}
+                or type(value['revision']) is not int or not 1 <= value['revision'] <= 2**31 - 1):
+            raise ValueError('请选择有效的故障报告及版本。')
+        data = self.detail(value['id'], value['revision'])
+        if not data['report']:
+            raise ValueError('该版本报告尚未生成或已不可用。')
+        return {'id': data['id'], 'revision': data['report']['revision'],
+                'title': data['incident'].get('title', '异常诊断报告')}
+
 
 class Worker:
     def __init__(self, store, *, monitor, manager, backend, target, config, send, log=lambda text: None):

@@ -34,16 +34,59 @@ def certificate_examples():
             ('downloads.example.com', 'Docker · edge', 'nginx', 84, True)])]}
 
 
+def container_resources(identifier, at):
+    scale = {'a': 1, 'b': .22, 'c': .06}.get(identifier[:1], .5)
+    wave = (1 + math.sin(at / 180)) / 2
+    limit = (512 if identifier.startswith('c') else 2048) * 1024**2
+    used = limit * (.38 + wave * .23)
+    return {'sampled_at': at, 'cpu_limit_cores': 2, 'memory_limit_bytes': limit,
+            'memory_current_bytes': used, 'memory_used_bytes': used * .85,
+            'memory_headroom_bytes': limit - used, 'memory_limit_percent': used / limit * 100,
+            'memory_anon_bytes': used * .7, 'memory_cache_bytes': used * .3, 'memory_swap_bytes': 0,
+            'cpu_throttled_percent': wave * 26 * scale, 'cpu_limit_percent': (80 + (wave * 2 - 1) * 58) * scale / 2,
+            'network_rx_bytes_s': (120 + 800 * wave) * 1024 * scale,
+            'network_tx_bytes_s': (60 + 240 * wave) * 1024 * scale,
+            'block_read_bytes_s': (30 + 900 * wave) * 1024 * scale,
+            'block_write_bytes_s': (20 + 400 * wave) * 1024 * scale,
+            'pids_current': round(12 + 70 * scale), 'pids_limit': 512, 'pids_percent': (12 + 70 * scale) / 512 * 100,
+            'main_process_fds': round(20 + 140 * scale), 'main_process_fd_limit': 1024,
+            'main_process_fd_percent': (20 + 140 * scale) / 1024 * 100,
+            'log_bytes': (4 + 24 * scale) * 1024**2, 'log_bytes_s': (120 + 800 * wave) * scale,
+            'cpu_pressure_percent': wave * 5, 'memory_pressure_percent': wave * 2,
+            'io_pressure_percent': wave * 3, 'oom_kill_total': 0, 'cgroup_version': 'v2',
+            'log_driver': 'json-file', 'notice': '本地模拟数据，不代表当前电脑或真实容器状态。'}
+
+
 def container_history(identifier, period):
     now = int(time.time() // 30) * 30
     seconds = {'1h': 3600, '24h': 86400, '7d': 604800}.get(period, 3600)
     interval = max(30, seconds // 240)
     scale = {'a': 1, 'b': .22, 'c': .06}.get(identifier[:1], .5)
+    points = []
+    for index, ts in enumerate(range(now - seconds, now + 1, interval)):
+        if 95 <= index < 102:
+            continue  # Deliberate gap to check that the chart does not imply continuous evidence.
+        point = {'ts': ts, 'cpu_percent': (80 + math.sin(ts / 180) * 58) * scale,
+                 'memory_percent': 35 + scale * 28 + math.sin(ts / 300) * 7,
+                 **container_resources(identifier, ts)}
+        for key, value in list(point.items()):
+            if key not in {'ts', 'sampled_at'} and type(value) in (int, float):
+                point[key + '_peak'] = value * (1.15 if key.endswith('_s') or 'cpu' in key else 1.03)
+        points.append(point)
+    summary = {key: {'average': sum(p[key] for p in points) / len(points),
+                     'peak': max(p[key + '_peak'] for p in points)}
+               for key in points[0] if key + '_peak' in points[0]}
+    current = next((row for row in system()['docker']['containers'] if row['id'] == identifier), None)
     return {'container': identifier, 'period': period, 'interval_seconds': interval, 'retention_days': 7,
-            'notice': '本地模拟数据 · CPU 100% = 一个逻辑核',
-            'points': [{'ts': ts, 'cpu_percent': (80 + math.sin(ts / 180) * 58) * scale,
-                        'memory_percent': 35 + scale * 28 + math.sin(ts / 300) * 7}
-                       for ts in range(now - seconds, now + 1, interval)]}
+            'notice': '本地模拟数据 · 实线为平均值，虚线为采样峰值；模拟缺口不连线。',
+            'since': now - seconds, 'until': now, 'first_at': now - seconds, 'latest_at': now,
+            'coverage_percent': 97.1, 'points': points, 'summary': summary, 'current': current, 'current_stale': False,
+            'process_sampled_at': now, 'process_notice': '模拟的部分活跃进程现场，不代表完整进程列表。',
+            'processes': [{'pid': 1204, 'name': 'python', 'cpu_percent': 24.8,
+                           'rss_mib': 624, 'read_kib_s': 12, 'write_kib_s': 62}],
+            'event_count': 2, 'events': [
+                {'at_ts': now - 300, 'title': '模拟：CPU 持续限流', 'detail': '限流周期占比超过 20%，持续 60 秒。'},
+                {'at_ts': now - 660, 'title': '模拟：容器已启动', 'detail': '事件与资源变化仍需按时间核对。'}]}
 
 
 def sample(timestamp):
@@ -82,6 +125,11 @@ def system():
          'cpu_percent': 1.4, 'memory_percent': 7.3, 'memory_usage': '37 MiB / 512 MiB',
          'ports': '80, 443 → 80, 443/tcp'},
     ]
+    for container in containers:
+        container['resources'] = container_resources(container['id'], now)
+        container['inspection'] = {'health': container.get('health', 'none'), 'restart_count': 1,
+            'health_failing_streak': 0,
+            'health_last_check': {'duration_ms': 4.2, 'end': '2026-11-18T08:00:00Z'}}
     return {'server': server, 'docker': {'available': True, 'containers': containers},
             'realtime_history': [sample(now - i) for i in range(60)],
             'history': [sample(now - i * 1800) for i in range(336)], 'history_interval_seconds': 1800}
