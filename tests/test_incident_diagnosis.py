@@ -270,6 +270,100 @@ def test_automatic_transport_exposes_full_host_read_tools_and_frozen_identity(mo
     assert 'execute_command' not in names
     assert backend.incident('server:cpu')['incident']['incident_id'] == KEY
     assert seen[0]['alerts'][0]['incident_id'] == KEY
+    assert backend.completion_review == diagnosis.COMPLETION_REVIEW
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_report_review_can_continue_reading_deployment_before_finalizing(manager, model_server, protocol):
+    from test_terminal_agent import tool_response
+    manager.save(config(model_server, protocol))
+    draft = result()['text'].replace('证据及说明：解决方案', '请用户先查询 Compose 部署文件，满足条件才继续')
+    final = result()['text'].replace('证据及说明：解决方案',
+        '已核对 /srv/app/compose.yml 及 compose.prod.yml 覆盖项；请将 api 服务的 memory 从 256M 调整为 512M，重建前备份。')
+    class DeploymentBackend(Backend):
+        completion_review = diagnosis.COMPLETION_REVIEW
+        def schemas(self):
+            return [{'type': 'function', 'function': {'name': name, 'description': 'deployment',
+                'parameters': {'type': 'object', 'properties': {field: {'type': 'string'}}, 'required': [field]}}}
+                for name, field in [('get_container_mounts', 'container'), ('read_host_file', 'path')]]
+        def plan(self, name, args):
+            return {**super().plan(name, args), 'arguments': args}
+        def execute(self, plan, cancel):
+            self.executed.append(plan['name'])
+            path = plan.get('arguments', {}).get('path', '')
+            content = ('services: {api: {mem_limit: 256M}}' if path.endswith('compose.prod.yml') else
+                       'services: {api: {image: app:prod, mem_limit: 512M}}' if path else
+                       'Compose: /srv/app/compose.yml,/srv/app/compose.prod.yml')
+            return {'exit_code': 0, 'output': content, 'truncated': False}
+    backend = DeploymentBackend()
+    def response(body, count):
+        payload = json.dumps(body, ensure_ascii=False)
+        if count == 1:
+            text = draft
+        elif count == 2:
+            assert '在提交最终报告前' in payload and '请用户先查询' in payload
+            return tool_response(protocol, 'get_container_mounts', {'container': 'c' * 64}, 'verify_deployment')
+        elif count in (3, 4):
+            assert 'compose.prod.yml' in payload
+            path = '/srv/app/compose.yml' if count == 3 else '/srv/app/compose.prod.yml'
+            return tool_response(protocol, 'read_host_file', {'path': path}, f'verify_file_{count}')
+        else:
+            assert '256M' in payload and '512M' in payload
+            text = final
+        return {'content': [{'type': 'text', 'text': text}]} if protocol == 'anthropic' else {'choices': [{'message': {'content': text}}]}
+    model_server.content = response
+    output = finished(manager, diagnosis.OWNER, manager.submit_background(incident(), backend, 'host', diagnosis.GUIDANCE)['id'])
+    assert output['status'] == 'done' and output['text'] == final
+    assert backend.executed == ['read_logs', 'get_container_mounts', 'read_host_file', 'read_host_file']
+    assert len(model_server.calls) == 5
+    body, complete, _ = diagnosis.render_report(incident(), output, 'host', 1000)
+    assert complete and 'compose.prod.yml' in body and '请用户先查询' not in body
+
+
+def test_report_review_failure_keeps_draft_but_never_marks_it_complete(manager, model_server):
+    manager.save(config(model_server))
+    draft = result()['text']
+    backend = Backend()
+    backend.completion_review = diagnosis.COMPLETION_REVIEW
+    model_server.content = lambda body, count: {'choices': [{'message': {'content': draft}}]} if count == 1 else {'error': 'review failed'}
+    output = finished(manager, diagnosis.OWNER, manager.submit_background(incident(), backend, 'host', diagnosis.GUIDANCE)['id'])
+    assert output['status'] == 'failed' and '复核未完成' in output['partial_text']
+    assert draft in output['partial_text'] and len(model_server.calls) == 2
+    assert diagnosis.render_report(incident(), output, 'host', 1000)[1] is False
+
+
+def test_incomplete_review_continuation_also_preserves_the_original_draft(manager, model_server):
+    manager.save(config(model_server))
+    draft = result()['text']
+    backend = Backend()
+    backend.completion_review = diagnosis.COMPLETION_REVIEW
+    model_server.content = lambda body, count: {'choices': [{'message': {'content':
+        draft if count == 1 else '{"symptom":"复核只返回部分内容'},
+        'finish_reason': 'stop' if count == 1 else 'length'}]}
+    output = finished(manager, diagnosis.OWNER, manager.submit_background(incident(), backend, 'host', diagnosis.GUIDANCE)['id'])
+    assert output['notice'] and draft in output['text'] and '复核未完成' in output['text']
+    assert len(model_server.calls) == 3
+    assert diagnosis.render_report(incident(), output, 'host', 1000)[1] is False
+
+
+def test_report_review_cannot_execute_write_tools(manager, model_server):
+    from test_terminal_agent import tool_response
+    manager.save(config(model_server))
+    backend = Backend()
+    backend.completion_review = diagnosis.COMPLETION_REVIEW
+    backend.schemas = lambda: [{'type': 'function', 'function': {'name': 'restart_service',
+        'description': 'restart', 'parameters': {'type': 'object', 'properties': {'service': {'type': 'string'}},
+                                               'required': ['service']}}}]
+    def response(body, count):
+        if count == 2:
+            backend.write = True
+            return tool_response('openai', 'restart_service', {'service': 'api'}, 'unsafe_review')
+        return {'choices': [{'message': {'content': result()['text']}}]}
+    model_server.content = response
+    output = finished(manager, diagnosis.OWNER, manager.submit_background(incident(), backend, 'host', diagnosis.GUIDANCE)['id'])
+    assert output['status'] == 'done', output
+    assert backend.executed == ['read_logs'] and output['events'][-1]['status'] == 'blocked'
+    assert len(model_server.calls) == 3
 
 
 def test_model_configuration_failure_does_not_hide_persisted_reports(http_server, runtime, monkeypatch):

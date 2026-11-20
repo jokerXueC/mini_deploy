@@ -3270,8 +3270,10 @@ def _automatic_diagnosis_backend(incident):
         snapshot['alerts'] = [incident]
         snapshot['events'] = [e for e in snapshot.get('events', []) if e.get('id') != key]
         return _incident_diagnostics(key, snapshot=snapshot)
-    return _panel_read_backend({'kind': 'incident', 'id': incident['id']}, _panel_ai_target(),
+    backend = _panel_read_backend({'kind': 'incident', 'id': incident['id']}, _panel_ai_target(),
         database_owner=incident_diagnosis.OWNER, allow_databases=True, incident=evidence)
+    backend.completion_review = incident_diagnosis.COMPLETION_REVIEW
+    return backend
 
 
 def _diagnosis_worker():

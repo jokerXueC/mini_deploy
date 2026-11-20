@@ -796,6 +796,10 @@ html[data-theme="light"] .theme-toggle-icon {
 .resource-bar:hover { opacity: .82; }
 .docker-images-panel { margin-top: 16px; }
 .docker-image-tools { display: flex; gap: 12px; flex-wrap: wrap; }
+#dockerImageCleanupPolicy { margin: 12px 0 0; line-height: 1.8; overflow-wrap: anywhere; }
+#dockerImageFeedback { margin: 12px 0 0; line-height: 1.8; }
+#dockerImageCleanupPolicy:empty, #dockerImageFeedback:empty { display: none; }
+.docker-image-list { margin-top: 12px; }
 .docker-image-tools input { min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--fg); font: inherit; font-size: 13px; }
 .docker-image-tools input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .docker-image-tools > input { flex: 1; min-width: 180px; }

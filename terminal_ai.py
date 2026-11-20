@@ -185,7 +185,7 @@ def complete(config, messages, tools=None, *, check=None, publish=None):
                 raise AIError("模型工具调用格式异常，未执行操作。", 502)
             ids.add(call["id"])
         if isinstance(content, list):
-            content = "\n".join(p.get("text", "") for p in content if isinstance(p, dict))
+            content = "\n".join(p['text'] for p in content if isinstance(p, dict) and isinstance(p.get('text'), str))
         if content is None and calls:
             content = ""
         if not isinstance(content, str) or (not content.strip() and not calls):
@@ -783,6 +783,7 @@ class Manager:
         call_ids, write_failed = set(), False
         continuations = []
         backend = job.get('_evidence_backend')
+        completion_review = getattr(backend, 'completion_review', '') if job['action'] == 'background' else ''
         tools = backend.schemas() if backend else terminal_tools.schemas(
             writes=mode in {"approve", "auto", "command"},
             commands=mode in {'approve', 'command'} or job.get('_commands_auto', False))
@@ -820,6 +821,15 @@ class Manager:
                     continue
                 if continuations:
                     result['text'] = ''.join(continuations) + result.get('text', '')
+                if completion_review and not result.get('notice'):
+                    messages.extend([{'role': 'assistant', 'content': result.get('text', '')},
+                                     {'role': 'user', 'content': completion_review}])
+                    completion_review = ''
+                    continuations.clear()
+                    with self.lock:
+                        job.pop('_report_prefix', None)
+                        job['_review_draft'] = self._safe_text(config, result.get('text', ''))
+                    continue
                 return {**result, "usage": usage, "_history": "\n".join(history)}
             if any(call["id"] in call_ids for call in calls):
                 raise AIError("模型重复了工具调用标识，任务已停止，未执行本批操作。", 502)
@@ -926,6 +936,13 @@ class Manager:
                 if status != 'done' and job.get('_report_prefix'):
                     job['partial_text'] = job['_report_prefix'] + job.get('partial_text', '')
                 job.pop('_report_prefix', None)
+                draft = job.pop('_review_draft', '')
+                if draft and (status != 'done' or result.get('notice')):
+                    preserved = '复核前草稿（复核未完成，不代表已确认的解决方案）：\n\n' + draft + '\n\n'
+                    if status == 'done':
+                        result['text'] = preserved + result.get('text', '')
+                    else:
+                        job['partial_text'] = preserved + job.get('partial_text', '')
                 job["_active"] = False
                 if job["_cancel"].is_set():
                     status, detail, result = "cancelled", "任务已停止；已提交的远端操作可能仍在执行，请核对状态。", {}

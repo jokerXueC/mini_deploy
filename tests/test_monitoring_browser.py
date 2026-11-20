@@ -184,6 +184,27 @@ def test_image_cleanup_confirm_cancel_and_reference_status(dashboard, tmp_path, 
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
 
 
+@pytest.mark.parametrize('width,theme', [(1440, 'light'), (1440, 'dark'), (390, 'light'), (320, 'dark')])
+def test_image_policy_spacing_and_empty_feedback(dashboard, tmp_path, width, theme):
+    page, state, origin = dashboard
+    state['images'] = [{'id': 'sha256:' + 'a' * 64, 'tags': ['api:latest'], 'usage': 'in_use',
+                        'size': '180MB', 'created': '2026-11-18 10:00:00 +0000 UTC'}]
+    page.set_viewport_size({'width': width, 'height': 960})
+    page.goto(origin + '/ui?view=server')
+    page.evaluate('(theme) => applyTheme(theme)', theme)
+    playwright.expect(page.locator('#dockerImageCleanupPolicy')).to_contain_text('24 小时')
+    playwright.expect(page.locator('#dockerImageFeedback')).not_to_be_visible()
+    page.locator('.docker-images-panel').scroll_into_view_if_needed()
+    tools = page.locator('.docker-image-tools').bounding_box()
+    policy = page.locator('#dockerImageCleanupPolicy').bounding_box()
+    items = page.locator('#dockerImageList').bounding_box()
+    assert policy['y'] >= tools['y'] + tools['height'] + 11
+    assert items['y'] >= policy['y'] + policy['height'] + 11
+    assert page.locator('.docker-images-panel').evaluate('e => e.scrollWidth <= e.clientWidth')
+    page.screenshot(path=str(tmp_path / f'docker-image-spacing-{width}-{theme}.png'))
+    assert not state['errors']
+
+
 def connection_source(name="proxy", networks=None):
     return {"source": {"kind": "caddy", "mode": "docker", "container": name,
                 "config_path": "/etc/caddy/Caddyfile", "label": name},

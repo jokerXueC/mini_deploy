@@ -22,7 +22,7 @@ WINDOW = {'since': terminal_tools.LOG_TIME, 'until': terminal_tools.LOG_TIME}
 DEFINITIONS = [
     ('get_service_definition', '读取 systemd 服务的单元文件及覆盖配置，只读；常见凭据脱敏',
      {'service': {'type': 'string', 'maxLength': 220}}, ['service']),
-    ('get_container_mounts', '读取容器工作目录及挂载路径，用于定位宿主机上的源码和数据；不读取环境变量',
+    ('get_container_mounts', '读取容器镜像、工作目录、挂载及 Compose 项目/服务/部署文件顺序，用于核对实际部署入口；不读取环境变量',
      {'container': {'type': 'string', 'maxLength': 64}}, ['container']),
     ('get_container_resources', '读取指定容器已采集的资源上限、CPU 限流、内存余量、网络/磁盘速率、历史峰值、进程现场和事件；不执行命令',
      {'container': {'type': 'string', 'maxLength': 64}, 'period': {'type': 'string', 'enum': ['1h', '24h', '7d']}}, ['container']),
@@ -250,10 +250,28 @@ class Runtime:
             return {'service': service, 'output': server_operations.redact(text), 'truncated': limited}
         if name == 'get_container_mounts':
             text, limited = self.command(['docker', 'inspect', '--format',
-                '{"working_directory":{{json .Config.WorkingDir}},"mounts":{{json .Mounts}}}', args['container']], cancel)
+                '{"working_directory":{{json .Config.WorkingDir}},"mounts":{{json .Mounts}},'
+                '"image":{{json .Config.Image}},"compose":{'
+                '"project":{{json (index .Config.Labels "com.docker.compose.project")}},'
+                '"service":{{json (index .Config.Labels "com.docker.compose.service")}},'
+                '"working_directory":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},'
+                '"config_files_raw":{{json (index .Config.Labels "com.docker.compose.project.config_files")}}}}',
+                args['container']], cancel)
             if limited:
-                raise terminal_tools.ToolError('容器挂载信息不完整，请缩小目标后重试。')
-            return json.loads(text)
+                raise terminal_tools.ToolError('容器部署及挂载信息不完整，不能据此给出修改方案。')
+            try:
+                data = json.loads(text)
+                compose = data['compose']
+                raw = compose['config_files_raw'] or ''
+                if not isinstance(compose, dict) or not isinstance(raw, str):
+                    raise ValueError('invalid Compose metadata')
+                compose['config_files'] = [path.strip() for path in raw.split(',') if path.strip()]
+            except (ValueError, TypeError, KeyError) as exc:
+                raise terminal_tools.ToolError('容器部署信息无法解析，不能确认 Compose 文件或覆盖顺序。') from exc
+            return {**data, 'container': args['container'], 'notice':
+                    'Compose 标签记录容器创建时的部署入口；config_files 保留其记录顺序，路径本身含逗号时须另行核对。'
+                    '须继续读取相关文件核对当前内容、覆盖项及实际服务；标签不证明磁盘文件未变更或故障时配置相同。'
+                    '标签为空时不能推断容器由 Compose 部署。'}
         if name in terminal_tools.LOCAL_READ_TOOLS:
             text, limited = self.command(plan['argv'], cancel)
             lines = text.splitlines()

@@ -229,6 +229,35 @@ def test_general_files_and_service_definition_are_readonly_and_do_not_need_a_pro
             execute(runtime, name, args)
 
 
+@pytest.mark.parametrize('files', ['', '/srv/app/compose.yml', '/srv/app/compose.yml,/srv/app/compose.prod.yml'])
+def test_container_deployment_reports_ordered_compose_files_without_env_or_arbitrary_labels(runtime_evidence, files):
+    runtime = runtime_evidence.runtime
+    calls = []
+    def runner(argv, **options):
+        calls.append(argv)
+        return 0, json.dumps({'working_directory': '/app', 'mounts': [], 'image': 'app:prod', 'compose': {
+            'project': 'app' if files else '', 'service': 'api' if files else '',
+            'working_directory': '/srv/app' if files else '', 'config_files_raw': files}}), False
+    runtime.runner = runner
+    data = execute(runtime, 'get_container_mounts', {'container': CONTAINER})
+    assert data['compose']['config_files'] == (files.split(',') if files else [])
+    assert data['container'] == CONTAINER and data['image'] == 'app:prod'
+    assert '容器创建时' in data['notice']
+    assert calls[0][:3] == ['docker', 'inspect', '--format'] and calls[0][-1] == CONTAINER
+    template = calls[0][3]
+    assert 'com.docker.compose.project.config_files' in template
+    assert '.Env' not in template and '{{json .Config.Labels}}' not in template
+    assert runtime_evidence.docker_checks == [True]
+
+
+@pytest.mark.parametrize('text,truncated', [('broken', False), ('[]', False),
+    ('{"compose":null}', False), ('{"compose":{"config_files_raw":42}}', False), ('{}', True)])
+def test_incomplete_deployment_metadata_cannot_look_like_a_verified_single_file(runtime_evidence, text, truncated):
+    runtime_evidence.runtime.runner = lambda *args, **kwargs: (0, text, truncated)
+    with pytest.raises(terminal_tools.ToolError, match='部署'):
+        execute(runtime_evidence.runtime, 'get_container_mounts', {'container': CONTAINER})
+
+
 def test_container_files_use_daemon_pid_without_exec_and_reject_restarts_and_scoped_bypass(runtime_evidence, monkeypatch):
     runtime = runtime_evidence.runtime
     readers = []
